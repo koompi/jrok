@@ -65,7 +65,7 @@ const navigation: NavItemType[] = [
     href: '/dashboard/tunnels', 
     icon: Globe,
     description: 'Manage active tunnels',
-    badge: 'New'
+    // badge: 'New'
   },
   { 
     name: 'Domains', 
@@ -152,10 +152,10 @@ export default function DashboardLayout() {
 
       {/* Sidebar */}
       <aside className={cn(
-        "fixed inset-y-0 left-0 z-50 w-72 bg-card/95 backdrop-blur-xl border-r transform transition-transform duration-300 lg:translate-x-0",
+        "fixed inset-y-0 left-0 z-50 w-72 bg-card backdrop-blur-xl transform transition-transform duration-300 lg:translate-x-0",
         sidebarOpen ? "translate-x-0" : "-translate-x-full"
       )}>
-        <div className="flex flex-col h-full">
+        <div className="flex flex-col h-full border-r border-border">
           {/* Logo Header */}
           <div className="flex h-16 items-center justify-between px-4 border-b">
             <Link to="/dashboard" className="flex items-center gap-2 group">
@@ -244,7 +244,7 @@ export default function DashboardLayout() {
             </DropdownMenu>
           </div>
 
-          <Separator className="mx-4" />
+          <Separator />
 
           {/* Main Navigation */}
           <ScrollArea className="flex-1 px-4 py-4">
