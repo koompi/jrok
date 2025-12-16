@@ -13,14 +13,14 @@ export function TerminalDemo() {
         <span>✔ Installed @jrok/cli</span>
       </AnimatedSpan>
 
-      <TypingAnimation delay={3500}>&gt; jrok tunnel --port 3000 --domain myapp</TypingAnimation>
+      <TypingAnimation delay={3500}>&gt; jrok --port 3000</TypingAnimation>
 
       <AnimatedSpan delay={5000} className="text-blue-500">
-        <span>Tunnel started: https://myapp.jrok.koompi.cloud</span>
+        <span>Tunnel started: https://hangsiahong-7234986.jrok.koompi.cloud</span>
       </AnimatedSpan>
       
       <AnimatedSpan delay={5500} className="text-muted-foreground">
-        <span>Forwarding http://localhost:3000 -&gt; https://myapp.jrok.koompi.cloud</span>
+        <span>Forwarding http://localhost:3000 -&gt; https://hangsiahong-7234986.jrok.koompi.cloud</span>
       </AnimatedSpan>
     </Terminal>
   )

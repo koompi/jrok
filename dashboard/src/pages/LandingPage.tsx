@@ -15,6 +15,87 @@ import {
   ArrowRight 
 } from 'lucide-react';
 
+const FALLBACK_PLANS: Plan[] = [
+  {
+    id: 'free',
+    name: 'Free',
+    tier: 'free',
+    description: 'Perfect for hobbyists and testing',
+    price: 0,
+    currency: 'USD',
+    interval: 'month',
+    features: [
+      { name: '1 Tunnel', included: true },
+      { name: 'Random Domain', included: true },
+      { name: 'HTTP/HTTPS', included: true },
+      { name: 'Custom Domains', included: false },
+      { name: 'Priority Support', included: false },
+    ],
+    limits: {
+      maxTunnels: 1,
+      maxDomains: 0,
+      maxApiKeys: 1,
+      maxMembers: 1,
+      maxBandwidthGb: 1,
+      sslIncluded: true,
+      customDomains: false,
+      prioritySupport: false,
+    }
+  },
+  {
+    id: 'pro',
+    name: 'Pro',
+    tier: 'pro',
+    description: 'For professional developers',
+    price: 900, // $9.00
+    currency: 'USD',
+    interval: 'month',
+    features: [
+      { name: '10 Tunnels', included: true },
+      { name: 'Custom Domains', included: true },
+      { name: 'Reserved Domains', included: true },
+      { name: 'Team Management', included: true },
+      { name: 'Priority Support', included: true },
+    ],
+    limits: {
+      maxTunnels: 10,
+      maxDomains: 5,
+      maxApiKeys: 5,
+      maxMembers: 5,
+      maxBandwidthGb: 100,
+      sslIncluded: true,
+      customDomains: true,
+      prioritySupport: true,
+    }
+  },
+  {
+    id: 'enterprise',
+    name: 'Enterprise',
+    tier: 'enterprise',
+    description: 'For large teams and organizations',
+    price: 4900, // $49.00
+    currency: 'USD',
+    interval: 'month',
+    features: [
+      { name: 'Unlimited Tunnels', included: true },
+      { name: 'Unlimited Domains', included: true },
+      { name: 'SSO & Audit Logs', included: true },
+      { name: 'Dedicated Support', included: true },
+      { name: 'SLA', included: true },
+    ],
+    limits: {
+      maxTunnels: 999,
+      maxDomains: 999,
+      maxApiKeys: 999,
+      maxMembers: 999,
+      maxBandwidthGb: 1000,
+      sslIncluded: true,
+      customDomains: true,
+      prioritySupport: true,
+    }
+  }
+];
+
 export default function LandingPage() {
   const { isAuthenticated, login, isLoading } = useAuth();
 
@@ -22,6 +103,8 @@ export default function LandingPage() {
     queryKey: ['plans'],
     queryFn: () => api.getPlans(),
   });
+
+  const plans = (plansData?.plans && plansData.plans.length > 0) ? plansData.plans : FALLBACK_PLANS;
 
   if (isLoading) {
     return (
@@ -133,7 +216,7 @@ export default function LandingPage() {
                 <div className="space-y-1">
                   <h3 className="font-semibold">Start a Tunnel</h3>
                   <code className="relative rounded bg-muted px-[0.3rem] py-[0.2rem] font-mono text-sm">
-                    jrok tunnel --port 3000 --domain myapp
+                    jrok --port 3000
                   </code>
                 </div>
               </div>
@@ -147,13 +230,13 @@ export default function LandingPage() {
       </section>
 
       {/* Pricing Section */}
-      <section className="container py-24 bg-muted/50 rounded-b-3xl border  ">
+      <section className="container py-24 bg-muted/50 rounded-3xl border  ">
         <h2 className="text-3xl font-bold text-center mb-4">Simple, Transparent Pricing</h2>
         <p className="text-center text-muted-foreground mb-12">
           Start free and scale as you grow
         </p>
         <div className="grid md:grid-cols-4 gap-6 max-w-6xl mx-auto">
-          {plansData?.plans.map((plan) => (
+          {plans.map((plan) => (
             <Card key={plan.id} className={plan.tier === 'pro' ? 'border-primary shadow-lg' : ''}>
               <CardHeader>
                 <CardTitle>{plan.name}</CardTitle>
