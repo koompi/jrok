@@ -8,6 +8,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api, Plan } from '@/lib/api';
 import { ModeToggle } from '@/components/mode-toggle';
 import { GLSLHills } from '@/components/ui/glsl-hills';
+import { TerminalDemo } from '@/components/TerminalDemo';
 import { 
   Server, 
   Check, 
@@ -90,6 +91,60 @@ export default function LandingPage() {
 
       {/* Features Section */}
       <RuixenBentoCards />
+
+      {/* Quick Start Section */}
+      <section className="container py-24">
+        <div className="grid md:grid-cols-2 gap-12 items-center">
+          <div className="space-y-8">
+            <h2 className="text-3xl font-bold">Quick Start</h2>
+            <p className="text-xl text-muted-foreground">
+              Get started with Jrok in minutes
+            </p>
+            
+            <div className="space-y-6">
+              <div className="flex gap-4">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground font-bold">
+                  1
+                </div>
+                <div className="space-y-1">
+                  <h3 className="font-semibold">Create an API Key</h3>
+                  <p className="text-muted-foreground">
+                    Go to API Keys and create a new key for your application.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex gap-4">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground font-bold">
+                  2
+                </div>
+                <div className="space-y-1">
+                  <h3 className="font-semibold">Install the CLI</h3>
+                  <code className="relative rounded bg-muted px-[0.3rem] py-[0.2rem] font-mono text-sm">
+                    npm install -g @jrok/cli
+                  </code>
+                </div>
+              </div>
+
+              <div className="flex gap-4">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground font-bold">
+                  3
+                </div>
+                <div className="space-y-1">
+                  <h3 className="font-semibold">Start a Tunnel</h3>
+                  <code className="relative rounded bg-muted px-[0.3rem] py-[0.2rem] font-mono text-sm">
+                    jrok tunnel --port 3000 --domain myapp
+                  </code>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div className="relative">
+             <TerminalDemo />
+          </div>
+        </div>
+      </section>
 
       {/* Pricing Section */}
       <section className="container py-24 bg-muted/50 rounded-b-3xl border  ">

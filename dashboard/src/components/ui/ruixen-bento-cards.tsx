@@ -102,8 +102,7 @@ export default function RuixenBentoCards() {
             Why Choose Jrok?
           </h2>
           <p className="text-gray-600 dark:text-gray-400 text-lg">
-            Jrok gives you the tools to expose your local services securely to the internet. 
-            Perfect for webhooks, demos, and remote access.
+            Jrok allows you to securely expose your local application to the internet without requiring to have a public IP or complex network configurations.
           </p>
         </div>
       </div>
