@@ -6,9 +6,12 @@ import * as domainHandler from "./handlers/domainHandler";
 import * as authHandler from "./handlers/authHandler";
 import * as organizationHandler from "./handlers/organizationHandler";
 import * as adminHandler from "./handlers/adminHandler";
+import * as activityHandler from "./handlers/activityHandler";
+import * as statsHandler from "./handlers/statsHandler";
 import * as agentService from "./services/agentService";
 import * as vpsService from "./services/vpsService";
 import * as authService from "./services/authService";
+import * as statsService from "./services/statsService";
 import { connectDatabase, closeDatabase } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { initTelegram } from "./services/notificationService";
@@ -463,6 +466,99 @@ async function startServer() {
           return addCors(await adminHandler.handleUpdateOrgStatus(req, orgId));
         }
 
+        // ============ Dashboard Stats & Activity Routes ============
+
+        // Activity routes (require organization context)
+        if (path === "/activity" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await activityHandler.handleListActivity(req, authContext));
+        }
+
+        if (path === "/activity/recent" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await activityHandler.handleRecentActivity(req, authContext));
+        }
+
+        if (path === "/activity/summary" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await activityHandler.handleActivitySummary(req, authContext));
+        }
+
+        // Stats routes
+        if (path === "/stats/dashboard" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleDashboardStats(req, authContext));
+        }
+
+        if (path === "/stats/bandwidth" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleBandwidthStats(req, authContext));
+        }
+
+        // Enhanced resource routes
+        if (path === "/tunnels/enhanced" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleEnhancedTunnels(req, authContext));
+        }
+
+        if (path === "/agents/enhanced" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleEnhancedAgents(req, authContext));
+        }
+
+        if (path === "/domains/enhanced" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleEnhancedDomains(req, authContext));
+        }
+
         // ============ Legacy API Routes (require auth) ============
 
     // Auth check for legacy routes
@@ -592,7 +688,19 @@ async function startServer() {
       cleanupExpiredLimits();
     }, 10 * 60 * 1000);
 
-    console.log("✅ Auto-cleanup enabled (agents: 30s, tunnels: 5m, rate limits: 10m)");
+    // Aggregate daily stats at midnight (run every hour, only processes yesterday)
+    setInterval(async () => {
+      try {
+        const now = new Date();
+        if (now.getHours() === 0) { // Only run at midnight
+          await statsService.aggregateDailyStats();
+        }
+      } catch (error) {
+        console.error("Stats aggregation error:", error);
+      }
+    }, 60 * 60 * 1000);
+
+    console.log("✅ Auto-cleanup enabled (agents: 30s, tunnels: 5m, rate limits: 10m, stats: 1h)");
 
     // Graceful shutdown
     process.on("SIGINT", async () => {

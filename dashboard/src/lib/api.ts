@@ -212,6 +212,64 @@ class ApiClient {
       body: JSON.stringify({ status }),
     });
   }
+
+  // ============ Activity API ============
+
+  async getActivity(params?: {
+    category?: ActivityCategory;
+    startDate?: number;
+    endDate?: number;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ success: boolean; activities: ActivityLog[]; total: number; hasMore: boolean }> {
+    const searchParams = new URLSearchParams();
+    if (params?.category) searchParams.append('category', params.category);
+    if (params?.startDate) searchParams.append('startDate', params.startDate.toString());
+    if (params?.endDate) searchParams.append('endDate', params.endDate.toString());
+    if (params?.limit) searchParams.append('limit', params.limit.toString());
+    if (params?.offset) searchParams.append('offset', params.offset.toString());
+    
+    const query = searchParams.toString();
+    return this.request(`/activity${query ? `?${query}` : ''}`);
+  }
+
+  async getRecentActivity(limit: number = 10): Promise<{ success: boolean; activities: ActivityLog[] }> {
+    return this.request(`/activity/recent?limit=${limit}`);
+  }
+
+  async getActivitySummary(days: number = 7): Promise<{
+    success: boolean;
+    totalActivities: number;
+    byCategory: Record<ActivityCategory, number>;
+    byAction: Record<ActivityAction, number>;
+    recentActivity: ActivityLog[];
+  }> {
+    return this.request(`/activity/summary?days=${days}`);
+  }
+
+  // ============ Stats API ============
+
+  async getDashboardStats(): Promise<{ success: boolean; stats: DashboardStats }> {
+    return this.request('/stats/dashboard');
+  }
+
+  async getBandwidthUsage(period: 'day' | 'week' | 'month' = 'month'): Promise<BandwidthUsage & { success: boolean }> {
+    return this.request(`/stats/bandwidth?period=${period}`);
+  }
+
+  // ============ Enhanced Resources API ============
+
+  async getEnhancedTunnels(): Promise<{ success: boolean; tunnels: EnhancedTunnel[] }> {
+    return this.request('/tunnels/enhanced');
+  }
+
+  async getEnhancedAgents(): Promise<{ success: boolean; agents: EnhancedAgent[] }> {
+    return this.request('/agents/enhanced');
+  }
+
+  async getEnhancedDomains(): Promise<{ success: boolean; domains: EnhancedDomain[] }> {
+    return this.request('/domains/enhanced');
+  }
 }
 
 // Types
@@ -293,6 +351,152 @@ export interface PlanLimits {
   sslIncluded: boolean;
   customDomains: boolean;
   prioritySupport: boolean;
+}
+
+// Activity Types
+export type ActivityCategory = 
+  | "tunnels" 
+  | "domains" 
+  | "api_keys" 
+  | "agents" 
+  | "organization" 
+  | "auth"
+  | "billing";
+
+export type ActivityAction = 
+  | "created" 
+  | "updated" 
+  | "deleted" 
+  | "connected" 
+  | "disconnected"
+  | "renewed"
+  | "expired"
+  | "verified"
+  | "failed"
+  | "login"
+  | "logout";
+
+export interface ActivityLog {
+  id: string;
+  organizationId: string;
+  userId?: string;
+  category: ActivityCategory;
+  action: ActivityAction;
+  resourceType: string;
+  resourceId?: string;
+  resourceName?: string;
+  description: string;
+  metadata?: Record<string, unknown>;
+  ipAddress?: string;
+  createdAt: number;
+}
+
+// Enhanced Types
+export interface EnhancedTunnel {
+  id: string;
+  domain: string;
+  customDomain?: string;
+  agentId: string;
+  createdAt: number;
+  active: boolean;
+  status: "online" | "offline" | "error";
+  totalRequests: number;
+  bytesIn: number;
+  bytesOut: number;
+  lastRequestAt?: number;
+  avgResponseTime?: number;
+  errorRate?: number;
+}
+
+export interface EnhancedAgent {
+  id: string;
+  domain: string;
+  localPort: number;
+  localHost: string;
+  connectedAt: number;
+  lastHeartbeat: number;
+  active: boolean;
+  clientIp?: string;
+  platform?: string;
+  platformVersion?: string;
+  arch?: string;
+  cliVersion?: string;
+  cpuUsage?: number;
+  memoryUsage?: number;
+  signalStrength?: number;
+  tunnelCount?: number;
+  bytesIn?: number;
+  bytesOut?: number;
+  totalRequests?: number;
+}
+
+export interface DnsRecord {
+  type: "A" | "CNAME" | "TXT";
+  name: string;
+  value: string;
+  verified: boolean;
+}
+
+export interface EnhancedDomain {
+  id: string;
+  domain: string;
+  baseDomain: boolean;
+  certPath?: string;
+  certExpiry?: number;
+  certbotEmail: string;
+  createdAt: number;
+  active: boolean;
+  synced: boolean;
+  sslStatus: "valid" | "expiring" | "expired" | "pending" | "none";
+  dnsVerified: boolean;
+  dnsRecords?: DnsRecord[];
+  tunnelCount: number;
+}
+
+export interface DashboardStats {
+  tunnels: {
+    total: number;
+    online: number;
+    offline: number;
+  };
+  domains: {
+    total: number;
+    sslValid: number;
+    sslExpiring: number;
+  };
+  agents: {
+    total: number;
+    connected: number;
+  };
+  bandwidth: {
+    totalIn: number;
+    totalOut: number;
+    periodIn: number;
+    periodOut: number;
+  };
+  requests: {
+    total: number;
+    today: number;
+    thisWeek: number;
+  };
+  plan: {
+    name: string;
+    tier: string;
+    tunnelLimit: number;
+    domainLimit: number;
+    bandwidthLimit: number;
+    usedTunnels: number;
+    usedDomains: number;
+    usedBandwidth: number;
+  };
+}
+
+export interface BandwidthUsage {
+  totalIn: number;
+  totalOut: number;
+  totalRequests: number;
+  byTunnel: Array<{ tunnelId: string; bytesIn: number; bytesOut: number; requests: number }>;
+  timeline: Array<{ date: string; bytesIn: number; bytesOut: number; requests: number }>;
 }
 
 export const api = new ApiClient();
