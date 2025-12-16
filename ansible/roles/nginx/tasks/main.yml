@@ -1,0 +1,181 @@
+---
+# Ansible Role: Install and configure Nginx reverse proxy
+
+- name: Install Nginx
+  apt:
+    name: nginx
+    state: present
+  tags: ["nginx"]
+
+- name: Create Nginx configuration
+  copy:
+    content: |
+      user www-data;
+      worker_processes auto;
+      pid /run/nginx.pid;
+      error_log /var/log/nginx/error.log warn;
+      
+      events {
+        worker_connections 4096;
+        use epoll;
+      }
+      
+      http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+        
+        # Logging
+        access_log /var/log/nginx/access.log combined;
+        
+        # Performance
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        keepalive_timeout 65;
+        types_hash_max_size 2048;
+        client_max_body_size 20M;
+        
+        # Gzip compression
+        gzip on;
+        gzip_vary on;
+        gzip_min_length 1000;
+        gzip_types text/plain text/css text/xml text/javascript
+                   application/x-javascript application/xml+rss;
+        
+        # Security headers
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header Referrer-Policy "no-referrer-when-downgrade" always;
+        
+        # Rate limiting
+        limit_req_zone $binary_remote_addr zone=general:10m rate=10r/s;
+        limit_req_zone $binary_remote_addr zone=strict:10m rate=5r/s;
+        
+        # Upstream - load balancing across all app servers
+        upstream jrok {
+          {% for host in groups['jrok_servers'] %}
+          server {{ hostvars[host]['ansible_host'] }}:3000 max_fails=3 fail_timeout=30s;
+          {% endfor %}
+          keepalive 32;
+        }
+        
+        # Redirect HTTP to HTTPS
+        server {
+          listen 80;
+          server_name tunnel.{{ domain_name }} *.tunnel.{{ domain_name }};
+          
+          location /.well-known/acme-challenge/ {
+            root /var/www/certbot;
+          }
+          
+          location / {
+            return 301 https://$server_name$request_uri;
+          }
+        }
+        
+        # HTTPS server
+        server {
+          listen 443 ssl http2;
+          server_name tunnel.{{ domain_name }} *.tunnel.{{ domain_name }};
+          
+          # SSL certificates
+          ssl_certificate /etc/letsencrypt/live/tunnel.{{ domain_name }}/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/tunnel.{{ domain_name }}/privkey.pem;
+          
+          # SSL configuration
+          ssl_protocols TLSv1.2 TLSv1.3;
+          ssl_ciphers HIGH:!aNULL:!MD5;
+          ssl_prefer_server_ciphers on;
+          ssl_session_cache shared:SSL:10m;
+          ssl_session_timeout 10m;
+          
+          # Rate limiting
+          limit_req zone=general burst=20 nodelay;
+          
+          # WebSocket support for agents
+          location /ws/ {
+            proxy_pass http://jrok;
+            proxy_http_version 1.1;
+            
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            # Long timeout for WebSockets
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+          }
+
+          # Proxy settings
+          location / {
+            proxy_pass http://jrok;
+            proxy_http_version 1.1;
+            
+            # Headers
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Connection "";
+            
+            # Timeouts
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
+          }
+          
+          # Health check endpoint
+          location /health {
+            proxy_pass http://jrok/health;
+            access_log off;
+          }
+          
+          # API endpoints - stricter rate limiting
+          location /certificates/ {
+            limit_req zone=strict burst=5 nodelay;
+            proxy_pass http://jrok;
+            proxy_http_version 1.1;
+            
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Connection "";
+          }
+        }
+      }
+    dest: /etc/nginx/nginx.conf
+    backup: yes
+  tags: ["nginx"]
+
+- name: Test Nginx configuration
+  shell: nginx -t
+  register: nginx_test
+  tags: ["nginx"]
+
+- name: Show Nginx test result
+  debug:
+    msg: "{{ nginx_test.stdout }}"
+  tags: ["nginx"]
+
+- name: Start and enable Nginx service
+  systemd:
+    name: nginx
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  tags: ["nginx"]
+
+- name: Verify Nginx is running
+  shell: systemctl status nginx | head -10
+  register: nginx_status
+  tags: ["nginx"]
+
+- name: Show Nginx status
+  debug:
+    msg: "{{ nginx_status.stdout }}"
+  tags: ["nginx"]

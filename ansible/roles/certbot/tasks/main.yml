@@ -1,0 +1,132 @@
+---
+# Ansible Role: Install and configure Certbot with Cloudflare DNS
+
+- name: Install certbot and cloudflare plugin
+  apt:
+    name:
+      - certbot
+      - python3-certbot-dns-cloudflare
+    state: present
+  tags: ["certbot"]
+
+- name: Create certbot credentials directory
+  file:
+    path: /etc/letsencrypt/secrets
+    state: directory
+    mode: '0700'
+  tags: ["certbot"]
+
+- name: Create Cloudflare credentials file
+  copy:
+    content: |
+      # Cloudflare API Token
+      dns_cloudflare_api_token={{ cloudflare_token }}
+    dest: /etc/letsencrypt/secrets/cloudflare.ini
+    mode: '0600'
+  tags: ["certbot"]
+
+
+- name: Check if certificate already exists
+  stat:
+    path: "/etc/letsencrypt/live/{{ domain_name }}/fullchain.pem"
+  register: cert_exists
+  tags: ["certbot"]
+
+- name: Issue certificate with Certbot (DNS-based for wildcard)
+  shell: |
+    certbot certonly \
+      --dns-cloudflare \
+      --dns-cloudflare-credentials /etc/letsencrypt/secrets/cloudflare.ini \
+      --email {{ certbot_email }} \
+      --agree-tos \
+      --non-interactive \
+      -d "tunnel.{{ domain_name }}" \
+      -d "*.tunnel.{{ domain_name }}"
+  when: not cert_exists.stat.exists
+  tags: ["certbot"]
+  register: certbot_result
+  ignore_errors: yes
+
+- name: Create Certbot renewal hook directory
+  file:
+    path: /etc/letsencrypt/renewal-hooks/post
+    state: directory
+    mode: '0755'
+  tags: ["certbot"]
+
+- name: Create certificate MongoDB sync hook script
+  copy:
+    content: |
+      #!/bin/bash
+      # Certificate renewal hook: Sync to MongoDB after renewal
+      
+      DOMAIN="{{ domain_name }}"
+      API_KEY="{{ cert_sync_api_key }}"
+      CONTROL_SERVER="http://localhost:3000"
+      CERT_PATH="/etc/letsencrypt/live/$DOMAIN"
+      LOG_FILE="/var/log/certbot-sync.log"
+      
+      echo "$(date): Starting certificate sync to MongoDB" >> "$LOG_FILE"
+      
+      # Read certificate files
+      CERT=$(cat "$CERT_PATH/cert.pem")
+      CHAIN=$(cat "$CERT_PATH/chain.pem")
+      FULLCHAIN=$(cat "$CERT_PATH/fullchain.pem")
+      PRIVKEY=$(cat "$CERT_PATH/privkey.pem")
+      
+      # Base64 encode
+      CERT_B64=$(echo -n "$CERT" | base64 | tr -d '\n')
+      CHAIN_B64=$(echo -n "$CHAIN" | base64 | tr -d '\n')
+      FULLCHAIN_B64=$(echo -n "$FULLCHAIN" | base64 | tr -d '\n')
+      PRIVKEY_B64=$(echo -n "$PRIVKEY" | base64 | tr -d '\n')
+      
+      # Upload to MongoDB via API
+      RESPONSE=$(curl -s -X POST "$CONTROL_SERVER/certificates/upload" \
+        -H "Authorization: Bearer $API_KEY" \
+        -H "Content-Type: application/json" \
+        -d @- <<EOF
+      {
+        "domain": "$DOMAIN",
+        "certPem": "$CERT_B64",
+        "chainPem": "$CHAIN_B64",
+        "fullchainPem": "$FULLCHAIN_B64",
+        "privkeyPem": "$PRIVKEY_B64"
+      }
+      EOF
+      )
+      
+      if echo "$RESPONSE" | jq -e '.success' > /dev/null 2>&1; then
+        echo "$(date): ✅ Certificate synced to MongoDB" >> "$LOG_FILE"
+      else
+        echo "$(date): ❌ Failed to sync certificate: $RESPONSE" >> "$LOG_FILE"
+      fi
+    dest: /etc/letsencrypt/renewal-hooks/post/mongodb-sync.sh
+    mode: '0755'
+  tags: ["certbot"]
+
+- name: Setup Certbot auto-renewal timer
+  systemd:
+    name: certbot.timer
+    state: started
+    enabled: yes
+  tags: ["certbot"]
+
+- name: Verify Certbot installation
+  shell: certbot --version
+  register: certbot_version
+  tags: ["certbot"]
+
+- name: Show Certbot version
+  debug:
+    msg: "{{ certbot_version.stdout }}"
+  tags: ["certbot"]
+
+- name: List installed certificates
+  shell: certbot certificates
+  register: cert_list
+  tags: ["certbot"]
+
+- name: Show certificates
+  debug:
+    msg: "{{ cert_list.stdout }}"
+  tags: ["certbot"]

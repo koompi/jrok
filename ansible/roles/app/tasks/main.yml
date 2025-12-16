@@ -1,0 +1,171 @@
+---
+# Ansible Role: Deploy and run jrok application (without Docker)
+
+- name: Create application directory
+  file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags: ["app"]
+
+- name: Copy application code from staging
+  shell: |
+    if [ -d /root/jrok-staging ]; then
+      rsync -av --delete \
+        --exclude=node_modules \
+        --exclude=.git \
+        --exclude=.env \
+        /root/jrok-staging/ {{ app_dir }}/
+      echo "Code copied from staging"
+    else
+      echo "No staging directory found, skipping copy"
+    fi
+  args:
+    executable: /bin/bash
+  tags: ["app"]
+
+- name: Create data directory
+  file:
+    path: "{{ app_dir }}/data"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags: ["app"]
+
+- name: Create logs directory
+  file:
+    path: "{{ app_dir }}/logs"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags: ["app"]
+
+- name: Install unzip (required for Bun)
+  apt:
+    name: unzip
+    state: present
+  tags: ["app"]
+
+- name: Install Bun runtime
+  shell: |
+    if ! command -v /root/.bun/bin/bun &> /dev/null; then
+      curl -fsSL https://bun.sh/install | bash
+    fi
+  args:
+    executable: /bin/bash
+  tags: ["app"]
+
+- name: Verify Bun installation
+  shell: /root/.bun/bin/bun --version
+  register: bun_version
+  tags: ["app"]
+
+- name: Show Bun version
+  debug:
+    msg: "Bun version: {{ bun_version.stdout }}"
+  tags: ["app"]
+
+- name: Install dependencies with Bun
+  shell: |
+    cd {{ app_dir }}
+    /root/.bun/bin/bun install
+  args:
+    executable: /bin/bash
+  tags: ["app"]
+
+- name: Create systemd service file
+  copy:
+    content: |
+      [Unit]
+      Description=jrok - Reverse Tunnel Service
+      After=network.target nginx.service
+      Wants=nginx.service
+
+      [Service]
+      Type=simple
+      User=root
+      WorkingDirectory={{ app_dir }}
+      Environment=NODE_ENV=production
+      Environment=PORT=3000
+      Environment=MONGODB_URI={{ mongodb_uri }}
+      Environment=API_KEY={{ cert_sync_api_key }}
+      Environment=BASE_DOMAIN={{ domain_name }}
+      Environment=KOOMPI_CLIENT_ID={{ koompi_client_id }}
+      Environment=KOOMPI_CLIENT_SECRET={{ koompi_client_secret }}
+      Environment=KOOMPI_REDIRECT_URI={{ koompi_redirect_uri }}
+      Environment=VPS_HOST=localhost
+      Environment=VPS_NAME={{ ansible_hostname }}
+      Environment=NGINX_PATH=/etc/nginx/sites-available
+
+      ExecStart=/root/.bun/bin/bun run src/index.ts
+
+      Restart=always
+      RestartSec=5
+
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=jrok
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/jrok.service
+    owner: root
+    group: root
+    mode: '0644'
+  tags: ["app"]
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: yes
+  tags: ["app"]
+
+- name: Stop jrok service (if running)
+  systemd:
+    name: jrok
+    state: stopped
+  ignore_errors: yes
+  tags: ["app"]
+
+- name: Start jrok service
+  systemd:
+    name: jrok
+    state: started
+    enabled: yes
+  tags: ["app"]
+
+- name: Wait for application to start
+  wait_for:
+    port: 3000
+    delay: 3
+    timeout: 30
+  tags: ["app"]
+
+- name: Check application health
+  uri:
+    url: "http://localhost:3000/health"
+    method: GET
+    return_content: yes
+  register: health_check
+  retries: 3
+  delay: 2
+  tags: ["app", "verify"]
+
+- name: Show application status
+  debug:
+    msg: "✅ Application is running and healthy!"
+  when: health_check.status == 200
+  tags: ["app", "verify"]
+
+- name: Show service logs
+  shell: journalctl -u jrok --no-pager -n 30
+  register: service_logs
+  tags: ["app", "verify"]
+
+- name: Display service logs
+  debug:
+    msg: "{{ service_logs.stdout_lines }}"
+  tags: ["app", "verify"]

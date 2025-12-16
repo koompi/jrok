@@ -1,0 +1,13 @@
+{
+  "name": "jrok-test-app",
+  "version": "1.0.0",
+  "description": "Simple Hello World app to test jrok agent",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": ["jrok", "proxy", "test"],
+  "author": "",
+  "license": "MIT"
+}

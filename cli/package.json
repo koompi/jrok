@@ -1,0 +1,52 @@
+{
+  "name": "jrok",
+  "version": "2.0.0",
+  "description": "Expose local services (ports, Docker, Kubernetes) to the internet via secure reverse proxy",
+  "main": "dist/index.js",
+  "bin": {
+    "jrok": "./bin/jrok",
+    "jrok": "./bin/jrok"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node --minify --sourcemap",
+    "bundle": "bun build src/index.ts --compile --outfile bin/jrok-standalone",
+    "bundle:all": "npm run build && pkg dist/index.js --targets node18-linux-x64,node18-macos-x64,node18-win-x64 --output bin/jrok",
+    "dev": "bun run src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "pkg": {
+    "targets": [
+      "node18-linux-x64",
+      "node18-macos-x64",
+      "node18-win-x64"
+    ],
+    "outputPath": "bin"
+  },
+  "keywords": [
+    "reverse-proxy",
+    "tunnel",
+    "ngrok",
+    "localtunnel",
+    "docker",
+    "kubernetes",
+    "port-forwarding",
+    "cli"
+  ],
+  "author": "jrok",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/koompi/jrok.git",
+    "directory": "cli"
+  },
+  "bugs": {
+    "url": "https://github.com/koompi/jrok/issues"
+  },
+  "homepage": "https://github.com/koompi/jrok#readme",
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.11.0"
+  }
+}

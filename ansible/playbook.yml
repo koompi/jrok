@@ -1,0 +1,95 @@
+---
+# Ansible Playbook: Setup jrok on DigitalOcean VPS
+# Usage: ansible-playbook -i inventory.ini playbook.yml
+# Or with tags: ansible-playbook -i inventory.ini playbook.yml --tags "docker"
+
+- name: Setup jrok VPS servers
+  hosts: jrok_servers
+  become: yes
+  vars:
+    # Change these to match your setup
+    docker_version: "24.0"
+    certbot_email: "your-email@example.com"
+    cloudflare_token: "{{ lookup('env', 'CLOUDFLARE_TOKEN') }}"
+    mongodb_uri: "{{ lookup('env', 'MONGODB_URI') }}"
+    cert_sync_api_key: "{{ lookup('env', 'CERT_SYNC_API_KEY') }}"
+    koompi_client_id: "{{ lookup('env', 'KOOMPI_CLIENT_ID') }}"
+    koompi_client_secret: "{{ lookup('env', 'KOOMPI_CLIENT_SECRET') }}"
+    koompi_redirect_uri: "{{ lookup('env', 'KOOMPI_REDIRECT_URI') }}"
+
+  pre_tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      tags: ["always"]
+
+    - name: Install basic packages
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - jq
+          - openssl
+          - ufw
+          - python3-pip
+        state: present
+      tags: ["basic"]
+
+  roles:
+    - certbot
+    - nginx
+    - app
+
+  post_tasks:
+    - name: Setup firewall (UFW)
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - "22"
+        - "80"
+        - "443"
+        - "3000"
+      tags: ["firewall"]
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+      tags: ["firewall"]
+
+    - name: Verify services are running
+      shell: |
+        systemctl status jrok --no-pager
+      register: service_status
+      tags: ["verify"]
+      ignore_errors: yes
+
+    - name: Show running services
+      debug:
+        msg: "{{ service_status.stdout_lines }}"
+      tags: ["verify"]
+
+    - name: Show access URL
+      debug:
+        msg: |
+          ✅ Setup Complete!
+          
+          Access your service at:
+          - https://{{ domain_name }}
+          - http://{{ inventory_hostname }}:3000 (direct)
+          
+          SSH into server:
+          - ssh ubuntu@{{ inventory_hostname }}
+          
+          Check logs:
+          - docker-compose -f {{ app_dir }}/docker-compose.yml logs -f jrok
+          
+          Certificate status:
+          - sudo certbot certificates
+          
+          Renew certificate:
+          - sudo certbot renew --dry-run
+      tags: ["info"]

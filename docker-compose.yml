@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  # Bun jrok application
+  jrok:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jrok-app
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      # Mount Let's Encrypt certificates (read-only)
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      # Mount Nginx config directory (writable)
+      - /etc/nginx:/etc/nginx
+      # Mount app data directory
+      - ./data:/app/data
+      # Mount logs
+      - ./logs:/app/logs
+    environment:
+      # Application settings
+      - NODE_ENV=production
+      - MONGODB_URI=${MONGODB_URI:-mongodb+srv://user:pass@cluster.mongodb.net/jrok}
+      - CERT_SYNC_API_KEY=${CERT_SYNC_API_KEY:-change-me-32-chars}
+      - SERVER_ID=${SERVER_ID:-control-1}
+      - LOG_LEVEL=info
+      # Database settings (if using local MongoDB)
+      # - MONGODB_HOST=mongodb
+      # - MONGODB_PORT=27017
+    networks:
+      - jrok-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Local MongoDB (use MongoDB Atlas free tier instead)
+  # mongodb:
+  #   image: mongo:latest
+  #   container_name: jrok-mongodb
+  #   restart: always
+  #   ports:
+  #     - "27017:27017"
+  #   volumes:
+  #     - mongodb_data:/data/db
+  #   environment:
+  #     - MONGO_INITDB_ROOT_USERNAME=admin
+  #     - MONGO_INITDB_ROOT_PASSWORD=password
+  #   networks:
+  #     - jrok-net
+
+networks:
+  jrok-net:
+    driver: bridge
