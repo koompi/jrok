@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { useToast } from '@/components/ui/use-toast';
 import { Loader2, Check, X, Shield, Users, Building } from 'lucide-react';
+import AdminOrgsPage from './dashboard/AdminOrgsPage';
 
 export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'orgs'>('settings');
@@ -38,7 +39,7 @@ export default function AdminDashboard() {
 
       {activeTab === 'settings' && <SystemSettingsTab />}
       {activeTab === 'users' && <UsersTab />}
-      {activeTab === 'orgs' && <OrganizationsTab />}
+      {activeTab === 'orgs' && <AdminOrgsPage />}
     </div>
   );
 }
@@ -189,84 +190,4 @@ function UsersTab() {
   );
 }
 
-function OrganizationsTab() {
-  const [orgs, setOrgs] = useState<Organization[]>([]);
-  const [loading, setLoading] = useState(true);
-  const { toast } = useToast();
 
-  useEffect(() => {
-    loadOrgs();
-  }, []);
-
-  const loadOrgs = async () => {
-    try {
-      const data = await api.getAllOrganizations();
-      setOrgs(data.organizations);
-    } catch (error) {
-      toast({ title: "Error", description: "Failed to load organizations", variant: "destructive" });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const updateOrgStatus = async (orgId: string, status: string) => {
-    try {
-      await api.updateOrgStatus(orgId, status);
-      setOrgs(orgs.map(o => o.id === orgId ? { ...o, status: status as any, isActive: status === 'active' } : o));
-      toast({ title: "Success", description: "Organization status updated" });
-    } catch (error) {
-      toast({ title: "Error", description: "Failed to update status", variant: "destructive" });
-    }
-  };
-
-  if (loading) return <Loader2 className="animate-spin" />;
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Organization Management</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="rounded-md border">
-          <table className="w-full text-sm text-left">
-            <thead className="bg-muted/50">
-              <tr>
-                <th className="p-4 font-medium">Name</th>
-                <th className="p-4 font-medium">Slug</th>
-                <th className="p-4 font-medium">Status</th>
-                <th className="p-4 font-medium">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {orgs.map((org) => (
-                <tr key={org.id} className="border-t">
-                  <td className="p-4">{org.name}</td>
-                  <td className="p-4">{org.slug}</td>
-                  <td className="p-4">
-                    <span className={`px-2 py-1 rounded-full text-xs ${
-                      org.isActive ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-100' :
-                      'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-100'
-                    }`}>
-                      {org.isActive ? 'Active' : 'Disabled'}
-                    </span>
-                  </td>
-                  <td className="p-4 flex gap-2">
-                    {!org.isActive ? (
-                      <Button size="sm" variant="outline" onClick={() => updateOrgStatus(org.id, 'active')}>
-                        <Check className="w-4 h-4 mr-1" /> Enable
-                      </Button>
-                    ) : (
-                      <Button size="sm" variant="destructive" onClick={() => updateOrgStatus(org.id, 'disabled')}>
-                        <X className="w-4 h-4 mr-1" /> Disable
-                      </Button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}

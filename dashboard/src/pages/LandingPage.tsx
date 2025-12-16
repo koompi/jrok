@@ -9,6 +9,7 @@ import { api, Plan } from '@/lib/api';
 import { ModeToggle } from '@/components/mode-toggle';
 import { GLSLHills } from '@/components/ui/glsl-hills';
 import { TerminalDemo } from '@/components/TerminalDemo';
+import jrokLogo from '@/public/jrok-logo.png';
 import { 
   Server, 
   Check, 
@@ -117,10 +118,10 @@ export default function LandingPage() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted">
       {/* Header */}
-      <header className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-50">
+      <header className="border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-50">
         <div className="container flex h-16 items-center justify-between">
           <div className="flex items-center gap-2">
-            <Server className="h-6 w-6 text-primary" />
+            <img src={jrokLogo} alt="Jrok Logo" className="h-12 w-12" />
             <span className="text-xl font-bold">Jrok</span>
           </div>
           <nav className="flex items-center gap-4">
@@ -164,7 +165,7 @@ export default function LandingPage() {
               </Button>
             )}
             <Button size="lg" variant="outline" asChild>
-              <a href="https://github.com/yourusername/jrok" target="_blank" rel="noopener">
+              <a href="https://github.com/koompi/jrok" target="_blank" rel="noopener">
                 View on GitHub
               </a>
             </Button>
@@ -291,7 +292,7 @@ export default function LandingPage() {
       <footer className="border-t py-8">
         <div className="container flex flex-col md:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-2">
-            <Server className="h-5 w-5 text-muted-foreground" />
+            <img src={jrokLogo} alt="Jrok Logo" className="h-8 w-8 grayscale opacity-70" />
             <span className="text-muted-foreground">Jrok</span>
           </div>
           <p className="text-sm text-muted-foreground">

@@ -766,7 +766,7 @@ This is where the jrok application runs. It manages tunnels, domains, and synchr
 
 ```bash
 # Clone the jrok repository
-git clone https://github.com/yourusername/jrok.git
+git clone https://github.com/koompi/jrok.git
 cd jrok
 
 # Install Bun (if not already installed)
@@ -1080,7 +1080,7 @@ On **each VPS**:
 ```bash
 # Clone the project
 cd /opt
-git clone https://github.com/yourusername/jrok.git
+git clone https://github.com/koompi/jrok.git
 cd jrok
 
 # Install Bun
