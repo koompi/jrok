@@ -90,60 +90,119 @@ export async function registerCustomDomain(
 }
 
 /**
+ * Validate and sanitize domain name to prevent command injection
+ */
+function sanitizeDomain(domain: string): string {
+  // Only allow alphanumeric, dots, and hyphens
+  const sanitized = domain.toLowerCase().trim();
+  if (!/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(sanitized)) {
+    throw new Error("Invalid domain name format");
+  }
+  if (sanitized.length > 253) {
+    throw new Error("Domain name too long");
+  }
+  // Prevent directory traversal
+  if (sanitized.includes('..') || sanitized.includes('/')) {
+    throw new Error("Invalid characters in domain name");
+  }
+  return sanitized;
+}
+
+/**
+ * Validate email format
+ */
+function sanitizeEmail(email: string): string {
+  const sanitized = email.toLowerCase().trim();
+  // Basic email validation - no shell special characters
+  if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(sanitized)) {
+    throw new Error("Invalid email format");
+  }
+  if (sanitized.length > 254) {
+    throw new Error("Email too long");
+  }
+  return sanitized;
+}
+
+/**
+ * Validate Cloudflare token format
+ */
+function sanitizeCloudflareToken(token: string): string {
+  // Cloudflare API tokens are alphanumeric with underscores and hyphens
+  if (!/^[a-zA-Z0-9_-]+$/.test(token)) {
+    throw new Error("Invalid Cloudflare token format");
+  }
+  if (token.length > 100) {
+    throw new Error("Cloudflare token too long");
+  }
+  return token;
+}
+
+/**
  * Issue wildcard certificate using Certbot + Cloudflare DNS
+ * Uses argument arrays instead of shell string interpolation to prevent injection
  */
 async function issueCertificate(
   domain: string,
   email: string,
   cloudflareToken?: string
 ): Promise<string> {
-  const certPath = `/etc/letsencrypt/live/${domain}`;
-
-  let command: string;
+  // Sanitize all inputs
+  const safeDomain = sanitizeDomain(domain);
+  const safeEmail = sanitizeEmail(email);
+  const certPath = `/etc/letsencrypt/live/${safeDomain}`;
 
   if (cloudflareToken) {
-    // Use Cloudflare DNS for validation
-    command = `
-      mkdir -p /etc/letsencrypt/secrets/
-      echo "dns_cloudflare_api_token = ${cloudflareToken}" > /etc/letsencrypt/secrets/cloudflare_${domain}.ini
-      chmod 600 /etc/letsencrypt/secrets/cloudflare_${domain}.ini
-      
-      certbot certonly \
-        --dns-cloudflare \
-        --dns-cloudflare-credentials /etc/letsencrypt/secrets/cloudflare_${domain}.ini \
-        --email ${email} \
-        --agree-tos \
-        --non-interactive \
-        -d ${domain} \
-        -d '*.${domain}'
-    `.trim();
-  } else {
-    // Fallback: Use HTTP challenge (requires domain to resolve to VPS)
-    command = `
-      certbot certonly \
-        --standalone \
-        --email ${email} \
-        --agree-tos \
-        --non-interactive \
-        -d ${domain} \
-        -d '*.${domain}'
-    `.trim();
-  }
-
-  try {
-    const process = Bun.spawn(["bash", "-c", command]);
-    const exitCode = await process.exited;
-
+    const safeToken = sanitizeCloudflareToken(cloudflareToken);
+    
+    // Create credentials file securely
+    const credentialsPath = `/etc/letsencrypt/secrets/cloudflare_${safeDomain}.ini`;
+    const credentialsContent = `dns_cloudflare_api_token = ${safeToken}`;
+    
+    // Create directory
+    await Bun.spawn(["mkdir", "-p", "/etc/letsencrypt/secrets/"]).exited;
+    
+    // Write credentials file
+    await Bun.write(credentialsPath, credentialsContent);
+    
+    // Set permissions
+    await Bun.spawn(["chmod", "600", credentialsPath]).exited;
+    
+    // Run certbot with separate arguments (no shell interpolation)
+    const certbotProcess = Bun.spawn([
+      "certbot", "certonly",
+      "--dns-cloudflare",
+      "--dns-cloudflare-credentials", credentialsPath,
+      "--email", safeEmail,
+      "--agree-tos",
+      "--non-interactive",
+      "-d", safeDomain,
+      "-d", `*.${safeDomain}`
+    ]);
+    
+    const exitCode = await certbotProcess.exited;
     if (exitCode !== 0) {
       throw new Error(`Certbot failed with exit code ${exitCode}`);
     }
-
-    console.log(`✅ Certificate issued for ${domain}`);
-    return certPath;
-  } catch (error) {
-    console.error(`Failed to issue certificate for ${domain}:`, error);
-    throw error;
+  } else {
+    // Fallback: Use HTTP challenge (requires domain to resolve to VPS)
+    const certbotProcess = Bun.spawn([
+      "certbot", "certonly",
+      "--standalone",
+      "--email", safeEmail,
+      "--agree-tos",
+      "--non-interactive",
+      "-d", safeDomain,
+      "-d", `*.${safeDomain}`
+    ]);
+    
+    const exitCode = await certbotProcess.exited;
+    if (exitCode !== 0) {
+      throw new Error(`Certbot failed with exit code ${exitCode}`);
+    }
   }
+
+  console.log(`✅ Certificate issued for ${safeDomain}`);
+  return certPath;
 }
 
 /**

@@ -32,7 +32,6 @@ import {
   Settings,
   HelpCircle,
   Zap,
-  Terminal,
   BarChart3,
   Bell,
   Search,
@@ -73,12 +72,6 @@ const navigation: NavItemType[] = [
     href: '/dashboard/domains', 
     icon: Radio,
     description: 'Custom domains & SSL'
-  },
-  { 
-    name: 'Agents', 
-    href: '/dashboard/agents', 
-    icon: Terminal,
-    description: 'Connected agents'
   },
 ];
 

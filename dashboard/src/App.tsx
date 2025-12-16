@@ -9,7 +9,6 @@ import OrganizationDetailPage from './pages/dashboard/OrganizationDetailPage';
 import ApiKeysPage from './pages/dashboard/ApiKeysPage';
 import TunnelsPage from './pages/dashboard/TunnelsPage';
 import DomainsPage from './pages/dashboard/DomainsPage';
-import AgentsPage from './pages/dashboard/AgentsPage';
 import ActivityPage from './pages/dashboard/ActivityPage';
 import AdminDashboard from './pages/AdminDashboard';
 
@@ -68,7 +67,6 @@ function App() {
         <Route index element={<DashboardHome />} />
         <Route path="tunnels" element={<TunnelsPage />} />
         <Route path="domains" element={<DomainsPage />} />
-        <Route path="agents" element={<AgentsPage />} />
         <Route path="organizations" element={<OrganizationsPage />} />
         <Route path="organizations/:id" element={<OrganizationDetailPage />} />
         <Route path="api-keys" element={<ApiKeysPage />} />

@@ -233,12 +233,39 @@ async function startServer() {
         const method = req.method;
         const hostname = url.hostname;
 
-        // CORS headers for dashboard access
-        const corsHeaders = {
-          "Access-Control-Allow-Origin": req.headers.get("Origin") || "*",
+        // CORS configuration - whitelist allowed origins
+        const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173").split(",").map(o => o.trim());
+        const requestOrigin = req.headers.get("Origin");
+        
+        // Check if origin is allowed
+        const isAllowedOrigin = requestOrigin && (
+          allowedOrigins.includes(requestOrigin) || 
+          allowedOrigins.includes("*") ||
+          // Allow same-origin requests (no Origin header)
+          requestOrigin === `http://${hostname}` ||
+          requestOrigin === `https://${hostname}`
+        );
+        
+        const corsOrigin = isAllowedOrigin ? requestOrigin : allowedOrigins[0];
+        
+        const corsHeaders: Record<string, string> = {
+          "Access-Control-Allow-Origin": corsOrigin || allowedOrigins[0],
           "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
-          "Access-Control-Allow-Credentials": "true",
+          "Access-Control-Max-Age": "86400", // Cache preflight for 24 hours
+        };
+        
+        // Only allow credentials for whitelisted origins
+        if (isAllowedOrigin) {
+          corsHeaders["Access-Control-Allow-Credentials"] = "true";
+        }
+        
+        // Security headers
+        const securityHeaders: Record<string, string> = {
+          "X-Content-Type-Options": "nosniff",
+          "X-Frame-Options": "DENY",
+          "X-XSS-Protection": "1; mode=block",
+          "Referrer-Policy": "strict-origin-when-cross-origin",
         };
 
         // Handle preflight OPTIONS request
@@ -246,10 +273,10 @@ async function startServer() {
           return new Response(null, { status: 204, headers: corsHeaders });
         }
 
-        // Helper to add CORS headers to response
+        // Helper to add CORS and security headers to response
         const addCors = (response: Response): Response => {
           const newHeaders = new Headers(response.headers);
-          Object.entries(corsHeaders).forEach(([key, value]) => {
+          Object.entries({ ...corsHeaders, ...securityHeaders }).forEach(([key, value]) => {
             newHeaders.set(key, value);
           });
           return new Response(response.body, {
@@ -259,9 +286,9 @@ async function startServer() {
           });
         };
 
-        // Agent WebSocket upgrade (no auth needed for initial handshake)
+        // Agent WebSocket upgrade (authenticated)
         if (path === "/ws/agent" && req.headers.get("upgrade") === "websocket") {
-          return agentHandler.handleAgentUpgrade(req, server);
+          return await agentHandler.handleAgentUpgrade(req, server);
         }
 
         // Check if this is a tunnel domain request (extract subdomain)

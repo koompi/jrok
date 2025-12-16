@@ -366,7 +366,7 @@ export default function ActivityPage() {
           </CardHeader>
           <CardContent>
             <p className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">
-              {mockActivities.filter(a => a.status === 'success').length}
+              {activities.filter(a => a.status === 'success').length}
             </p>
             <p className="text-xs text-muted-foreground mt-1">in the last 7 days</p>
           </CardContent>
@@ -381,7 +381,7 @@ export default function ActivityPage() {
           </CardHeader>
           <CardContent>
             <p className="text-2xl font-bold text-amber-600 dark:text-amber-400">
-              {mockActivities.filter(a => a.status === 'warning').length}
+              {activities.filter(a => a.status === 'warning').length}
             </p>
             <p className="text-xs text-muted-foreground mt-1">require attention</p>
           </CardContent>
@@ -396,7 +396,7 @@ export default function ActivityPage() {
           </CardHeader>
           <CardContent>
             <p className="text-2xl font-bold text-destructive">
-              {mockActivities.filter(a => a.status === 'error').length}
+              {activities.filter(a => a.status === 'error').length}
             </p>
             <p className="text-xs text-muted-foreground mt-1">in the last 7 days</p>
           </CardContent>

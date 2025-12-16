@@ -17,7 +17,14 @@ const KOOMPI_CLIENT_ID = process.env.KOOMPI_CLIENT_ID || "";
 const KOOMPI_CLIENT_SECRET = process.env.KOOMPI_CLIENT_SECRET || "";
 const KOOMPI_REDIRECT_URI = process.env.KOOMPI_REDIRECT_URI || "http://localhost:3000/auth/callback";
 const KOOMPI_OAUTH_URL = "https://oauth.koompi.org";
-const JWT_SECRET = process.env.JWT_SECRET || "your-super-secret-jwt-key-change-this";
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error("❌ CRITICAL: JWT_SECRET environment variable is not set!");
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("JWT_SECRET must be set in production");
+  }
+}
+const EFFECTIVE_JWT_SECRET = JWT_SECRET || "dev-only-secret-do-not-use-in-production";
 const JWT_EXPIRES_IN = 7 * 24 * 60 * 60; // 7 days in seconds
 
 // Simple JWT implementation using crypto
@@ -35,7 +42,7 @@ function createJWT(payload: Record<string, unknown>, expiresIn: number): string 
   const base64Payload = Buffer.from(JSON.stringify(fullPayload)).toString("base64url");
   
   const signature = crypto
-    .createHmac("sha256", JWT_SECRET)
+    .createHmac("sha256", EFFECTIVE_JWT_SECRET)
     .update(`${base64Header}.${base64Payload}`)
     .digest("base64url");
 
@@ -56,7 +63,7 @@ function verifyJWT(token: string | null | undefined): Record<string, unknown> | 
     const [header, payload, signature] = parts;
     
     const expectedSignature = crypto
-      .createHmac("sha256", JWT_SECRET)
+      .createHmac("sha256", EFFECTIVE_JWT_SECRET)
       .update(`${header}.${payload}`)
       .digest("base64url");
 
@@ -452,4 +459,57 @@ export async function deactivateUser(userId: string): Promise<boolean> {
   await revokeAllUserSessions(userId);
 
   return result.modifiedCount > 0;
+}
+
+// Validate API key for agent WebSocket connections
+export async function validateApiKeyForAgent(rawKey: string): Promise<{
+  valid: boolean;
+  reason?: string;
+  organizationId?: string;
+  apiKeyId?: string;
+}> {
+  if (!rawKey || typeof rawKey !== 'string') {
+    return { valid: false, reason: "API key is required" };
+  }
+
+  // Must be a proper jrok_ prefixed key
+  if (!rawKey.startsWith('jrok_')) {
+    return { valid: false, reason: "Invalid API key format" };
+  }
+
+  const collections = getCollections();
+  
+  // Hash the key to compare with stored hash
+  const hash = crypto.createHash("sha256").update(rawKey).digest("hex");
+  
+  const apiKey = await collections.apiKeys.findOne({ 
+    key: hash, 
+    isActive: true 
+  });
+  
+  if (!apiKey) {
+    return { valid: false, reason: "Invalid or revoked API key" };
+  }
+  
+  // Check expiration
+  if (apiKey.expiresAt && apiKey.expiresAt < Date.now()) {
+    return { valid: false, reason: "API key has expired" };
+  }
+  
+  // Check if key has tunnel:create permission
+  if (!apiKey.permissions.includes('tunnel:create') && !apiKey.permissions.includes('*')) {
+    return { valid: false, reason: "API key does not have tunnel:create permission" };
+  }
+  
+  // Update last used timestamp
+  await collections.apiKeys.updateOne(
+    { id: apiKey.id },
+    { $set: { lastUsedAt: Date.now() } }
+  );
+  
+  return { 
+    valid: true, 
+    organizationId: apiKey.organizationId,
+    apiKeyId: apiKey.id
+  };
 }
