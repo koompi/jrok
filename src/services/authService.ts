@@ -259,7 +259,24 @@ export async function createSession(
   return session;
 }
 
-// Validate session token
+// ===== SESSION CACHE FOR PERFORMANCE =====
+interface SessionCacheEntry {
+  user: User;
+  timestamp: number;
+}
+
+const sessionCache = new Map<string, SessionCacheEntry>();
+const SESSION_CACHE_TTL = 60 * 1000; // 1 minute cache TTL (sessions change less frequently)
+
+export function invalidateSessionCache(sessionId?: string): void {
+  if (sessionId) {
+    sessionCache.delete(sessionId);
+  } else {
+    sessionCache.clear();
+  }
+}
+
+// Validate session token (with caching)
 export async function validateSessionToken(token: string | null | undefined): Promise<User | null> {
   if (!token) {
     return null;
@@ -270,15 +287,24 @@ export async function validateSessionToken(token: string | null | undefined): Pr
     return null;
   }
 
+  const sessionId = decoded.sessionId as string;
+  
+  // Check cache first
+  const cached = sessionCache.get(sessionId);
+  if (cached && Date.now() - cached.timestamp < SESSION_CACHE_TTL) {
+    return cached.user;
+  }
+
   const collections = getCollections();
   
   // Check if session exists and is valid
   const session = await collections.sessions.findOne({
-    id: decoded.sessionId,
+    id: sessionId,
     expiresAt: { $gt: Date.now() },
   });
 
   if (!session) {
+    sessionCache.delete(sessionId);
     return null;
   }
 
@@ -287,6 +313,11 @@ export async function validateSessionToken(token: string | null | undefined): Pr
     id: decoded.userId,
     isActive: true,
   }) as User | null;
+
+  // Cache the result
+  if (user) {
+    sessionCache.set(sessionId, { user, timestamp: Date.now() });
+  }
 
   return user;
 }
@@ -308,12 +339,50 @@ export async function getSession(token: string): Promise<AuthSession | null> {
   return session;
 }
 
-// Validate API key
+// ===== API KEY CACHE FOR PERFORMANCE =====
+// Avoids DB queries on every authenticated request
+
+interface ApiKeyCacheEntry {
+  apiKey: ApiKey;
+  organization: Organization;
+  timestamp: number;
+}
+
+const apiKeyCache = new Map<string, ApiKeyCacheEntry>();
+const API_KEY_CACHE_TTL = 5 * 60 * 1000; // 5 minutes cache TTL
+const LAST_USED_UPDATE_INTERVAL = 60 * 1000; // Update lastUsedAt every minute max
+const lastUsedUpdateTimes = new Map<string, number>();
+
+export function invalidateApiKeyCache(keyHash?: string): void {
+  if (keyHash) {
+    apiKeyCache.delete(keyHash);
+  } else {
+    apiKeyCache.clear();
+  }
+}
+
+// Validate API key (with caching)
 export async function validateApiKey(key: string): Promise<{ apiKey: ApiKey; organization: Organization } | null> {
   const collections = getCollections();
 
   // Hash the key for comparison
   const keyHash = crypto.createHash("sha256").update(key).digest("hex");
+
+  // Check cache first
+  const cached = apiKeyCache.get(keyHash);
+  if (cached && Date.now() - cached.timestamp < API_KEY_CACHE_TTL) {
+    // Update lastUsedAt only once per minute (not on every request!)
+    const lastUpdate = lastUsedUpdateTimes.get(keyHash) || 0;
+    if (Date.now() - lastUpdate > LAST_USED_UPDATE_INTERVAL) {
+      lastUsedUpdateTimes.set(keyHash, Date.now());
+      // Fire-and-forget update (don't await)
+      collections.apiKeys.updateOne(
+        { id: cached.apiKey.id },
+        { $set: { lastUsedAt: Date.now() } }
+      ).catch(() => {}); // Ignore errors for this non-critical update
+    }
+    return { apiKey: cached.apiKey, organization: cached.organization };
+  }
 
   const apiKey = await collections.apiKeys.findOne({
     key: keyHash,
@@ -328,12 +397,6 @@ export async function validateApiKey(key: string): Promise<{ apiKey: ApiKey; org
     return null;
   }
 
-  // Update last used
-  await collections.apiKeys.updateOne(
-    { id: apiKey.id },
-    { $set: { lastUsedAt: Date.now() } }
-  );
-
   // Get organization
   const organization = await collections.organizations.findOne({
     id: apiKey.organizationId,
@@ -344,7 +407,34 @@ export async function validateApiKey(key: string): Promise<{ apiKey: ApiKey; org
     return null;
   }
 
+  // Cache the result
+  apiKeyCache.set(keyHash, { apiKey, organization, timestamp: Date.now() });
+  
+  // Update lastUsedAt (fire-and-forget)
+  lastUsedUpdateTimes.set(keyHash, Date.now());
+  collections.apiKeys.updateOne(
+    { id: apiKey.id },
+    { $set: { lastUsedAt: Date.now() } }
+  ).catch(() => {});
+
   return { apiKey, organization };
+}
+
+// ===== USER ORGANIZATION CACHE =====
+interface UserOrgCacheEntry {
+  organization: Organization | null;
+  timestamp: number;
+}
+
+const userOrgCache = new Map<string, UserOrgCacheEntry>();
+const USER_ORG_CACHE_TTL = 2 * 60 * 1000; // 2 minutes cache TTL
+
+export function invalidateUserOrgCache(userId?: string): void {
+  if (userId) {
+    userOrgCache.delete(userId);
+  } else {
+    userOrgCache.clear();
+  }
 }
 
 // Authenticate request (supports both session token and API key)
@@ -363,14 +453,25 @@ export async function authenticateRequest(req: Request): Promise<AuthContext | n
     const user = await validateSessionToken(token);
     
     if (user) {
-      // Fetch user's organization (they may be owner or member)
-      const organization = await collections.organizations.findOne({
-        $or: [
-          { ownerId: user.id },
-          { "members.userId": user.id }
-        ],
-        isActive: true,
-      }) as Organization | null;
+      // Check cache for user's organization
+      let organization: Organization | null = null;
+      const cached = userOrgCache.get(user.id);
+      
+      if (cached && Date.now() - cached.timestamp < USER_ORG_CACHE_TTL) {
+        organization = cached.organization;
+      } else {
+        // Fetch user's organization (they may be owner or member)
+        organization = await collections.organizations.findOne({
+          $or: [
+            { ownerId: user.id },
+            { "members.userId": user.id }
+          ],
+          isActive: true,
+        }) as Organization | null;
+        
+        // Cache the result
+        userOrgCache.set(user.id, { organization, timestamp: Date.now() });
+      }
 
       return {
         user,

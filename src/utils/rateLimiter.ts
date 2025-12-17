@@ -34,6 +34,47 @@ const DOMAIN_CERT_LIMIT: RateLimitConfig = {
 };
 
 /**
+ * Auth rate limiter config for login/callback endpoints (prevent brute force)
+ */
+const AUTH_LIMIT: RateLimitConfig = {
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  maxRequestsPerWindow: 20, // Max 20 auth attempts per 15 min per IP
+};
+
+// Store for auth rate limit entries
+const authLimiter = new Map<string, RateLimitEntry>();
+
+/**
+ * Check if auth request is rate limited (per IP)
+ * Returns null if allowed, error message if rate limited
+ */
+export function checkAuthRateLimit(ip: string): null | { retryAfter: number } {
+  const now = Date.now();
+  const key = `auth:${ip}`;
+
+  let entry = authLimiter.get(key);
+
+  if (!entry || now > entry.resetTime) {
+    // Create new entry
+    entry = {
+      count: 1,
+      resetTime: now + AUTH_LIMIT.windowMs,
+    };
+    authLimiter.set(key, entry);
+    return null;
+  }
+
+  entry.count++;
+
+  if (entry.count > AUTH_LIMIT.maxRequestsPerWindow) {
+    const retryAfter = Math.ceil((entry.resetTime - now) / 1000);
+    return { retryAfter };
+  }
+
+  return null;
+}
+
+/**
  * Check if request is rate limited (global per IP)
  * Returns null if allowed, error message if rate limited
  */
@@ -137,6 +178,7 @@ export function cleanupExpiredLimits(): void {
   const now = Date.now();
   let globalCleanedCount = 0;
   let domainCleanedCount = 0;
+  let authCleanedCount = 0;
 
   // Clean global limiter
   for (const [key, entry] of globalLimiter.entries()) {
@@ -154,9 +196,17 @@ export function cleanupExpiredLimits(): void {
     }
   }
 
-  if (globalCleanedCount > 0 || domainCleanedCount > 0) {
+  // Clean auth limiter
+  for (const [key, entry] of authLimiter.entries()) {
+    if (now > entry.resetTime) {
+      authLimiter.delete(key);
+      authCleanedCount++;
+    }
+  }
+
+  if (globalCleanedCount > 0 || domainCleanedCount > 0 || authCleanedCount > 0) {
     console.log(
-      `🧹 Rate limit cleanup: ${globalCleanedCount} global, ${domainCleanedCount} domain entries`
+      `🧹 Rate limit cleanup: ${globalCleanedCount} global, ${domainCleanedCount} domain, ${authCleanedCount} auth entries`
     );
   }
 }

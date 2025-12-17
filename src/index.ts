@@ -349,12 +349,31 @@ async function startServer() {
         }
 
         // Auth routes - must be before tunnel domain check
+        // Apply rate limiting to prevent brute force attacks
         if (path === "/auth/login" && method === "GET") {
+          const { checkAuthRateLimit, getClientIp } = await import("./utils/rateLimiter");
+          const clientIp = getClientIp(req);
+          const rateLimit = checkAuthRateLimit(clientIp);
+          if (rateLimit) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Too many requests. Please try again later." }),
+              { status: 429, headers: { "Content-Type": "application/json", "Retry-After": String(rateLimit.retryAfter) } }
+            ));
+          }
           return addCors(authHandler.handleGetLoginUrl());
         }
 
         // POST callback - called by dashboard after OAuth redirect
         if (path === "/auth/callback" && method === "POST") {
+          const { checkAuthRateLimit, getClientIp } = await import("./utils/rateLimiter");
+          const clientIp = getClientIp(req);
+          const rateLimit = checkAuthRateLimit(clientIp);
+          if (rateLimit) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Too many requests. Please try again later." }),
+              { status: 429, headers: { "Content-Type": "application/json", "Retry-After": String(rateLimit.retryAfter) } }
+            ));
+          }
           return addCors(await authHandler.handleOAuthCallback(req));
         }
 
