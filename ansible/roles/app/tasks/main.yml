@@ -17,6 +17,7 @@
         --exclude=node_modules \
         --exclude=.git \
         --exclude=.env \
+        --exclude=cli \
         /root/jrok-staging/ {{ app_dir }}/
       echo "Code copied from staging"
     else
@@ -94,6 +95,7 @@
       Environment=MONGODB_URI={{ mongodb_uri }}
       Environment=API_KEY={{ cert_sync_api_key }}
       Environment=BASE_DOMAIN={{ domain_name }}
+      Environment=JWT_SECRET={{ jwt_secret }}
       Environment=KOOMPI_CLIENT_ID={{ koompi_client_id }}
       Environment=KOOMPI_CLIENT_SECRET={{ koompi_client_secret }}
       Environment=KOOMPI_REDIRECT_URI={{ koompi_redirect_uri }}
