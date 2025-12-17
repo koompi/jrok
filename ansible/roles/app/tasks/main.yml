@@ -102,6 +102,7 @@
       Environment=VPS_HOST=localhost
       Environment=VPS_NAME={{ ansible_hostname }}
       Environment=NGINX_PATH=/etc/nginx/sites-available
+      Environment=DASHBOARD_URL={{ dashboard_url }}
 
       ExecStart=/root/.bun/bin/bun run src/index.ts
 
