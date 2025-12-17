@@ -13,13 +13,20 @@ NC='\033[0m' # No Color
 echo -e "${BLUE}Cleaning previous builds...${NC}"
 rm -rf dist/ bin/jrok-*
 
-# Build JS bundle
-echo -e "${BLUE}Building JavaScript bundle...${NC}"
-bun build src/index.ts --outdir dist --target node --minify --sourcemap
-echo -e "${GREEN}✓ JavaScript bundle created${NC}"
+# Create directories
+mkdir -p dist bin
 
-# Create bin directory
-mkdir -p bin
+# Build JS bundle using esbuild for proper CommonJS output (pkg compatible)
+echo -e "${BLUE}Building JavaScript bundle...${NC}"
+npx esbuild src/index.ts \
+  --bundle \
+  --platform=node \
+  --target=node18 \
+  --format=cjs \
+  --outfile=dist/index.js \
+  --minify \
+  --external:fsevents
+echo -e "${GREEN}✓ JavaScript bundle created${NC}"
 
 # Build for all platforms using pkg
 echo -e "${BLUE}Building binaries for all platforms...${NC}"

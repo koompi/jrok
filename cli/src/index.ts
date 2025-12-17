@@ -10,7 +10,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
 
 // Config file path
 const CONFIG_DIR = join(homedir(), '.jrok');
@@ -303,10 +303,11 @@ async function connectAgent(config: ClientConfig): Promise<void> {
 
 async function listServices(config: { serverUrl: string; authToken: string }): Promise<void> {
   try {
-    const response = await fetch(`${config.serverUrl}/api/services`, {
+    const response = await fetch(`${config.serverUrl}/tunnels`, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${config.authToken}`,
+        'X-API-Key': config.authToken,
       },
     });
 
@@ -314,41 +315,44 @@ async function listServices(config: { serverUrl: string; authToken: string }): P
       throw new Error(`API error: ${response.status} ${response.statusText}`);
     }
 
-    const services: ServiceInfo[] = await response.json();
+    const data = await response.json();
+    const tunnels = data.tunnels || data || [];
 
-    if (services.length === 0) {
-      console.log("📋 No connected services");
+    if (tunnels.length === 0) {
+      console.log("📋 No active tunnels");
+      console.log("💡 Create one with: jrok connect --domain myapp --port 3000");
       return;
     }
 
-    console.log("\n📋 Connected Services:\n");
-    console.log("Domain".padEnd(30), "Type".padEnd(15), "Target".padEnd(30), "Status");
-    console.log("─".repeat(90));
+    console.log("\n📋 Active Tunnels:\n");
+    console.log("Domain".padEnd(35), "Local".padEnd(20), "Status".padEnd(12), "Created");
+    console.log("─".repeat(85));
 
-    services.forEach((service) => {
-      const status = service.connected ? "✅ Online" : "❌ Offline";
-      const type = service.type === 'docker-swarm' ? 'Docker' : 
-                   service.type === 'kubernetes' ? 'K8s' : 'Port';
+    tunnels.forEach((tunnel: any) => {
+      const status = tunnel.active ? "✅ Online" : "❌ Offline";
+      const local = `${tunnel.localHost || 'localhost'}:${tunnel.localPort}`;
+      const created = tunnel.createdAt ? new Date(tunnel.createdAt).toLocaleDateString() : 'N/A';
       console.log(
-        service.domain.padEnd(30),
-        type.padEnd(15),
-        service.target.padEnd(30),
-        status
+        (tunnel.domain || tunnel.subdomain || 'unknown').padEnd(35),
+        local.padEnd(20),
+        status.padEnd(12),
+        created
       );
     });
     console.log("");
   } catch (error) {
-    console.error("❌ Error listing services:", error instanceof Error ? error.message : error);
+    console.error("❌ Error listing tunnels:", error instanceof Error ? error.message : error);
     process.exit(1);
   }
 }
 
 async function disconnectService(config: { serverUrl: string; domain: string; authToken: string }): Promise<void> {
   try {
-    const response = await fetch(`${config.serverUrl}/api/services/${config.domain}`, {
+    const response = await fetch(`${config.serverUrl}/tunnels/${config.domain}`, {
       method: 'DELETE',
       headers: {
         'Authorization': `Bearer ${config.authToken}`,
+        'X-API-Key': config.authToken,
       },
     });
 
@@ -356,9 +360,9 @@ async function disconnectService(config: { serverUrl: string; domain: string; au
       throw new Error(`API error: ${response.status} ${response.statusText}`);
     }
 
-    console.log(`✅ Disconnected service: ${config.domain}`);
+    console.log(`✅ Tunnel disconnected: ${config.domain}`);
   } catch (error) {
-    console.error("❌ Error disconnecting service:", error instanceof Error ? error.message : error);
+    console.error("❌ Error disconnecting tunnel:", error instanceof Error ? error.message : error);
     process.exit(1);
   }
 }
@@ -368,15 +372,19 @@ async function disconnectService(config: { serverUrl: string; domain: string; au
 async function listOrganizations(serverUrl: string, authToken: string): Promise<void> {
   try {
     const response = await fetch(`${serverUrl}/organizations`, {
-      headers: { 'Authorization': `Bearer ${authToken}` },
+      headers: { 
+        'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
+      },
     });
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || `API error: ${response.status}`);
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
     }
 
-    const orgs: Organization[] = await response.json();
+    const data = await response.json();
+    const orgs = data.organizations || data || [];
 
     if (orgs.length === 0) {
       console.log("📋 No organizations found");
@@ -385,15 +393,15 @@ async function listOrganizations(serverUrl: string, authToken: string): Promise<
     }
 
     console.log("\n📋 Your Organizations:\n");
-    console.log("ID".padEnd(26), "Name".padEnd(25), "Slug".padEnd(20), "Plan");
+    console.log("ID".padEnd(26), "Name".padEnd(25), "Slug".padEnd(20), "Role");
     console.log("─".repeat(85));
 
-    orgs.forEach((org) => {
+    orgs.forEach((org: any) => {
       console.log(
-        org._id.padEnd(26),
+        (org.id || org._id).padEnd(26),
         org.name.slice(0, 24).padEnd(25),
         org.slug.slice(0, 19).padEnd(20),
-        org.plan || 'free'
+        org.role || 'member'
       );
     });
     console.log("");
@@ -409,6 +417,7 @@ async function createOrganization(serverUrl: string, authToken: string, name: st
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ name }),
@@ -416,17 +425,18 @@ async function createOrganization(serverUrl: string, authToken: string, name: st
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || `API error: ${response.status}`);
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
     }
 
-    const org: Organization = await response.json();
+    const data = await response.json();
+    const org = data.organization || data;
     console.log(`✅ Organization created: ${org.name}`);
-    console.log(`🆔 ID: ${org._id}`);
+    console.log(`🆔 ID: ${org.id || org._id}`);
     console.log(`🔗 Slug: ${org.slug}`);
     
     // Save to config
     const config = loadStoredConfig();
-    config.organizationId = org._id;
+    config.organizationId = org.id || org._id;
     config.organizationName = org.name;
     saveStoredConfig(config);
     console.log(`💾 Set as default organization`);
@@ -448,15 +458,19 @@ async function setDefaultOrganization(orgId: string): Promise<void> {
 async function listApiKeys(serverUrl: string, authToken: string, orgId: string): Promise<void> {
   try {
     const response = await fetch(`${serverUrl}/organizations/${orgId}/api-keys`, {
-      headers: { 'Authorization': `Bearer ${authToken}` },
+      headers: { 
+        'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
+      },
     });
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || `API error: ${response.status}`);
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
     }
 
-    const keys: ApiKey[] = await response.json();
+    const data = await response.json();
+    const keys = data.apiKeys || data || [];
 
     if (keys.length === 0) {
       console.log("🔑 No API keys found");
@@ -465,16 +479,15 @@ async function listApiKeys(serverUrl: string, authToken: string, orgId: string):
     }
 
     console.log("\n🔑 API Keys:\n");
-    console.log("Prefix".padEnd(15), "Name".padEnd(25), "Permissions".padEnd(25), "Last Used");
-    console.log("─".repeat(80));
+    console.log("ID".padEnd(26), "Prefix".padEnd(16), "Name".padEnd(20), "Permissions");
+    console.log("─".repeat(85));
 
-    keys.forEach((key) => {
-      const lastUsed = key.lastUsedAt ? new Date(key.lastUsedAt).toLocaleDateString() : 'Never';
+    keys.forEach((key: any) => {
       console.log(
-        key.keyPrefix.padEnd(15),
-        key.name.slice(0, 24).padEnd(25),
-        key.permissions.join(', ').slice(0, 24).padEnd(25),
-        lastUsed
+        (key.id || key._id).padEnd(26),
+        (key.keyPrefix || 'jrok_...').padEnd(16),
+        key.name.slice(0, 19).padEnd(20),
+        (key.permissions || []).join(', ').slice(0, 20)
       );
     });
     console.log("");
@@ -496,6 +509,7 @@ async function createApiKey(
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ name, permissions }),
@@ -503,18 +517,19 @@ async function createApiKey(
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || `API error: ${response.status}`);
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
     }
 
-    const result = await response.json();
+    const data = await response.json();
+    const rawKey = data.rawKey || data.key;
     
     console.log(`\n✅ API Key created: ${name}`);
     console.log(`\n⚠️  IMPORTANT: Save this key now! It will only be shown once.\n`);
-    console.log(`🔑 API Key: ${result.key}`);
+    console.log(`🔑 API Key: ${rawKey}`);
     console.log(`\nTo use this key:`);
-    console.log(`  jrok config --auth ${result.key}`);
+    console.log(`  jrok config --auth ${rawKey}`);
     console.log(`  # or`);
-    console.log(`  export JROK_AUTH=${result.key}`);
+    console.log(`  export JROK_AUTH=${rawKey}`);
     console.log("");
   } catch (error) {
     console.error("❌ Error creating API key:", error instanceof Error ? error.message : error);
@@ -526,12 +541,15 @@ async function revokeApiKey(serverUrl: string, authToken: string, orgId: string,
   try {
     const response = await fetch(`${serverUrl}/organizations/${orgId}/api-keys/${keyId}`, {
       method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${authToken}` },
+      headers: { 
+        'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
+      },
     });
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || `API error: ${response.status}`);
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
     }
 
     console.log(`✅ API key revoked: ${keyId}`);
@@ -590,13 +608,23 @@ async function whoami(serverUrl: string, authToken: string): Promise<void> {
       
       // Try to validate by making a request
       const response = await fetch(`${serverUrl}/organizations`, {
-        headers: { 'Authorization': `Bearer ${authToken}` },
+        headers: { 
+          'Authorization': `Bearer ${authToken}`,
+          'X-API-Key': authToken,
+        },
       });
       
       if (response.ok) {
-        const orgs = await response.json();
+        const data = await response.json();
+        const orgs = data.organizations || data || [];
         console.log(`✅ API Key is valid`);
         console.log(`📋 Access to ${orgs.length} organization(s)`);
+        if (orgs.length > 0) {
+          console.log(`\nOrganizations:`);
+          orgs.forEach((org: any) => {
+            console.log(`  - ${org.name} (${org.slug})`);
+          });
+        }
       } else {
         console.log(`❌ API Key is invalid or expired`);
       }
@@ -610,11 +638,13 @@ async function whoami(serverUrl: string, authToken: string): Promise<void> {
         throw new Error('Invalid session token');
       }
       
-      const user = await response.json();
+      const data = await response.json();
+      const user = data.user || data;
       console.log("\n👤 Current User:\n");
-      console.log(`Name:  ${user.name}`);
-      console.log(`Email: ${user.email}`);
-      console.log(`Role:  ${user.role}`);
+      console.log(`Name:   ${user.fullname || user.name}`);
+      console.log(`Email:  ${user.email}`);
+      console.log(`Role:   ${user.role}`);
+      console.log(`Status: ${user.status}`);
       if (user.avatarUrl) {
         console.log(`Avatar: ${user.avatarUrl}`);
       }
