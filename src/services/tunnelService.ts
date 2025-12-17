@@ -2,6 +2,7 @@ import type { Tunnel, TunnelConfig, CreateTunnelRequest } from "../types/index";
 import * as db from "../utils/database";
 import * as agentService from "./agentService";
 import * as vpsService from "./vpsService";
+import * as activityService from "./activityService";
 import { generateId } from "../utils/helpers";
 import { generateNginxConfig, setConfig as setNginxConfig } from "../utils/nginxConfig";
 import { writeFile, mkdir } from "fs/promises";
@@ -185,6 +186,13 @@ export async function createTunnel(request: CreateTunnelRequest, agentId: string
 
     // Save to database
     await db.createTunnel(tunnel);
+
+    // Log activity for tunnel creation
+    if (organizationId) {
+      activityService.logTunnelCreated(organizationId, undefined, tunnel.id, tunnel.domain).catch((err) => {
+        console.error("Failed to log tunnel created activity:", err);
+      });
+    }
 
     return tunnel;
   } catch (error) {

@@ -62,14 +62,15 @@ export async function handleListTunnels(req: Request): Promise<Response> {
   try {
     let tunnels;
     
-    if (authContext.isApiKeyAuth && authContext.organization) {
-      // API key auth - only show tunnels for this organization
+    // Always filter by organization if available (both API key and session auth)
+    if (authContext.organization) {
       tunnels = await tunnelService.listTunnelsByOrganization(authContext.organization.id);
-    } else if (authContext.user) {
-      // User auth - show all tunnels (or filter by user's orgs)
+    } else if (authContext.user?.role === 'super_admin') {
+      // Super admin can see all tunnels
       tunnels = await tunnelService.listTunnels();
     } else {
-      return jsonResponse({ success: false, message: "Unauthorized" }, 401);
+      // No organization context and not super admin - no tunnels visible
+      tunnels = [];
     }
 
     return jsonResponse({

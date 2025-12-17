@@ -460,6 +460,11 @@ async function startServer() {
           return addCors(await adminHandler.handleUpdateOrgStatus(req, orgId));
         }
 
+        // Admin cleanup duplicates
+        if (path === "/admin/cleanup-tunnels" && method === "POST") {
+          return addCors(await adminHandler.handleCleanupTunnels(req));
+        }
+
         // ============ Dashboard Stats & Activity Routes ============
 
         // Activity routes (require organization context)

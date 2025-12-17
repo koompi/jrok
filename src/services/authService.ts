@@ -355,14 +355,26 @@ export async function authenticateRequest(req: Request): Promise<AuthContext | n
     return null;
   }
 
+  const collections = getCollections();
+
   // Check for Bearer token (session)
   if (authHeader.startsWith("Bearer ")) {
     const token = authHeader.slice(7);
     const user = await validateSessionToken(token);
     
     if (user) {
+      // Fetch user's organization (they may be owner or member)
+      const organization = await collections.organizations.findOne({
+        $or: [
+          { ownerId: user.id },
+          { "members.userId": user.id }
+        ],
+        isActive: true,
+      }) as Organization | null;
+
       return {
         user,
+        organization: organization || undefined,
         isApiKeyAuth: false,
       };
     }

@@ -1,6 +1,7 @@
 import type { Agent, AgentMessage } from "../types/index";
 import { generateId } from "../utils/helpers";
 import * as tunnelService from "./tunnelService";
+import * as activityService from "./activityService";
 
 // Store active agent connections
 const agents = new Map<string, { agent: Agent; socket: WebSocket }>();
@@ -36,6 +37,13 @@ export function registerAgent(
   createTunnelForAgent(agent, id, organizationId).catch((error) => {
     console.error(`Failed to create tunnel for agent ${id}:`, error);
   });
+
+  // Log activity for agent connection
+  if (organizationId) {
+    activityService.logAgentConnected(organizationId, id, domain, clientIp).catch((err) => {
+      console.error("Failed to log agent connected activity:", err);
+    });
+  }
 
   return agent;
 }
@@ -80,11 +88,31 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
   }
 }
 
-export function unregisterAgent(id: string): void {
+export async function unregisterAgent(id: string): Promise<void> {
   const entry = agents.get(id);
   if (entry) {
-    agentsByDomain.delete(entry.agent.domain);
+    const { agent } = entry;
+    agentsByDomain.delete(agent.domain);
     agents.delete(id);
+
+    // Mark the tunnel as inactive
+    try {
+      const { getCollections } = await import("../utils/mongodb");
+      const collections = getCollections();
+      await collections.tunnels.updateOne(
+        { domain: agent.domain },
+        { $set: { active: false, updatedAt: Date.now() } }
+      );
+    } catch (error) {
+      console.error(`Failed to mark tunnel inactive for ${agent.domain}:`, error);
+    }
+
+    // Log activity for agent disconnection
+    if (agent.organizationId) {
+      activityService.logAgentDisconnected(agent.organizationId, id, agent.domain, agent.clientIp).catch((err) => {
+        console.error("Failed to log agent disconnected activity:", err);
+      });
+    }
   }
 }
 
