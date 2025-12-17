@@ -160,11 +160,13 @@ async function startServer() {
           const localPort = ws.data?.localPort;
           const localHost = ws.data?.localHost;
           const clientIp = ws.data?.clientIp;
+          const organizationId = ws.data?.organizationId;
+          const apiKeyId = ws.data?.apiKeyId;
 
           if (!domain || !localPort) return;
 
-          // Register agent
-          const agent = agentService.registerAgent(ws, domain, localPort, localHost, clientIp);
+          // Register agent with organization context
+          const agent = agentService.registerAgent(ws, domain, localPort, localHost, clientIp, organizationId, apiKeyId);
           console.log(
             `✅ Agent connected: ${domain} (${localHost}:${localPort}) [${agent.id}]`
           );

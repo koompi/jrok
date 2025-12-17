@@ -7,6 +7,8 @@ export interface Agent {
   lastHeartbeat: number;
   active: boolean;
   clientIp?: string;
+  organizationId?: string;
+  apiKeyId?: string;
 }
 
 export interface AgentMessage {

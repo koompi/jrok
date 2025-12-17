@@ -11,7 +11,9 @@ export function registerAgent(
   domain: string,
   localPort: number,
   localHost: string,
-  clientIp?: string
+  clientIp?: string,
+  organizationId?: string,
+  apiKeyId?: string
 ): Agent {
   const id = generateId();
   const agent: Agent = {
@@ -23,27 +25,30 @@ export function registerAgent(
     lastHeartbeat: Date.now(),
     active: true,
     clientIp,
+    organizationId,
+    apiKeyId,
   };
 
   agents.set(id, { agent, socket });
   agentsByDomain.set(domain, id);
 
   // Automatically create tunnel for the agent
-  createTunnelForAgent(agent, id).catch((error) => {
+  createTunnelForAgent(agent, id, organizationId).catch((error) => {
     console.error(`Failed to create tunnel for agent ${id}:`, error);
   });
 
   return agent;
 }
 
-async function createTunnelForAgent(agent: Agent, agentId: string): Promise<void> {
+async function createTunnelForAgent(agent: Agent, agentId: string, organizationId?: string): Promise<void> {
   try {
     await tunnelService.createTunnel(
       {
         domain: agent.domain,
         serviceType: "port",
       },
-      agentId
+      agentId,
+      organizationId
     );
     console.log(`✅ Tunnel created automatically for domain: ${agent.domain}`);
   } catch (error) {
