@@ -6,7 +6,7 @@
 - [ ] 3 Control Servers (Bun.js + jrok running)
 - [ ] 3 VPS Servers (for tunnels, nginx)
 - [ ] MongoDB Atlas free M0 cluster created
-- [ ] Domain configured (tunnel.matrixchat.space)
+- [ ] Domain configured (tunnel.koompi.cloud)
 - [ ] Cloudflare API token available
 - [ ] Telegram bot token available
 - [ ] API keys generated (min 32 chars): `CERT_SYNC_API_KEY`
@@ -119,7 +119,7 @@ sudo nano /etc/letsencrypt/renewal-hooks/post/mongodb-sync.sh
 Copy this content:
 ```bash
 #!/bin/bash
-DOMAIN="matrixchat.space"
+DOMAIN="koompi.cloud"
 API_KEY="${CERT_SYNC_API_KEY}"
 CONTROL_SERVER="http://localhost:3000"
 CERT_PATH="/etc/letsencrypt/live/$DOMAIN"
@@ -164,7 +164,7 @@ echo "$(date): Certificate uploaded to MongoDB" >> /var/log/certbot-sync.log
 /etc/letsencrypt/renewal-hooks/post/mongodb-sync.sh
 
 # Check response
-curl -s http://localhost:3000/certificates/status/matrixchat.space \
+curl -s http://localhost:3000/certificates/status/koompi.cloud \
   -H "Authorization: Bearer $API_KEY" | jq .
 ```
 - [ ] Script runs without errors
@@ -200,9 +200,9 @@ sudo nano /usr/local/bin/sync-certificates-from-mongodb.sh
 Copy this content:
 ```bash
 #!/bin/bash
-DOMAIN="matrixchat.space"
+DOMAIN="koompi.cloud"
 API_KEY="${CERT_SYNC_API_KEY}"
-CONTROL_SERVER="${CONTROL_SERVER_URL:-https://tunnel.matrixchat.space}"
+CONTROL_SERVER="${CONTROL_SERVER_URL:-https://tunnel.koompi.cloud}"
 API_ENDPOINT="$CONTROL_SERVER/certificates/download/$DOMAIN"
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 LOG_FILE="/var/log/cert-sync.log"
@@ -302,7 +302,7 @@ sudo tail -f /var/log/cert-sync.log
 ```bash
 # Add to /etc/environment:
 CERT_SYNC_API_KEY="your-32-char-key"
-CONTROL_SERVER_URL="https://tunnel.matrixchat.space"
+CONTROL_SERVER_URL="https://tunnel.koompi.cloud"
 ```
 - [ ] CERT_SYNC_API_KEY set (same on all servers)
 - [ ] CONTROL_SERVER_URL set (points to your control server HTTPS)
@@ -379,14 +379,14 @@ curl -s http://localhost:3000/certificates/list \
 ### Test 3: Certificate Upload
 ```bash
 # Manually test certificate upload:
-CERT_PATH="/etc/letsencrypt/live/matrixchat.space"
+CERT_PATH="/etc/letsencrypt/live/koompi.cloud"
 
 curl -X POST http://localhost:3000/certificates/upload \
   -H "Authorization: Bearer $CERT_SYNC_API_KEY" \
   -H "Content-Type: application/json" \
   -d @- <<EOF
 {
-  "domain": "matrixchat.space",
+  "domain": "koompi.cloud",
   "certPem": "$(cat $CERT_PATH/cert.pem | base64 | tr -d '\n')",
   "chainPem": "$(cat $CERT_PATH/chain.pem | base64 | tr -d '\n')",
   "fullchainPem": "$(cat $CERT_PATH/fullchain.pem | base64 | tr -d '\n')",
@@ -395,7 +395,7 @@ curl -X POST http://localhost:3000/certificates/upload \
 EOF
 
 # Should return:
-# {"success": true, "domain": "matrixchat.space", "version": 1}
+# {"success": true, "domain": "koompi.cloud", "version": 1}
 ```
 - [ ] Upload succeeds
 - [ ] Returns success: true
@@ -405,7 +405,7 @@ EOF
 ### Test 4: Certificate Download
 ```bash
 # On Control-1:
-curl -s https://tunnel.matrixchat.space/certificates/download/matrixchat.space \
+curl -s https://tunnel.koompi.cloud/certificates/download/koompi.cloud \
   -H "Authorization: Bearer $CERT_SYNC_API_KEY" | jq 'keys'
 
 # Should show: ["cert", "chain", "expiry", "fullchain", "privkey", "updatedAt"]

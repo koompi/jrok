@@ -200,3 +200,42 @@ export async function updateOrganizationStatus(orgId: string, status: Organizati
     }
   );
 }
+
+// Cleanup duplicate tunnels - keep only the most recent one per domain
+export async function cleanupDuplicateTunnels(): Promise<{ deleted: number; remaining: number }> {
+  const collections = getCollections();
+  
+  // Group tunnels by domain and find duplicates
+  const allTunnels = await collections.tunnels.find({}).toArray();
+  
+  // Group by domain
+  const tunnelsByDomain = new Map<string, Array<typeof allTunnels[0]>>();
+  for (const tunnel of allTunnels) {
+    const domain = tunnel.domain;
+    if (!tunnelsByDomain.has(domain)) {
+      tunnelsByDomain.set(domain, []);
+    }
+    tunnelsByDomain.get(domain)!.push(tunnel);
+  }
+  
+  // Find duplicates and delete all but the most recent
+  let deleted = 0;
+  for (const [domain, tunnels] of tunnelsByDomain) {
+    if (tunnels.length > 1) {
+      // Sort by createdAt descending (newest first)
+      tunnels.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      
+      // Keep the first (newest), delete the rest
+      const toDelete = tunnels.slice(1);
+      for (const tunnel of toDelete) {
+        await collections.tunnels.deleteOne({ id: tunnel.id });
+        deleted++;
+      }
+    }
+  }
+  
+  const remaining = allTunnels.length - deleted;
+  console.log(`🧹 Cleaned up ${deleted} duplicate tunnels, ${remaining} remaining`);
+  
+  return { deleted, remaining };
+}

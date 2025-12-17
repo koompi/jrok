@@ -34,7 +34,7 @@ ssh root@143.198.201.54 "cat /home/ubuntu/jrok/.env | grep API_KEY"
 # Create a tunnel to your local app
 cd /path/to/jrok
 bun client.ts connect \
-  --server https://tunnel.matrixchat.space \
+  --server https://tunnel.koompi.cloud \
   --domain myapp \
   --port 3000 \
   --auth YOUR_API_KEY
@@ -42,7 +42,7 @@ bun client.ts connect \
 
 ### 4. Access your app from internet
 ```bash
-https://myapp.tunnel.matrixchat.space
+https://myapp.tunnel.koompi.cloud
 ```
 
 ## Endpoints
@@ -64,7 +64,7 @@ jrok Agent Client (tunnel)
     ↓
 VPS Server (jrok)
     ↓
-Nginx (tunnel.matrixchat.space)
+Nginx (tunnel.koompi.cloud)
     ↓
 Public Internet (HTTPS)
 ```
@@ -73,5 +73,5 @@ Public Internet (HTTPS)
 
 1. Start this app locally: `npm start`
 2. Run jrok agent: `bun client.ts connect ...`
-3. Access via: `https://myapp.tunnel.matrixchat.space`
+3. Access via: `https://myapp.tunnel.koompi.cloud`
 4. See your local app exposed to the internet! 🚀

@@ -16,6 +16,7 @@
     koompi_client_id: "{{ lookup('env', 'KOOMPI_CLIENT_ID') }}"
     koompi_client_secret: "{{ lookup('env', 'KOOMPI_CLIENT_SECRET') }}"
     koompi_redirect_uri: "{{ lookup('env', 'KOOMPI_REDIRECT_URI') }}"
+    dashboard_url: "{{ lookup('env', 'DASHBOARD_URL') }}"
 
   pre_tasks:
     - name: Update apt cache

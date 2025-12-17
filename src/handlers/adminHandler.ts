@@ -172,3 +172,17 @@ export async function handleUpdateOrgStatus(req: Request, orgId: string): Promis
     return jsonResponse({ success: false, message: "Failed to update organization status" }, 500);
   }
 }
+
+// POST /admin/cleanup-tunnels - Remove duplicate tunnels, keeping only the most recent per domain
+export async function handleCleanupTunnels(req: Request): Promise<Response> {
+  const authError = await requireSuperAdmin(req);
+  if (authError) return authError;
+
+  try {
+    const result = await adminService.cleanupDuplicateTunnels();
+    return jsonResponse({ success: true, ...result });
+  } catch (error) {
+    console.error("Cleanup tunnels error:", error);
+    return jsonResponse({ success: false, message: "Failed to cleanup tunnels" }, 500);
+  }
+}

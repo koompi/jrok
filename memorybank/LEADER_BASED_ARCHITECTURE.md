@@ -157,8 +157,8 @@ async function registerCustomDomain(request) {
 # /usr/local/bin/sync-certificates-from-mongodb.sh
 # Runs every 6 hours on each VPS
 
-DOMAIN="matrixchat.space"
-API_ENDPOINT="https://control.matrixchat.space/certificates/download/$DOMAIN"
+DOMAIN="koompi.cloud"
+API_ENDPOINT="https://control.koompi.cloud/certificates/download/$DOMAIN"
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 
 # Download from MongoDB
@@ -222,7 +222,7 @@ T=2                       findOneAndUpdate()    ← B tries to acquire
 
 T=3   UPLOAD SUCCEEDS     Blocked               ← A's upload completes
 
-T=4   Updates version     Waits...              {domain: matrixchat.space,
+T=4   Updates version     Waits...              {domain: koompi.cloud,
       Refreshes lease                           version: 5,
       (30 more seconds)                         uploadedBy: "control-1",
                                                 updatedAt: T=3}
@@ -235,7 +235,7 @@ T=30  Lease expires       Tries to upload       leader_leases expires
 T=31                      BEGIN UPLOAD          ← NOW B can acquire
                           SUCCESS               
 
-T=32                      UPLOAD SUCCEEDS       {domain: matrixchat.space,
+T=32                      UPLOAD SUCCEEDS       {domain: koompi.cloud,
                           Updates version       version: 6,
                           (overwrites A's!)     uploadedBy: "control-2",
                                                 updatedAt: T=32}
@@ -358,7 +358,7 @@ app.use((req, res, next) => {
 ### HTTPS Only
 ```bash
 # All certificate API calls must use HTTPS
-API_ENDPOINT="https://control.matrixchat.space/certificates/..."
+API_ENDPOINT="https://control.koompi.cloud/certificates/..."
 # HTTP = rejected in production
 ```
 
@@ -406,9 +406,9 @@ curl -s https://localhost:3000/admin/leader-status \
 tail -f /var/log/cert-sync.log
 
 # Expected output:
-# 2025-12-15 10:00:15 ✅ Certificate synced: matrixchat.space
+# 2025-12-15 10:00:15 ✅ Certificate synced: koompi.cloud
 # 2025-12-15 16:00:15 ℹ️ Certificate unchanged
-# 2025-12-15 22:00:15 ✅ Certificate synced: matrixchat.space
+# 2025-12-15 22:00:15 ✅ Certificate synced: koompi.cloud
 ```
 
 ### Alert on Sync Failures
@@ -463,7 +463,7 @@ db.leader_leases.deleteOne({ _id: "certificate-renewal-leader" })
 ### VPS Can't Download Certificate
 ```bash
 # On VPS server
-curl -v https://control.matrixchat.space/certificates/download/matrixchat.space \
+curl -v https://control.koompi.cloud/certificates/download/koompi.cloud \
   -H "Authorization: Bearer $API_KEY"
 
 # Check API response and error

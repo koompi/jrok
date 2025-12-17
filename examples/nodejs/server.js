@@ -52,8 +52,8 @@ const server = http.createServer((req, res) => {
             <div class="info">
               <strong>To access this app through jrok:</strong>
               <pre>bun client.ts connect \\
-  --server https://tunnel.matrixchat.space \\
-  --domain myapp.tunnel.matrixchat.space \\
+  --server https://tunnel.koompi.cloud \\
+  --domain myapp.tunnel.koompi.cloud \\
   --port 3000 \\
   --auth YOUR_API_KEY</pre>
             </div>

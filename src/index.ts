@@ -6,9 +6,12 @@ import * as domainHandler from "./handlers/domainHandler";
 import * as authHandler from "./handlers/authHandler";
 import * as organizationHandler from "./handlers/organizationHandler";
 import * as adminHandler from "./handlers/adminHandler";
+import * as activityHandler from "./handlers/activityHandler";
+import * as statsHandler from "./handlers/statsHandler";
 import * as agentService from "./services/agentService";
 import * as vpsService from "./services/vpsService";
 import * as authService from "./services/authService";
+import * as statsService from "./services/statsService";
 import { connectDatabase, closeDatabase } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { initTelegram } from "./services/notificationService";
@@ -16,19 +19,28 @@ import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext } from "./types/index";
 
 // Store pending requests waiting for agent responses
-const pendingRequests = new Map<string, { resolve: (response: Response) => void; timeout: Timer }>();
+const pendingRequests = new Map<string, { 
+  resolve: (response: Response) => void; 
+  timeout: Timer;
+  bytesIn: number;
+  agent: Agent;
+  tunnelId?: string;
+}>();
 
 // Forward HTTP request to agent via WebSocket
-async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent): Promise<Response> {
+async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string): Promise<Response> {
   return new Promise(async (resolve) => {
     const requestId = generateId();
     const timeout = setTimeout(() => {
       pendingRequests.delete(requestId);
-      resolve(new Response("Gateway Timeout - Agent did not respond", { status: 504 }));
-    }, 30000); // 30 second timeout
-
-    // Store pending request
-    pendingRequests.set(requestId, { resolve, timeout });
+      resolve(new Response(
+        JSON.stringify({
+          success: false,
+          message: "Agent timeout - no response within 10 seconds"
+        }),
+        { status: 504, headers: { "Content-Type": "application/json" } }
+      ));
+    }, 10000); // 10 second timeout
 
     // Prepare request data to send to agent
     const headers: Record<string, string> = {};
@@ -39,6 +51,11 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
     try {
       // Read request body
       const body = await req.text();
+      const bytesIn = new TextEncoder().encode(body).length + 
+                      new TextEncoder().encode(JSON.stringify(headers)).length;
+      
+      // Store pending request with bandwidth tracking info
+      pendingRequests.set(requestId, { resolve, timeout, bytesIn, agent, tunnelId });
       
       // Send request to agent
       agentWs.send(JSON.stringify({
@@ -157,11 +174,13 @@ async function startServer() {
           const localPort = ws.data?.localPort;
           const localHost = ws.data?.localHost;
           const clientIp = ws.data?.clientIp;
+          const organizationId = ws.data?.organizationId;
+          const apiKeyId = ws.data?.apiKeyId;
 
           if (!domain || !localPort) return;
 
-          // Register agent
-          const agent = agentService.registerAgent(ws, domain, localPort, localHost, clientIp);
+          // Register agent with organization context
+          const agent = agentService.registerAgent(ws, domain, localPort, localHost, clientIp, organizationId, apiKeyId);
           console.log(
             `✅ Agent connected: ${domain} (${localHost}:${localPort}) [${agent.id}]`
           );
@@ -194,9 +213,40 @@ async function startServer() {
                 clearTimeout(pending.timeout);
                 pendingRequests.delete(message.requestId);
                 
-                // Build response
+                // Decode body if it's base64 encoded
+                let responseBody: string | ArrayBuffer = message.body || "";
+                if (message.isBase64 && typeof message.body === 'string') {
+                  responseBody = Buffer.from(message.body, 'base64');
+                }
+                
+                // Calculate response size (bytes out)
+                const bytesOut = message.isBase64 && typeof message.body === 'string'
+                  ? Buffer.from(message.body, 'base64').length
+                  : new TextEncoder().encode(message.body || "").length + 
+                    new TextEncoder().encode(JSON.stringify(message.headers || {})).length;
+                
+                // Record bandwidth usage
+                if (pending.agent.organizationId) {
+                  statsService.recordBandwidth({
+                    organizationId: pending.agent.organizationId,
+                    tunnelId: pending.tunnelId,
+                    agentId: pending.agent.id,
+                    bytesIn: pending.bytesIn,
+                    bytesOut: bytesOut,
+                    requests: 1,
+                  }).catch(err => console.error("Failed to record bandwidth:", err));
+                }
+                
+                // Build response headers
                 const responseHeaders = new Headers(message.headers || {});
-                pending.resolve(new Response(message.body, {
+                
+                // Remove Content-Encoding header when we've decoded the body
+                // This prevents the browser from trying to decompress already-decoded content
+                if (message.isBase64) {
+                  responseHeaders.delete('Content-Encoding');
+                }
+                
+                pending.resolve(new Response(responseBody, {
                   status: message.status || 200,
                   statusText: message.statusText || "OK",
                   headers: responseHeaders,
@@ -230,12 +280,39 @@ async function startServer() {
         const method = req.method;
         const hostname = url.hostname;
 
-        // CORS headers for dashboard access
-        const corsHeaders = {
-          "Access-Control-Allow-Origin": req.headers.get("Origin") || "*",
+        // CORS configuration - whitelist allowed origins
+        const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173").split(",").map(o => o.trim());
+        const requestOrigin = req.headers.get("Origin");
+        
+        // Check if origin is allowed
+        const isAllowedOrigin = requestOrigin && (
+          allowedOrigins.includes(requestOrigin) || 
+          allowedOrigins.includes("*") ||
+          // Allow same-origin requests (no Origin header)
+          requestOrigin === `http://${hostname}` ||
+          requestOrigin === `https://${hostname}`
+        );
+        
+        const corsOrigin = isAllowedOrigin ? requestOrigin : allowedOrigins[0];
+        
+        const corsHeaders: Record<string, string> = {
+          "Access-Control-Allow-Origin": corsOrigin || allowedOrigins[0],
           "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
-          "Access-Control-Allow-Credentials": "true",
+          "Access-Control-Max-Age": "86400", // Cache preflight for 24 hours
+        };
+        
+        // Only allow credentials for whitelisted origins
+        if (isAllowedOrigin) {
+          corsHeaders["Access-Control-Allow-Credentials"] = "true";
+        }
+        
+        // Security headers
+        const securityHeaders: Record<string, string> = {
+          "X-Content-Type-Options": "nosniff",
+          "X-Frame-Options": "DENY",
+          "X-XSS-Protection": "1; mode=block",
+          "Referrer-Policy": "strict-origin-when-cross-origin",
         };
 
         // Handle preflight OPTIONS request
@@ -243,10 +320,10 @@ async function startServer() {
           return new Response(null, { status: 204, headers: corsHeaders });
         }
 
-        // Helper to add CORS headers to response
+        // Helper to add CORS and security headers to response
         const addCors = (response: Response): Response => {
           const newHeaders = new Headers(response.headers);
-          Object.entries(corsHeaders).forEach(([key, value]) => {
+          Object.entries({ ...corsHeaders, ...securityHeaders }).forEach(([key, value]) => {
             newHeaders.set(key, value);
           });
           return new Response(response.body, {
@@ -256,44 +333,9 @@ async function startServer() {
           });
         };
 
-        // Agent WebSocket upgrade (no auth needed for initial handshake)
+        // Agent WebSocket upgrade (authenticated)
         if (path === "/ws/agent" && req.headers.get("upgrade") === "websocket") {
-          return agentHandler.handleAgentUpgrade(req, server);
-        }
-
-        // Check if this is a tunnel domain request (extract subdomain)
-        const baseDomain = config.baseDomain; // e.g., "tunnel.matrixchat.space"
-        if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
-          // Extract subdomain (e.g., "demo" from "demo.tunnel.matrixchat.space")
-          const subdomain = hostname.replace(`.${baseDomain}`, '');
-          
-          // Look up agent for this domain
-          const agent = agentService.getAgentByDomain(subdomain);
-          
-          if (!agent || !agent.active) {
-            return new Response(
-              JSON.stringify({
-                success: false,
-                message: `No active agent found for domain: ${subdomain}`,
-              }),
-              { status: 503, headers: { "Content-Type": "application/json" } }
-            );
-          }
-
-          // Get agent's WebSocket
-          const agentWs = agentService.getAgentSocket(agent.id);
-          if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
-            return new Response(
-              JSON.stringify({
-                success: false,
-                message: `Agent for ${subdomain} is not connected`,
-              }),
-              { status: 503, headers: { "Content-Type": "application/json" } }
-            );
-          }
-
-          // Forward request to agent via WebSocket
-          return await forwardRequestToAgent(req, agentWs, agent);
+          return await agentHandler.handleAgentUpgrade(req, server);
         }
 
         // ============ Public Routes (no auth required) ============
@@ -306,13 +348,32 @@ async function startServer() {
           ));
         }
 
-        // Auth routes
+        // Auth routes - must be before tunnel domain check
+        // Apply rate limiting to prevent brute force attacks
         if (path === "/auth/login" && method === "GET") {
+          const { checkAuthRateLimit, getClientIp } = await import("./utils/rateLimiter");
+          const clientIp = getClientIp(req);
+          const rateLimit = checkAuthRateLimit(clientIp);
+          if (rateLimit) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Too many requests. Please try again later." }),
+              { status: 429, headers: { "Content-Type": "application/json", "Retry-After": String(rateLimit.retryAfter) } }
+            ));
+          }
           return addCors(authHandler.handleGetLoginUrl());
         }
 
         // POST callback - called by dashboard after OAuth redirect
         if (path === "/auth/callback" && method === "POST") {
+          const { checkAuthRateLimit, getClientIp } = await import("./utils/rateLimiter");
+          const clientIp = getClientIp(req);
+          const rateLimit = checkAuthRateLimit(clientIp);
+          if (rateLimit) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Too many requests. Please try again later." }),
+              { status: 429, headers: { "Content-Type": "application/json", "Retry-After": String(rateLimit.retryAfter) } }
+            ));
+          }
           return addCors(await authHandler.handleOAuthCallback(req));
         }
 
@@ -463,6 +524,152 @@ async function startServer() {
           return addCors(await adminHandler.handleUpdateOrgStatus(req, orgId));
         }
 
+        // Admin cleanup duplicates
+        if (path === "/admin/cleanup-tunnels" && method === "POST") {
+          return addCors(await adminHandler.handleCleanupTunnels(req));
+        }
+
+        // ============ Dashboard Stats & Activity Routes ============
+
+        // Activity routes (require organization context)
+        if (path === "/activity" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await activityHandler.handleListActivity(req, authContext));
+        }
+
+        if (path === "/activity/recent" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await activityHandler.handleRecentActivity(req, authContext));
+        }
+
+        if (path === "/activity/summary" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await activityHandler.handleActivitySummary(req, authContext));
+        }
+
+        // Stats routes
+        if (path === "/stats/dashboard" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleDashboardStats(req, authContext));
+        }
+
+        if (path === "/stats/bandwidth" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleBandwidthStats(req, authContext));
+        }
+
+        // Enhanced resource routes
+        if (path === "/tunnels/enhanced" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleEnhancedTunnels(req, authContext));
+        }
+
+        if (path === "/agents/enhanced" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleEnhancedAgents(req, authContext));
+        }
+
+        if (path === "/domains/enhanced" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleEnhancedDomains(req, authContext));
+        }
+
+        // ============ Tunnel Domain Routing ============
+        // Check if this is a tunnel domain request (extract subdomain)
+        // MUST be before auth check to allow public tunnel access
+        const baseDomain = config.baseDomain; // e.g., "tunnel.koompi.cloud"
+        if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
+          // Extract subdomain (e.g., "demo" from "demo.tunnel.koompi.cloud")
+          const subdomain = hostname.replace(`.${baseDomain}`, '');
+          
+          // Look up agent for this domain
+          const agent = agentService.getAgentByDomain(subdomain);
+          
+          if (!agent || !agent.active) {
+            return addCors(new Response(
+              JSON.stringify({
+                success: false,
+                message: `No active agent found for domain: ${subdomain}. Please ensure the agent is running: bun src/index.ts connect --domain ${subdomain}`,
+              }),
+              { status: 503, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+
+          // Get agent's WebSocket
+          const agentWs = agentService.getAgentSocket(agent.id);
+          if (!agentWs || agentWs.readyState !== 1) {  // 1 = WebSocket.OPEN
+            return addCors(new Response(
+              JSON.stringify({
+                success: false,
+                message: `Agent for ${subdomain} is not connected (readyState: ${agentWs?.readyState || 'null'}). Attempting reconnection...`,
+              }),
+              { status: 503, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+
+          // Use cached tunnelId from agent (set when agent connects)
+          // This avoids MongoDB query on EVERY request - massive performance improvement!
+          let tunnelId = agent.tunnelId;
+          
+          // Fallback to DB lookup only if not cached (rare)
+          if (!tunnelId) {
+            const { getTunnelByDomain } = await import("./utils/database");
+            const tunnel = await getTunnelByDomain(subdomain);
+            tunnelId = tunnel?.id;
+          }
+
+          // Forward request to agent via WebSocket (with bandwidth tracking)
+          return await forwardRequestToAgent(req, agentWs, agent, tunnelId);
+        }
+
         // ============ Legacy API Routes (require auth) ============
 
     // Auth check for legacy routes
@@ -477,23 +684,23 @@ async function startServer() {
       ));
     }
 
-    // Legacy Tunnel Routes
+    // Tunnel Routes (with auth)
     if (path === "/tunnels" && method === "POST") {
-      return await tunnelHandler.handleCreateTunnel(req);
+      return addCors(await tunnelHandler.handleCreateTunnel(req));
     }
 
     if (path === "/tunnels" && method === "GET") {
-      return await tunnelHandler.handleListTunnels();
+      return addCors(await tunnelHandler.handleListTunnels(req));
     }
 
     if (path.startsWith("/tunnels/") && method === "GET") {
       const id = path.split("/")[2];
-      return await tunnelHandler.handleGetTunnel(id);
+      return addCors(await tunnelHandler.handleGetTunnel(id, req));
     }
 
     if (path.startsWith("/tunnels/") && method === "DELETE") {
       const id = path.split("/")[2];
-      return await tunnelHandler.handleDeleteTunnel(id);
+      return addCors(await tunnelHandler.handleDeleteTunnel(id, req));
     }
 
     if (path === "/agents" && method === "GET") {
@@ -592,7 +799,19 @@ async function startServer() {
       cleanupExpiredLimits();
     }, 10 * 60 * 1000);
 
-    console.log("✅ Auto-cleanup enabled (agents: 30s, tunnels: 5m, rate limits: 10m)");
+    // Aggregate daily stats at midnight (run every hour, only processes yesterday)
+    setInterval(async () => {
+      try {
+        const now = new Date();
+        if (now.getHours() === 0) { // Only run at midnight
+          await statsService.aggregateDailyStats();
+        }
+      } catch (error) {
+        console.error("Stats aggregation error:", error);
+      }
+    }, 60 * 60 * 1000);
+
+    console.log("✅ Auto-cleanup enabled (agents: 30s, tunnels: 5m, rate limits: 10m, stats: 1h)");
 
     // Graceful shutdown
     process.on("SIGINT", async () => {

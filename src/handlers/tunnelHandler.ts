@@ -1,118 +1,154 @@
 import type { TunnelResponse, ListTunnelsResponse, CreateTunnelRequest } from "../types/index";
 import * as tunnelService from "../services/tunnelService";
+import * as authService from "../services/authService";
+
+// Helper to create JSON response
+function jsonResponse(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
 export async function handleCreateTunnel(req: Request): Promise<Response> {
+  // Authenticate - require API key or user auth
+  const authContext = await authService.authenticateRequest(req);
+  if (!authContext) {
+    return jsonResponse({ success: false, message: "Unauthorized" }, 401);
+  }
+
+  // Get organization ID from auth context
+  const organizationId = authContext.isApiKeyAuth 
+    ? authContext.organization?.id 
+    : null; // For user auth, org should be passed in body
+
   try {
-    const body = (await req.json()) as CreateTunnelRequest & { agentId: string };
+    const body = (await req.json()) as CreateTunnelRequest & { agentId: string; organizationId?: string };
 
     // Validate input
     if (!body.domain || !body.agentId) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Missing required fields: domain, agentId",
-        } as TunnelResponse),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return jsonResponse({
+        success: false,
+        message: "Missing required fields: domain, agentId",
+      } as TunnelResponse, 400);
     }
 
-    const tunnel = await tunnelService.createTunnel(body, body.agentId);
+    // Use org from API key or from body
+    const finalOrgId = organizationId || body.organizationId;
 
-    return new Response(
-      JSON.stringify({
-        success: true,
-        message: "Tunnel created successfully",
-        tunnel,
-      } as TunnelResponse),
-      { status: 201, headers: { "Content-Type": "application/json" } }
-    );
+    const tunnel = await tunnelService.createTunnel(body, body.agentId, finalOrgId);
+
+    return jsonResponse({
+      success: true,
+      message: "Tunnel created successfully",
+      tunnel,
+    } as TunnelResponse, 201);
   } catch (error) {
-    return new Response(
-      JSON.stringify({
-        success: false,
-        message: "Failed to create tunnel",
-        error: error instanceof Error ? error.message : String(error),
-      } as TunnelResponse),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    return jsonResponse({
+      success: false,
+      message: "Failed to create tunnel",
+      error: error instanceof Error ? error.message : String(error),
+    } as TunnelResponse, 500);
   }
 }
 
-export async function handleListTunnels(): Promise<Response> {
+export async function handleListTunnels(req: Request): Promise<Response> {
+  // Authenticate - require API key or user auth
+  const authContext = await authService.authenticateRequest(req);
+  if (!authContext) {
+    return jsonResponse({ success: false, message: "Unauthorized" }, 401);
+  }
+
   try {
-    const tunnels = await tunnelService.listTunnels();
+    let tunnels;
+    
+    // Always filter by organization if available (both API key and session auth)
+    if (authContext.organization) {
+      tunnels = await tunnelService.listTunnelsByOrganization(authContext.organization.id);
+    } else if (authContext.user?.role === 'super_admin') {
+      // Super admin can see all tunnels
+      tunnels = await tunnelService.listTunnels();
+    } else {
+      // No organization context and not super admin - no tunnels visible
+      tunnels = [];
+    }
 
-    return new Response(
-      JSON.stringify({
-        success: true,
-        tunnels,
-      } as ListTunnelsResponse),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
+    return jsonResponse({
+      success: true,
+      tunnels,
+    } as ListTunnelsResponse);
   } catch (error) {
-    return new Response(
-      JSON.stringify({
-        success: false,
-        tunnels: [],
-      } as ListTunnelsResponse),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    return jsonResponse({
+      success: false,
+      tunnels: [],
+    } as ListTunnelsResponse, 500);
   }
 }
 
-export async function handleGetTunnel(id: string): Promise<Response> {
+export async function handleGetTunnel(id: string, req?: Request): Promise<Response> {
+  // Auth is optional for get - but if provided, verify ownership
+  const authContext = req ? await authService.authenticateRequest(req) : null;
+
   try {
     const tunnel = await tunnelService.getTunnel(id);
 
     if (!tunnel) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Tunnel not found",
-        } as TunnelResponse),
-        { status: 404, headers: { "Content-Type": "application/json" } }
-      );
+      return jsonResponse({ success: false, message: "Tunnel not found" } as TunnelResponse, 404);
     }
 
-    return new Response(
-      JSON.stringify({
-        success: true,
-        message: "Tunnel retrieved successfully",
-        tunnel,
-      } as TunnelResponse),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
+    // If using API key auth, verify tunnel belongs to their org
+    if (authContext?.isApiKeyAuth && authContext.organization) {
+      if (tunnel.organizationId && tunnel.organizationId !== authContext.organization.id) {
+        return jsonResponse({ success: false, message: "Forbidden" }, 403);
+      }
+    }
+
+    return jsonResponse({
+      success: true,
+      message: "Tunnel retrieved successfully",
+      tunnel,
+    } as TunnelResponse);
   } catch (error) {
-    return new Response(
-      JSON.stringify({
-        success: false,
-        message: "Failed to retrieve tunnel",
-        error: error instanceof Error ? error.message : String(error),
-      } as TunnelResponse),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    return jsonResponse({
+      success: false,
+      message: "Failed to retrieve tunnel",
+      error: error instanceof Error ? error.message : String(error),
+    } as TunnelResponse, 500);
   }
 }
 
-export async function handleDeleteTunnel(id: string): Promise<Response> {
+export async function handleDeleteTunnel(id: string, req?: Request): Promise<Response> {
+  // Auth required for delete
+  const authContext = req ? await authService.authenticateRequest(req) : null;
+  if (!authContext) {
+    return jsonResponse({ success: false, message: "Unauthorized" }, 401);
+  }
+
   try {
+    const tunnel = await tunnelService.getTunnel(id);
+    
+    if (!tunnel) {
+      return jsonResponse({ success: false, message: "Tunnel not found" } as TunnelResponse, 404);
+    }
+
+    // If using API key auth, verify tunnel belongs to their org
+    if (authContext.isApiKeyAuth && authContext.organization) {
+      if (tunnel.organizationId && tunnel.organizationId !== authContext.organization.id) {
+        return jsonResponse({ success: false, message: "Forbidden" }, 403);
+      }
+    }
+
     await tunnelService.deleteTunnel(id);
 
-    return new Response(
-      JSON.stringify({
-        success: true,
-        message: "Tunnel deleted successfully",
-      } as TunnelResponse),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
+    return jsonResponse({
+      success: true,
+      message: "Tunnel deleted successfully",
+    } as TunnelResponse);
   } catch (error) {
-    return new Response(
-      JSON.stringify({
-        success: false,
-        message: "Failed to delete tunnel",
-        error: error instanceof Error ? error.message : String(error),
-      } as TunnelResponse),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    return jsonResponse({
+      success: false,
+      message: "Failed to delete tunnel",
+      error: error instanceof Error ? error.message : String(error),
+    } as TunnelResponse, 500);
   }
 }

@@ -7,6 +7,9 @@ export interface Agent {
   lastHeartbeat: number;
   active: boolean;
   clientIp?: string;
+  organizationId?: string;
+  apiKeyId?: string;
+  tunnelId?: string; // Cached for performance - avoids MongoDB lookup per request
 }
 
 export interface AgentMessage {
@@ -36,6 +39,9 @@ export interface Tunnel {
   domain: string; // subdomain part, e.g., "myapp"
   customDomain?: string; // parent domain, e.g., "client1.com" (uses baseDomain if not set)
   agentId: string; // reference to connected agent
+  organizationId?: string; // which organization owns this tunnel
+  localPort?: number; // local service port
+  localHost?: string; // local service host (e.g., localhost)
   createdAt: number; // timestamp
   expiresAt?: number; // optional expiration
   active: boolean;
@@ -145,6 +151,7 @@ export type ApiKeyPermission =
   | "tunnels:read" 
   | "tunnels:write" 
   | "tunnels:delete"
+  | "tunnel:create"
   | "domains:read"
   | "domains:write"
   | "domains:delete"
@@ -276,4 +283,153 @@ export interface AuthContext {
   organization?: Organization;
   apiKey?: ApiKey;
   isApiKeyAuth: boolean;
+}
+
+// ============ Activity & Stats Types ============
+
+export type ActivityCategory = 
+  | "tunnels" 
+  | "domains" 
+  | "api_keys" 
+  | "agents" 
+  | "organization" 
+  | "auth"
+  | "billing";
+
+export type ActivityAction = 
+  | "created" 
+  | "updated" 
+  | "deleted" 
+  | "connected" 
+  | "disconnected"
+  | "renewed"
+  | "expired"
+  | "verified"
+  | "failed"
+  | "login"
+  | "logout";
+
+export interface ActivityLog {
+  id: string;
+  organizationId: string;
+  userId?: string;
+  category: ActivityCategory;
+  action: ActivityAction;
+  resourceType: string; // e.g., "tunnel", "domain", "api_key"
+  resourceId?: string;
+  resourceName?: string; // Human-readable name
+  description: string;
+  metadata?: Record<string, unknown>;
+  ipAddress?: string;
+  userAgent?: string;
+  createdAt: number;
+}
+
+export interface ActivityLogFilters {
+  organizationId: string;
+  category?: ActivityCategory;
+  action?: ActivityAction;
+  startDate?: number;
+  endDate?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ListActivityResponse {
+  success: boolean;
+  activities: ActivityLog[];
+  total: number;
+  hasMore: boolean;
+}
+
+// Enhanced Agent with system info
+export interface EnhancedAgent extends Agent {
+  platform?: string; // 'darwin', 'linux', 'windows'
+  platformVersion?: string;
+  arch?: string;
+  cliVersion?: string;
+  cpuUsage?: number; // 0-100
+  memoryUsage?: number; // 0-100
+  signalStrength?: number; // 0-100
+  tunnelCount?: number;
+  bytesIn?: number;
+  bytesOut?: number;
+  totalRequests?: number;
+}
+
+// Enhanced Tunnel with traffic stats
+export interface EnhancedTunnel extends Tunnel {
+  status: "online" | "offline" | "error";
+  totalRequests: number;
+  bytesIn: number;
+  bytesOut: number;
+  lastRequestAt?: number;
+  avgResponseTime?: number;
+  errorRate?: number;
+}
+
+// Enhanced Domain with SSL info
+export interface EnhancedDomain extends CustomDomain {
+  sslStatus: "valid" | "expiring" | "expired" | "pending" | "none";
+  dnsVerified: boolean;
+  dnsRecords?: DnsRecord[];
+  tunnelCount: number;
+}
+
+export interface DnsRecord {
+  type: "A" | "CNAME" | "TXT";
+  name: string;
+  value: string;
+  verified: boolean;
+}
+
+// Dashboard Stats
+export interface DashboardStats {
+  tunnels: {
+    total: number;
+    online: number;
+    offline: number;
+  };
+  domains: {
+    total: number;
+    sslValid: number;
+    sslExpiring: number;
+  };
+  agents: {
+    total: number;
+    connected: number;
+  };
+  bandwidth: {
+    totalIn: number; // bytes
+    totalOut: number;
+    periodIn: number; // current period
+    periodOut: number;
+  };
+  requests: {
+    total: number;
+    today: number;
+    thisWeek: number;
+  };
+  plan: {
+    name: string;
+    tier: PlanTier;
+    tunnelLimit: number;
+    domainLimit: number;
+    bandwidthLimit: number; // GB
+    usedTunnels: number;
+    usedDomains: number;
+    usedBandwidth: number; // GB
+  };
+}
+
+export interface BandwidthRecord {
+  id: string;
+  organizationId: string;
+  tunnelId?: string;
+  agentId?: string;
+  bytesIn: number;
+  bytesOut: number;
+  requests: number;
+  timestamp: number;
+  period: "hour" | "day" | "month";
 }

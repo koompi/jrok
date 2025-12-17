@@ -1,16 +1,16 @@
 {
   "name": "jrok",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Expose local services (ports, Docker, Kubernetes) to the internet via secure reverse proxy",
   "main": "dist/index.js",
   "bin": {
-    "jrok": "./bin/jrok",
     "jrok": "./bin/jrok"
   },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node --minify --sourcemap",
+    "build": "npx esbuild src/index.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/index.js --minify",
+    "build:dev": "bun build src/index.ts --outdir dist --target node",
     "bundle": "bun build src/index.ts --compile --outfile bin/jrok-standalone",
-    "bundle:all": "npm run build && pkg dist/index.js --targets node18-linux-x64,node18-macos-x64,node18-win-x64 --output bin/jrok",
+    "bundle:all": "npm run build && npx @yao-pkg/pkg dist/index.js --targets node18-linux-x64,node18-macos-x64,node18-win-x64 --output bin/jrok",
     "dev": "bun run src/index.ts",
     "prepublishOnly": "npm run build"
   },
@@ -46,7 +46,11 @@
     "url": "https://github.com/koompi/jrok/issues"
   },
   "homepage": "https://github.com/koompi/jrok#readme",
+  "dependencies": {
+    "ws": "^8.17.0"
+  },
   "devDependencies": {
-    "@yao-pkg/pkg": "^6.11.0"
+    "@yao-pkg/pkg": "^6.11.0",
+    "esbuild": "^0.27.2"
   }
 }

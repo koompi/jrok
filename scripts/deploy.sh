@@ -83,7 +83,13 @@ if [ -f "$PROJECT_ROOT/.deploy.env" ]; then
             
             KOOMPI_CLIENT_ID=$(prompt_input "KOOMPI Client ID")
             KOOMPI_CLIENT_SECRET=$(prompt_input "KOOMPI Client Secret")
-            KOOMPI_REDIRECT_URI=$(prompt_input "KOOMPI Redirect URI" "https://$DOMAIN/api/auth/callback")
+            KOOMPI_REDIRECT_URI=$(prompt_input "KOOMPI Redirect URI" "https://$DOMAIN/callback")
+            DASHBOARD_URL=$(prompt_input "Dashboard URL" "https://$DOMAIN")
+        fi
+        
+        # Generate new JWT_SECRET if not present
+        if [ -z "${JWT_SECRET:-}" ]; then
+            JWT_SECRET=$(openssl rand -hex 32)
         fi
     else
         # Get new configuration
@@ -101,7 +107,9 @@ if [ -f "$PROJECT_ROOT/.deploy.env" ]; then
         
         KOOMPI_CLIENT_ID=$(prompt_input "KOOMPI Client ID")
         KOOMPI_CLIENT_SECRET=$(prompt_input "KOOMPI Client Secret")
-        KOOMPI_REDIRECT_URI=$(prompt_input "KOOMPI Redirect URI" "https://$DOMAIN/api/auth/callback")
+        KOOMPI_REDIRECT_URI=$(prompt_input "KOOMPI Redirect URI" "https://$DOMAIN/auth/callback")
+        JWT_SECRET=$(openssl rand -hex 32)
+        DASHBOARD_URL=$(prompt_input "Dashboard URL" "https://$DOMAIN")
     fi
 else
     # Get deployment configuration
@@ -122,6 +130,8 @@ else
     KOOMPI_CLIENT_ID=$(prompt_input "KOOMPI Client ID")
     KOOMPI_CLIENT_SECRET=$(prompt_input "KOOMPI Client Secret")
     KOOMPI_REDIRECT_URI=$(prompt_input "KOOMPI Redirect URI" "https://$DOMAIN/api/auth/callback")
+    JWT_SECRET=$(openssl rand -hex 32)
+    DASHBOARD_URL=$(prompt_input "Dashboard URL" "https://$DOMAIN")
 fi
 
 # Save configuration
@@ -132,10 +142,12 @@ CF_TOKEN=$CF_TOKEN
 CF_EMAIL=$CF_EMAIL
 MONGODB_URI=$MONGODB_URI
 API_KEY=$API_KEY
+JWT_SECRET=$JWT_SECRET
 KOOMPI_CLIENT_ID=$KOOMPI_CLIENT_ID
 KOOMPI_CLIENT_SECRET=$KOOMPI_CLIENT_SECRET
 KOOMPI_REDIRECT_URI=$KOOMPI_REDIRECT_URI
 DEPLOY_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+DASHBOARD_URL=$DASHBOARD_URL
 EOF
 
 echo -e "${GREEN}✓ Configuration saved${NC}"
@@ -304,6 +316,7 @@ if prompt_yesno "Run Ansible to configure VPS servers?"; then
         -e "cloudflare_email=$CF_EMAIL" \
         -e "mongodb_uri=$MONGODB_URI" \
         -e "cert_sync_api_key=$API_KEY" \
+        -e "jwt_secret=$JWT_SECRET" \
         -e "koompi_client_id=$KOOMPI_CLIENT_ID" \
         -e "koompi_client_secret=$KOOMPI_CLIENT_SECRET" \
         -e "koompi_redirect_uri=$KOOMPI_REDIRECT_URI" \

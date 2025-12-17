@@ -1,4 +1,4 @@
-# Complete Setup Guide - jrok with tunnel.matrixchat.space
+# Complete Setup Guide - jrok with tunnel.koompi.cloud
 
 ## Table of Contents
 1. [Prerequisites](#prerequisites)
@@ -18,7 +18,7 @@
 
 You will need:
 - ✅ 3 new Ubuntu 22.04 LTS VPS servers (minimum 1GB RAM, 20GB SSD each)
-- ✅ Cloudflare account with domain `matrixchat.space` (free or paid)
+- ✅ Cloudflare account with domain `koompi.cloud` (free or paid)
 - ✅ MongoDB Atlas free tier account (M0 cluster with 3 replicas)
 - ✅ Bun runtime installed on your machine (for development)
 - ✅ SSH access to all servers with public key authentication
@@ -281,7 +281,7 @@ If connection fails, check:
 
 1. Go to https://dash.cloudflare.com
 2. Click **"Add a site"**
-3. Enter domain: `matrixchat.space`
+3. Enter domain: `koompi.cloud`
 4. Select **"Free"** plan
 5. Update your domain registrar's nameservers to Cloudflare's nameservers:
    - `nathan.ns.cloudflare.com`
@@ -300,7 +300,7 @@ For scaling, you need to point all 3 VPS IPs so Cloudflare can load balance traf
 
 **A Record 1:**
 - Type: `A`
-- Name: `tunnel` (this creates `tunnel.matrixchat.space`)
+- Name: `tunnel` (this creates `tunnel.koompi.cloud`)
 - IPv4 address: `<your-vps1-ip>`
 - Proxy status: **Proxied** (orange cloud)
 - TTL: Auto
@@ -322,7 +322,7 @@ For scaling, you need to point all 3 VPS IPs so Cloudflare can load balance traf
 - TTL: Auto
 - Click **"Save"**
 
-Now `tunnel.matrixchat.space` resolves to all 3 VPS IPs via **Cloudflare Load Balancing** (free with any plan).
+Now `tunnel.koompi.cloud` resolves to all 3 VPS IPs via **Cloudflare Load Balancing** (free with any plan).
 
 ### About SSL/TLS with Cloudflare Proxy (Orange Cloud)
 
@@ -335,7 +335,7 @@ Here's why:
 │  SSL/TLS Connection Flow                                  │
 └──────────────────────────────────────────────────────────┘
 
-HTTPS Request to: app1.tunnel.matrixchat.space
+HTTPS Request to: app1.tunnel.koompi.cloud
     ↓
 [Client ←→ Cloudflare] ← Cloudflare provides SSL cert
     ↓
@@ -356,13 +356,13 @@ Two SSL connections are needed:
 
 **What happens if you don't have Let's Encrypt cert:**
 ```
-Client: https://app1.tunnel.matrixchat.space
+Client: https://app1.tunnel.koompi.cloud
     ↓
 Cloudflare: OK, I'll handle that
     ↓
 Cloudflare → VPS: sends request over HTTPS
     ↓
-VPS Nginx: "I don't have certificate for app1.tunnel.matrixchat.space"
+VPS Nginx: "I don't have certificate for app1.tunnel.koompi.cloud"
     ↓
 ERROR: SSL certificate problem or connection reset
 ```
@@ -394,14 +394,14 @@ Most secure, requires Let's Encrypt cert
 2. VPS has valid Let's Encrypt certificate ✅
 3. Nginx configured with certificate paths ✅
 
-So **YES, you still need Let's Encrypt!** The wildcard certificate for `*.matrixchat.space` is essential.
+So **YES, you still need Let's Encrypt!** The wildcard certificate for `*.koompi.cloud` is essential.
 
 ### How This Scales
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Client requests: tunnel.matrixchat.space               │
-│  (example: app1.tunnel.matrixchat.space)                │
+│  Client requests: tunnel.koompi.cloud               │
+│  (example: app1.tunnel.koompi.cloud)                │
 └──────────────────────┬──────────────────────────────────┘
                        │
                        ▼
@@ -429,7 +429,7 @@ So **YES, you still need Let's Encrypt!** The wildcard certificate for `*.matrix
 ```
 
 **What happens when a client connects:**
-1. DNS lookup for `app1.tunnel.matrixchat.space`
+1. DNS lookup for `app1.tunnel.koompi.cloud`
 2. Cloudflare returns one of the 3 VPS IPs (round-robin or performance-based)
 3. Client connects to that VPS's nginx
 4. Nginx looks up which local port is hosting the tunnel for `app1`
@@ -450,9 +450,9 @@ Already using this with 3 A records - good enough for most uses.
 
 **Option 2: Use Cloudflare CNAME + Geo-routing**
 Create multiple CNAME records for different regions:
-- `tunnel-us.matrixchat.space` → VPS 1 (US)
-- `tunnel-eu.matrixchat.space` → VPS 2 (EU)
-- `tunnel-ap.matrixchat.space` → VPS 3 (Asia-Pacific)
+- `tunnel-us.koompi.cloud` → VPS 1 (US)
+- `tunnel-eu.koompi.cloud` → VPS 2 (EU)
+- `tunnel-ap.koompi.cloud` → VPS 3 (Asia-Pacific)
 
 **Option 3: AWS/DigitalOcean Load Balancer (Paid, $20-40/month)**
 ```
@@ -475,7 +475,7 @@ This gives instant failover detection, but costs extra.
 5. Permissions:
    - Zone / DNS / Edit
    - Zone / Zone / Read
-6. Zone Resources: **Include - Specific zone - matrixchat.space**
+6. Zone Resources: **Include - Specific zone - koompi.cloud**
 7. Click **"Create Token"**
 8. **Copy and save the token** - you'll need this
 
@@ -521,39 +521,39 @@ ls -la /etc/letsencrypt/cloudflare.ini
 sudo certbot certonly \
   --dns-cloudflare \
   --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
-  -d matrixchat.space \
-  -d "*.matrixchat.space" \
-  --email admin@matrixchat.space \
+  -d koompi.cloud \
+  -d "*.koompi.cloud" \
+  --email admin@koompi.cloud \
   --agree-tos \
   --non-interactive \
   --preferred-challenges dns-01 \
   --rsa-key-size 4096
 
 # Verify certificate was created
-sudo ls -la /etc/letsencrypt/live/matrixchat.space/
+sudo ls -la /etc/letsencrypt/live/koompi.cloud/
 ```
 
 You should see:
 ```
-cert.pem -> ../../archive/matrixchat.space/cert1.pem
-chain.pem -> ../../archive/matrixchat.space/chain1.pem
-fullchain.pem -> ../../archive/matrixchat.space/fullchain1.pem
-privkey.pem -> ../../archive/matrixchat.space/privkey1.pem
+cert.pem -> ../../archive/koompi.cloud/cert1.pem
+chain.pem -> ../../archive/koompi.cloud/chain1.pem
+fullchain.pem -> ../../archive/koompi.cloud/fullchain1.pem
+privkey.pem -> ../../archive/koompi.cloud/privkey1.pem
 ```
 
 ### Verify Certificate Details
 
 ```bash
 # Check certificate expiration date
-sudo openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -dates
+sudo openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -dates
 
 # Check certificate domains
-sudo openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -text | grep -A1 "Subject Alternative Name"
+sudo openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -text | grep -A1 "Subject Alternative Name"
 
 # Should show:
 # notBefore=... (issue date)
 # notAfter=... (expiration date - 90 days from now)
-# DNS:matrixchat.space, DNS:*.matrixchat.space
+# DNS:koompi.cloud, DNS:*.koompi.cloud
 ```
 
 ### Setup Automatic Certificate Renewal (Critical for Production)
@@ -582,11 +582,11 @@ curl -X POST http://localhost:3000/certificates/upload \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "domain": "matrixchat.space",
-    "certPem": "'"$(cat /etc/letsencrypt/live/matrixchat.space/cert.pem | base64 -w0)"'",
-    "chainPem": "'"$(cat /etc/letsencrypt/live/matrixchat.space/chain.pem | base64 -w0)"'",
-    "fullchainPem": "'"$(cat /etc/letsencrypt/live/matrixchat.space/fullchain.pem | base64 -w0)"'",
-    "privkeyPem": "'"$(cat /etc/letsencrypt/live/matrixchat.space/privkey.pem | base64 -w0)"'"
+    "domain": "koompi.cloud",
+    "certPem": "'"$(cat /etc/letsencrypt/live/koompi.cloud/cert.pem | base64 -w0)"'",
+    "chainPem": "'"$(cat /etc/letsencrypt/live/koompi.cloud/chain.pem | base64 -w0)"'",
+    "fullchainPem": "'"$(cat /etc/letsencrypt/live/koompi.cloud/fullchain.pem | base64 -w0)"'",
+    "privkeyPem": "'"$(cat /etc/letsencrypt/live/koompi.cloud/privkey.pem | base64 -w0)"'"
   }'
 ```
 
@@ -625,7 +625,7 @@ set -e
 
 # Configuration
 MONGODB_URI="your-mongodb-connection-string"
-DOMAIN="matrixchat.space"
+DOMAIN="koompi.cloud"
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 LOG_FILE="/var/log/cert-sync.log"
 TEMP_DIR="/tmp/cert-sync"
@@ -709,7 +709,7 @@ Paste:
 #!/bin/bash
 # This runs automatically after certbot renews
 
-DOMAIN="matrixchat.space"
+DOMAIN="koompi.cloud"
 API_KEY="your-api-key"
 CONTROL_SERVER="http://localhost:3000"
 
@@ -740,18 +740,18 @@ sudo chmod +x /etc/letsencrypt/renewal-hooks/post/sync-to-mongodb.sh
 
 ```bash
 # Check certificate in MongoDB
-curl http://localhost:3000/certificates/download/matrixchat.space \
+curl http://localhost:3000/certificates/download/koompi.cloud \
   -H "Authorization: Bearer $API_KEY" \
   | jq '.expiry'
 
 # Check on VPS 1
-ssh root@1.2.3.4 "openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -dates"
+ssh root@1.2.3.4 "openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -dates"
 
 # Check on VPS 2
-ssh root@5.6.7.8 "openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -dates"
+ssh root@5.6.7.8 "openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -dates"
 
 # Check on VPS 3
-ssh root@9.10.11.12 "openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -dates"
+ssh root@9.10.11.12 "openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -dates"
 
 # All should show same expiry date
 ```
@@ -975,11 +975,11 @@ sudo ufw status numbered
 
 # Server Configuration
 PORT=3000
-VPS_HOST=tunnel.matrixchat.space
+VPS_HOST=tunnel.koompi.cloud
 VPS_USER=root
 VPS_PORT=22
 NGINX_PATH=/etc/nginx/sites-available
-BASE_DOMAIN=tunnel.matrixchat.space
+BASE_DOMAIN=tunnel.koompi.cloud
 
 # API Security (CRITICAL - change this!)
 API_KEY=your-super-secret-api-key-change-this-123456
@@ -1210,13 +1210,13 @@ curl http://control-server-ip:3000/vps \
 ## Step 9: Register Base Domain
 
 ```bash
-# Register matrixchat.space as base domain (no cert needed, using system cert)
+# Register koompi.cloud as base domain (no cert needed, using system cert)
 curl -X POST http://control-server-ip:3000/domains \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-api-key-from-env" \
   -d '{
-    "domain": "matrixchat.space",
-    "certbotEmail": "admin@matrixchat.space",
+    "domain": "koompi.cloud",
+    "certbotEmail": "admin@koompi.cloud",
     "cloudflareToken": "your-cloudflare-token-from-step-3"
   }'
 
@@ -1226,7 +1226,7 @@ curl -X POST http://control-server-ip:3000/domains \
 #   "message": "Custom domain registered successfully",
 #   "domain": {
 #     "id": "...",
-#     "domain": "matrixchat.space",
+#     "domain": "koompi.cloud",
 #     "active": true,
 #     "synced": true,
 #     ...
@@ -1257,8 +1257,8 @@ For detailed configuration of MongoDB certificate sync, including:
 
 ```bash
 # Test DNS resolution (should return 3 IPs)
-nslookup tunnel.matrixchat.space
-dig tunnel.matrixchat.space +short
+nslookup tunnel.koompi.cloud
+dig tunnel.koompi.cloud +short
 
 # Should return all 3 VPS IPs (in any order):
 # 1.2.3.4
@@ -1266,12 +1266,12 @@ dig tunnel.matrixchat.space +short
 # 9.10.11.12
 
 # Test SSL/TLS connection to each VPS
-openssl s_client -connect 1.2.3.4:443 -servername tunnel.matrixchat.space
-# Should show certificate for matrixchat.space with status: Verify return code: 0 (ok)
+openssl s_client -connect 1.2.3.4:443 -servername tunnel.koompi.cloud
+# Should show certificate for koompi.cloud with status: Verify return code: 0 (ok)
 
 # Repeat for other VPS:
-openssl s_client -connect 5.6.7.8:443 -servername tunnel.matrixchat.space
-openssl s_client -connect 9.10.11.12:443 -servername tunnel.matrixchat.space
+openssl s_client -connect 5.6.7.8:443 -servername tunnel.koompi.cloud
+openssl s_client -connect 9.10.11.12:443 -servername tunnel.koompi.cloud
 ```
 
 ### Certificate Validation
@@ -1279,13 +1279,13 @@ openssl s_client -connect 9.10.11.12:443 -servername tunnel.matrixchat.space
 ```bash
 # Check all certificates are identical and valid
 echo "=== VPS 1 Certificate ===" && \
-  ssh root@1.2.3.4 "openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -fingerprint"
+  ssh root@1.2.3.4 "openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -fingerprint"
 
 echo "=== VPS 2 Certificate ===" && \
-  ssh root@5.6.7.8 "openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -fingerprint"
+  ssh root@5.6.7.8 "openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -fingerprint"
 
 echo "=== VPS 3 Certificate ===" && \
-  ssh root@9.10.11.12 "openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -fingerprint"
+  ssh root@9.10.11.12 "openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -fingerprint"
 
 # All fingerprints should be IDENTICAL
 ```
@@ -1309,7 +1309,7 @@ bun -e "const uri=process.env.MONGODB_URI; console.log('Testing:', uri.split('@'
 curl http://localhost:3000/health -v
 
 # VPS nginx status (should all show 200)
-curl -k https://tunnel.matrixchat.space/health -v
+curl -k https://tunnel.koompi.cloud/health -v
 curl -k https://1.2.3.4/health -v
 curl -k https://5.6.7.8/health -v
 curl -k https://9.10.11.12/health -v
@@ -1326,7 +1326,7 @@ for i in {1..6}; do
   curl -X POST http://localhost:3000/domains \
     -H "Authorization: Bearer $API_KEY" \
     -H "Content-Type: application/json" \
-    -d '{"domain":"test'$i'.matrixchat.space"}' \
+    -d '{"domain":"test'$i'.koompi.cloud"}' \
     -w "HTTP %{http_code}\n"
   sleep 1
 done
@@ -1351,7 +1351,7 @@ curl -X POST http://localhost:3000/test-notification \
 apt install -y apache2-utils
 
 # Simulate 100 concurrent users
-ab -n 1000 -c 100 https://tunnel.matrixchat.space/
+ab -n 1000 -c 100 https://tunnel.koompi.cloud/
 
 # Monitor resource usage
 watch -n 1 "free -h && ps aux | grep jrok"
@@ -1371,7 +1371,7 @@ echo "========================================"
 
 echo ""
 echo "1️⃣ DNS Resolution..."
-if nslookup tunnel.matrixchat.space | grep -q "1.2.3.4"; then
+if nslookup tunnel.koompi.cloud | grep -q "1.2.3.4"; then
     echo "✅ DNS resolves all VPS"
 else
     echo "❌ DNS resolution failed"
@@ -1381,7 +1381,7 @@ fi
 echo ""
 echo "2️⃣ Certificate Validation..."
 for ip in 1.2.3.4 5.6.7.8 9.10.11.12; do
-    if ssh root@$ip "openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -dates" > /dev/null; then
+    if ssh root@$ip "openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -dates" > /dev/null; then
         echo "✅ Certificate valid on $ip"
     else
         echo "❌ Certificate missing on $ip"
@@ -1450,14 +1450,14 @@ bun client.ts \
 
 # You should see:
 # Connected to server as agent: agent-abc123
-# Listening on testapp.tunnel.matrixchat.space
+# Listening on testapp.tunnel.koompi.cloud
 ```
 
 ### Access Your Service
 
 ```bash
 # In another terminal
-curl https://testapp.tunnel.matrixchat.space
+curl https://testapp.tunnel.koompi.cloud
 
 # You should see the HTTP server response!
 # If you used http-server, you'll see the directory listing HTML
@@ -1479,15 +1479,15 @@ bun client.ts --server http://control-server:3000 \
   --domain app-b --port 8081 --auth "your-key"
 
 # Access both:
-curl https://app-a.tunnel.matrixchat.space
-curl https://app-b.tunnel.matrixchat.space
+curl https://app-a.tunnel.koompi.cloud
+curl https://app-b.tunnel.koompi.cloud
 ```
 
 ### 2. Test Domain Transfer
 
 ```bash
 # Transfer domain from VPS 1 to VPS 2
-curl -X POST http://control-server:3000/domains/matrixchat.space/transfer \
+curl -X POST http://control-server:3000/domains/koompi.cloud/transfer \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-api-key" \
   -d '{
@@ -1500,15 +1500,15 @@ curl -X POST http://control-server:3000/domains/matrixchat.space/transfer \
 
 ```bash
 # Create backup
-curl -X POST http://control-server:3000/domains/matrixchat.space/backup \
+curl -X POST http://control-server:3000/domains/koompi.cloud/backup \
   -H "Authorization: Bearer your-api-key"
 
 # List backups
-curl http://control-server:3000/domains/matrixchat.space/backup \
+curl http://control-server:3000/domains/koompi.cloud/backup \
   -H "Authorization: Bearer your-api-key"
 
 # Restore from backup
-curl -X POST http://control-server:3000/domains/matrixchat.space/backups/backup-id-here/restore \
+curl -X POST http://control-server:3000/domains/koompi.cloud/backups/backup-id-here/restore \
   -H "Authorization: Bearer your-api-key"
 ```
 
@@ -1530,7 +1530,7 @@ If you set up Telegram:
 sudo systemctl status jrok
 
 # Check certificate expiry (should be 30+ days)
-sudo openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -dates
+sudo openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -dates
 
 # Check disk space
 df -h /
@@ -1570,7 +1570,7 @@ curl http://localhost:3000/rate-limit-stats \
   -H "Authorization: Bearer $API_KEY"
 
 # Test disaster recovery (restore from backup)
-curl -X POST http://localhost:3000/domains/matrixchat.space/backup \
+curl -X POST http://localhost:3000/domains/koompi.cloud/backup \
   -H "Authorization: Bearer $API_KEY"
 
 # Verify certificate backups exist
@@ -1589,7 +1589,7 @@ DATE=$(date +%Y%m%d-%H%M%S)
 mkdir -p $BACKUP_DIR
 
 # Backup certificates
-tar -czf $BACKUP_DIR/certs-$DATE.tar.gz /etc/letsencrypt/live/matrixchat.space/
+tar -czf $BACKUP_DIR/certs-$DATE.tar.gz /etc/letsencrypt/live/koompi.cloud/
 
 # Backup .env (keep separate, encrypted)
 tar -czf $BACKUP_DIR/.env-$DATE.tar.gz /root/jrok/.env
@@ -1621,8 +1621,8 @@ sudo crontab -e
 sudo certbot certificates
 
 # Should show:
-# Certificate Name: matrixchat.space
-# Domains: matrixchat.space, *.matrixchat.space
+# Certificate Name: koompi.cloud
+# Domains: koompi.cloud, *.koompi.cloud
 # Expiry Date: YYYY-MM-DD (should be ~90 days out)
 ```
 
@@ -1633,7 +1633,7 @@ Add to crontab to check 14 days before expiry:
 ```bash
 # Create script: /usr/local/bin/check-cert-expiry.sh
 #!/bin/bash
-CERT="/etc/letsencrypt/live/matrixchat.space/cert.pem"
+CERT="/etc/letsencrypt/live/koompi.cloud/cert.pem"
 EXPIRY=$(openssl x509 -in $CERT -noout -dates | grep notAfter | cut -d= -f2)
 EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
 NOW_EPOCH=$(date +%s)
@@ -1662,18 +1662,18 @@ fi
 sudo certbot certonly \
   --dns-cloudflare \
   --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
-  -d matrixchat.space \
-  -d "*.matrixchat.space" \
+  -d koompi.cloud \
+  -d "*.koompi.cloud" \
   --force-renewal
 
 # Copy to all VPS:
 for ip in 1.2.3.4 5.6.7.8 9.10.11.12; do
-    scp -r /etc/letsencrypt/live/matrixchat.space/ root@$ip:/etc/letsencrypt/live/
+    scp -r /etc/letsencrypt/live/koompi.cloud/ root@$ip:/etc/letsencrypt/live/
     ssh root@$ip "systemctl restart nginx"
 done
 
 # Verify all working
-curl -k https://tunnel.matrixchat.space/health
+curl -k https://tunnel.koompi.cloud/health
 ```
 
 ### VPS Server Down (Complete Failure)
@@ -1740,14 +1740,14 @@ tar -xzf /backups/jrok/app-data-YYYYMMDD-HHMMSS.tar.gz -C /
 
 - [ ] 3 Ubuntu VPS servers are ready with nginx installed
 - [ ] MongoDB Atlas cluster is created with database user
-- [ ] Domain `matrixchat.space` is added to Cloudflare
-- [ ] A record `tunnel.matrixchat.space` points to VPS 1 IP
+- [ ] Domain `koompi.cloud` is added to Cloudflare
+- [ ] A record `tunnel.koompi.cloud` points to VPS 1 IP
 - [ ] Cloudflare API token is created and saved
-- [ ] Wildcard certificate is issued for `*.matrixchat.space`
+- [ ] Wildcard certificate is issued for `*.koompi.cloud`
 - [ ] Certificate is copied to all 3 VPS servers
 - [ ] Control server is deployed and running
 - [ ] All 3 VPS servers are registered in control server
-- [ ] Base domain `matrixchat.space` is registered
+- [ ] Base domain `koompi.cloud` is registered
 - [ ] Test tunnel can be created and accessed
 - [ ] Telegram bot is connected (optional)
 
@@ -1789,11 +1789,11 @@ jrok/
 ```bash
 # Required for all deployments
 PORT=3000                                    # Control server port
-VPS_HOST=tunnel.matrixchat.space             # Base domain
+VPS_HOST=tunnel.koompi.cloud             # Base domain
 VPS_USER=root                                # SSH user
 VPS_PORT=22                                  # SSH port
 NGINX_PATH=/etc/nginx/sites-available        # Nginx config location
-BASE_DOMAIN=tunnel.matrixchat.space          # Base domain again
+BASE_DOMAIN=tunnel.koompi.cloud          # Base domain again
 API_KEY=your-secret-api-key                  # Your API key
 MONGODB_URI=mongodb+srv://...                # MongoDB connection
 
@@ -1866,7 +1866,7 @@ sudo systemctl restart nginx
 **Problem: Certificate expired or renewal failed**
 ```bash
 # Check expiry date
-sudo openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -dates
+sudo openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -dates
 
 # Manual renewal
 sudo certbot renew --force-renewal -v
@@ -1876,7 +1876,7 @@ sudo certbot renew --force-renewal -v
 sudo cat /etc/letsencrypt/cloudflare.ini | head -1
 
 # 2. DNS can be updated
-nslookup _acme-challenge.matrixchat.space
+nslookup _acme-challenge.koompi.cloud
 
 # 3. Internet connectivity
 ping -c 1 1.1.1.1
@@ -1888,10 +1888,10 @@ ping -c 1 1.1.1.1
 **Problem: Certificate not found on VPS**
 ```bash
 # Check if certificate exists
-ssh root@<vps-ip> "ls -la /etc/letsencrypt/live/matrixchat.space/"
+ssh root@<vps-ip> "ls -la /etc/letsencrypt/live/koompi.cloud/"
 
 # If missing, copy from control server
-scp -r /etc/letsencrypt/live/matrixchat.space/ root@<vps-ip>:/etc/letsencrypt/live/
+scp -r /etc/letsencrypt/live/koompi.cloud/ root@<vps-ip>:/etc/letsencrypt/live/
 ssh root@<vps-ip> "systemctl restart nginx"
 ```
 
@@ -1900,7 +1900,7 @@ ssh root@<vps-ip> "systemctl restart nginx"
 # Get fingerprints from all servers
 for ip in 1.2.3.4 5.6.7.8 9.10.11.12; do
     echo "VPS at $ip:"
-    ssh root@$ip "openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -fingerprint"
+    ssh root@$ip "openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -fingerprint"
 done
 
 # If different:
@@ -1911,11 +1911,11 @@ done
 
 ### DNS & Network Issues
 
-**Problem: tunnel.matrixchat.space doesn't resolve**
+**Problem: tunnel.koompi.cloud doesn't resolve**
 ```bash
 # Check DNS propagation
-nslookup tunnel.matrixchat.space
-dig tunnel.matrixchat.space +short
+nslookup tunnel.koompi.cloud
+dig tunnel.koompi.cloud +short
 
 # Should return 3 IPs
 # If not:
@@ -1928,7 +1928,7 @@ dig tunnel.matrixchat.space +short
 **Problem: Cannot connect to VPS on port 443**
 ```bash
 # Test connectivity
-openssl s_client -connect 1.2.3.4:443 -servername tunnel.matrixchat.space
+openssl s_client -connect 1.2.3.4:443 -servername tunnel.koompi.cloud
 
 # If fails:
 # 1. Check firewall on VPS
@@ -2097,21 +2097,21 @@ ssh root@<vps-ip> "sudo systemctl restart nginx"
 **Problem: SSL certificate errors in browser**
 ```bash
 # Check certificate is valid
-openssl s_client -connect tunnel.matrixchat.space:443
+openssl s_client -connect tunnel.koompi.cloud:443
 
 # Common causes:
 # 1. Certificate doesn't match domain
-# Check: Subject/SAN contains *.matrixchat.space
+# Check: Subject/SAN contains *.koompi.cloud
 
 # 2. Certificate expired
 # Check: notAfter date is in future
 
 # 3. Certificate not on VPS
-# Check: ls /etc/letsencrypt/live/matrixchat.space/
+# Check: ls /etc/letsencrypt/live/koompi.cloud/
 
 # Solutions:
 # 1. Copy valid certificate
-scp -r /etc/letsencrypt/live/matrixchat.space/ root@<vps-ip>:/etc/letsencrypt/live/
+scp -r /etc/letsencrypt/live/koompi.cloud/ root@<vps-ip>:/etc/letsencrypt/live/
 
 # 2. Restart nginx
 ssh root@<vps-ip> "sudo systemctl restart nginx"
@@ -2295,7 +2295,7 @@ tar -czf diagnostics.tar.gz /tmp/diagnostics/
 - [ ] All other collections auto-created on first run
 
 **CLOUDFLARE DOMAIN SETUP:**
-- [ ] Domain `matrixchat.space` added to Cloudflare
+- [ ] Domain `koompi.cloud` added to Cloudflare
 - [ ] Nameservers updated at registrar
 - [ ] DNS propagation confirmed (nslookup test passed)
 - [ ] 3 A records created for all VPS IPs
@@ -2307,12 +2307,12 @@ tar -czf diagnostics.tar.gz /tmp/diagnostics/
 **CERTIFICATE MANAGEMENT:**
 - [ ] Certbot installed on control server
 - [ ] Cloudflare credentials file configured (600 permissions)
-- [ ] Wildcard certificate issued: `*.matrixchat.space`
-- [ ] Base domain certificate issued: `matrixchat.space`
+- [ ] Wildcard certificate issued: `*.koompi.cloud`
+- [ ] Base domain certificate issued: `koompi.cloud`
 - [ ] Certificate valid date verified (90-day lifetime)
 - [ ] Certificate covers both domains (SAN)
 - [ ] Certificate copied to all 3 VPS servers
-- [ ] Certificate copied to: `/etc/letsencrypt/live/matrixchat.space/`
+- [ ] Certificate copied to: `/etc/letsencrypt/live/koompi.cloud/`
 - [ ] Certificate permissions correct (644 for certs, 600 for private key)
 - [ ] Certificate fingerprint identical on all servers
 - [ ] Nginx restarted after certificate copy
@@ -2360,7 +2360,7 @@ tar -czf diagnostics.tar.gz /tmp/diagnostics/
 - [ ] Audit logging configured
 
 **VALIDATION & TESTING:**
-- [ ] DNS resolution tested: `nslookup tunnel.matrixchat.space`
+- [ ] DNS resolution tested: `nslookup tunnel.koompi.cloud`
 - [ ] Returns all 3 VPS IPs (round-robin)
 - [ ] SSL certificate valid: `openssl s_client` on all VPS
 - [ ] Certificate chain complete (fullchain.pem)

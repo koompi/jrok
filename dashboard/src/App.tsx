@@ -7,6 +7,9 @@ import DashboardHome from './pages/dashboard/DashboardHome';
 import OrganizationsPage from './pages/dashboard/OrganizationsPage';
 import OrganizationDetailPage from './pages/dashboard/OrganizationDetailPage';
 import ApiKeysPage from './pages/dashboard/ApiKeysPage';
+import TunnelsPage from './pages/dashboard/TunnelsPage';
+import DomainsPage from './pages/dashboard/DomainsPage';
+import ActivityPage from './pages/dashboard/ActivityPage';
 import AdminDashboard from './pages/AdminDashboard';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -62,9 +65,12 @@ function App() {
         }
       >
         <Route index element={<DashboardHome />} />
+        <Route path="tunnels" element={<TunnelsPage />} />
+        <Route path="domains" element={<DomainsPage />} />
         <Route path="organizations" element={<OrganizationsPage />} />
         <Route path="organizations/:id" element={<OrganizationDetailPage />} />
         <Route path="api-keys" element={<ApiKeysPage />} />
+        <Route path="activity" element={<ActivityPage />} />
         
         {/* Admin routes */}
         <Route

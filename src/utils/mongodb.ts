@@ -138,6 +138,17 @@ export function getCollections(): Collections {
   return collections;
 }
 
+export async function getDatabase(): Promise<Db> {
+  if (!db) {
+    throw new Error("Database not connected. Call connectDatabase() first.");
+  }
+  return db;
+}
+
+export function getClient(): MongoClient | null {
+  return client || null;
+}
+
 export async function closeDatabase(): Promise<void> {
   if (client) {
     await client.close();

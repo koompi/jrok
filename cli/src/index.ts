@@ -9,8 +9,12 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
+import { createInterface } from 'readline';
+import { randomUUID } from 'crypto';
+import WebSocket from 'ws';
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
+const DEFAULT_SERVER = "https://tunnel.koompi.cloud";
 
 // Config file path
 const CONFIG_DIR = join(homedir(), '.jrok');
@@ -82,17 +86,58 @@ function saveStoredConfig(config: StoredConfig): void {
   }
 }
 
+// Helper to prompt user for input
+async function promptInput(question: string, isPassword = false): Promise<string> {
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+// Generate a short UUID for subdomain
+function generateSubdomain(): string {
+  return randomUUID().split('-')[0]; // Use first segment (8 chars)
+}
+
+// Extract base domain from server URL
+function getBaseDomain(serverUrl: string): string {
+  try {
+    const url = new URL(serverUrl);
+    return url.hostname;
+  } catch {
+    return 'tunnel.koompi.cloud';
+  }
+}
+
 function parseArgs(): { command: string; subcommand?: string; args: Record<string, string> } {
   const argv = process.argv.slice(2);
-  const command = argv[0]?.toLowerCase() || 'help';
+  let command = argv[0]?.toLowerCase() || 'help';
   let subcommand: string | undefined;
   const args: Record<string, string> = {};
 
   let startIndex = 1;
-  // Check for subcommand (e.g., 'org list', 'apikey create')
-  if (argv[1] && !argv[1].startsWith('--')) {
-    subcommand = argv[1].toLowerCase();
-    startIndex = 2;
+
+  // Check if first arg is --port (shorthand for connect)
+  if (command === '--port' || command === '-p') {
+    command = 'connect';
+    startIndex = 0; // Process all args including --port
+  } else if (command.startsWith('--')) {
+    // Any flag as first argument means implicit connect
+    command = 'connect';
+    startIndex = 0;
+  } else {
+    // Check for subcommand (e.g., 'org list', 'apikey create')
+    if (argv[1] && !argv[1].startsWith('--')) {
+      subcommand = argv[1].toLowerCase();
+      startIndex = 2;
+    }
   }
 
   for (let i = startIndex; i < argv.length; i++) {
@@ -108,6 +153,10 @@ function parseArgs(): { command: string; subcommand?: string; args: Record<strin
       } else {
         args[key] = 'true'; // Flag without value
       }
+    } else if (arg === '-p' && argv[i + 1] && !argv[i + 1].startsWith('-')) {
+      // Support -p as shorthand for --port
+      args['port'] = argv[i + 1];
+      i++;
     }
   }
 
@@ -121,7 +170,7 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
                      'port';
 
   return {
-    serverUrl: args["server"] || process.env.JROK_SERVER || storedConfig.serverUrl,
+    serverUrl: args["server"] || process.env.JROK_SERVER || storedConfig.serverUrl || DEFAULT_SERVER,
     domain: args["domain"] || process.env.JROK_DOMAIN,
     port: args["port"] ? parseInt(args["port"]) : 
           process.env.JROK_PORT ? parseInt(process.env.JROK_PORT) : 
@@ -137,9 +186,7 @@ function validateConnectConfig(config: Partial<ClientConfig>): asserts config is
   if (!config.serverUrl) {
     throw new Error("Missing serverUrl. Use --server or JROK_SERVER env var");
   }
-  if (!config.domain) {
-    throw new Error("Missing domain. Use --domain or JROK_DOMAIN env var");
-  }
+  // Domain is now optional - will auto-generate if not provided
   if (!config.authToken) {
     throw new Error("Missing authToken. Use --auth or JROK_AUTH env var");
   }
@@ -175,15 +222,32 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
     
     console.log(`📥 ${method} ${path} → ${localUrl}`);
     
+    // Filter out hop-by-hop headers that shouldn't be forwarded
+    const forwardHeaders: Record<string, string> = {};
+    const hopByHopHeaders = new Set([
+      'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+      'te', 'trailers', 'transfer-encoding', 'upgrade',
+      'content-length', // Let fetch handle this
+    ]);
+    
+    if (headers) {
+      for (const [key, value] of Object.entries(headers)) {
+        if (!hopByHopHeaders.has(key.toLowerCase())) {
+          forwardHeaders[key] = value as string;
+        }
+      }
+    }
+    
     // Forward request to local service
     const localResponse = await fetch(localUrl, {
       method,
-      headers: headers || {},
+      headers: forwardHeaders,
       body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
     });
     
-    // Read response
-    const responseBody = await localResponse.text();
+    // Read response - use ArrayBuffer for binary content
+    const responseBuffer = await localResponse.arrayBuffer();
+    const responseBody = Buffer.from(responseBuffer).toString('base64');
     const responseHeaders: Record<string, string> = {};
     localResponse.headers.forEach((value, key) => {
       responseHeaders[key] = value;
@@ -197,6 +261,7 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
       statusText: localResponse.statusText,
       headers: responseHeaders,
       body: responseBody,
+      isBase64: true,
     }));
     
     console.log(`📤 ${localResponse.status} ${localResponse.statusText}`);
@@ -216,6 +281,9 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
 }
 
 async function connectAgent(config: ClientConfig): Promise<void> {
+  const baseDomain = getBaseDomain(config.serverUrl);
+  const fullDomain = `${config.domain}.${baseDomain}`;
+  
   const wsUrl = new URL(config.serverUrl);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
   wsUrl.pathname = "/ws/agent";
@@ -251,11 +319,11 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   ws.onopen = () => {
     reconnectAttempts = 0;
     console.log("✅ Connected to server!");
-    console.log(`🌐 Your service is now available at: https://${config.domain}`);
+    console.log(`🌐 Your service is now available at: https://${fullDomain}`);
 
     // Send heartbeat every 30 seconds
     heartbeatInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (ws.readyState === 1) {  // WebSocket.OPEN = 1
         ws.send(JSON.stringify({ type: "heartbeat" }));
       }
     }, 30000);
@@ -303,10 +371,13 @@ async function connectAgent(config: ClientConfig): Promise<void> {
 
 async function listServices(config: { serverUrl: string; authToken: string }): Promise<void> {
   try {
-    const response = await fetch(`${config.serverUrl}/api/services`, {
+    const baseDomain = getBaseDomain(config.serverUrl);
+    
+    const response = await fetch(`${config.serverUrl}/tunnels`, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${config.authToken}`,
+        'X-API-Key': config.authToken,
       },
     });
 
@@ -314,41 +385,46 @@ async function listServices(config: { serverUrl: string; authToken: string }): P
       throw new Error(`API error: ${response.status} ${response.statusText}`);
     }
 
-    const services: ServiceInfo[] = await response.json();
+    const data = await response.json();
+    const tunnels = data.tunnels || data || [];
 
-    if (services.length === 0) {
-      console.log("📋 No connected services");
+    if (tunnels.length === 0) {
+      console.log("📋 No active tunnels");
+      console.log("💡 Create one with: jrok --port 3000");
       return;
     }
 
-    console.log("\n📋 Connected Services:\n");
-    console.log("Domain".padEnd(30), "Type".padEnd(15), "Target".padEnd(30), "Status");
-    console.log("─".repeat(90));
+    console.log("\n📋 Active Tunnels:\n");
+    console.log("Domain".padEnd(45), "Local".padEnd(20), "Status".padEnd(12), "Created");
+    console.log("─".repeat(95));
 
-    services.forEach((service) => {
-      const status = service.connected ? "✅ Online" : "❌ Offline";
-      const type = service.type === 'docker-swarm' ? 'Docker' : 
-                   service.type === 'kubernetes' ? 'K8s' : 'Port';
+    tunnels.forEach((tunnel: any) => {
+      const status = tunnel.active ? "✅ Online" : "❌ Offline";
+      const local = `${tunnel.localHost || 'localhost'}:${tunnel.localPort}`;
+      const created = tunnel.createdAt ? new Date(tunnel.createdAt).toLocaleDateString() : 'N/A';
+      const subdomain = tunnel.domain || tunnel.subdomain || 'unknown';
+      const fullDomain = subdomain.includes('.') ? subdomain : `${subdomain}.${baseDomain}`;
       console.log(
-        service.domain.padEnd(30),
-        type.padEnd(15),
-        service.target.padEnd(30),
-        status
+        fullDomain.padEnd(45),
+        local.padEnd(20),
+        status.padEnd(12),
+        created
       );
     });
     console.log("");
   } catch (error) {
-    console.error("❌ Error listing services:", error instanceof Error ? error.message : error);
+    console.error("❌ Error listing tunnels:", error instanceof Error ? error.message : error);
     process.exit(1);
   }
 }
 
 async function disconnectService(config: { serverUrl: string; domain: string; authToken: string }): Promise<void> {
   try {
-    const response = await fetch(`${config.serverUrl}/api/services/${config.domain}`, {
+    const response = await fetch(`${config.serverUrl}/tunnels/${config.domain}`, {
       method: 'DELETE',
       headers: {
         'Authorization': `Bearer ${config.authToken}`,
+        'X-API-Key': config.authToken,
       },
     });
 
@@ -356,9 +432,9 @@ async function disconnectService(config: { serverUrl: string; domain: string; au
       throw new Error(`API error: ${response.status} ${response.statusText}`);
     }
 
-    console.log(`✅ Disconnected service: ${config.domain}`);
+    console.log(`✅ Tunnel disconnected: ${config.domain}`);
   } catch (error) {
-    console.error("❌ Error disconnecting service:", error instanceof Error ? error.message : error);
+    console.error("❌ Error disconnecting tunnel:", error instanceof Error ? error.message : error);
     process.exit(1);
   }
 }
@@ -368,15 +444,19 @@ async function disconnectService(config: { serverUrl: string; domain: string; au
 async function listOrganizations(serverUrl: string, authToken: string): Promise<void> {
   try {
     const response = await fetch(`${serverUrl}/organizations`, {
-      headers: { 'Authorization': `Bearer ${authToken}` },
+      headers: { 
+        'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
+      },
     });
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || `API error: ${response.status}`);
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
     }
 
-    const orgs: Organization[] = await response.json();
+    const data = await response.json();
+    const orgs = data.organizations || data || [];
 
     if (orgs.length === 0) {
       console.log("📋 No organizations found");
@@ -385,15 +465,15 @@ async function listOrganizations(serverUrl: string, authToken: string): Promise<
     }
 
     console.log("\n📋 Your Organizations:\n");
-    console.log("ID".padEnd(26), "Name".padEnd(25), "Slug".padEnd(20), "Plan");
+    console.log("ID".padEnd(26), "Name".padEnd(25), "Slug".padEnd(20), "Role");
     console.log("─".repeat(85));
 
-    orgs.forEach((org) => {
+    orgs.forEach((org: any) => {
       console.log(
-        org._id.padEnd(26),
+        (org.id || org._id).padEnd(26),
         org.name.slice(0, 24).padEnd(25),
         org.slug.slice(0, 19).padEnd(20),
-        org.plan || 'free'
+        org.role || 'member'
       );
     });
     console.log("");
@@ -409,6 +489,7 @@ async function createOrganization(serverUrl: string, authToken: string, name: st
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ name }),
@@ -416,17 +497,18 @@ async function createOrganization(serverUrl: string, authToken: string, name: st
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || `API error: ${response.status}`);
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
     }
 
-    const org: Organization = await response.json();
+    const data = await response.json();
+    const org = data.organization || data;
     console.log(`✅ Organization created: ${org.name}`);
-    console.log(`🆔 ID: ${org._id}`);
+    console.log(`🆔 ID: ${org.id || org._id}`);
     console.log(`🔗 Slug: ${org.slug}`);
     
     // Save to config
     const config = loadStoredConfig();
-    config.organizationId = org._id;
+    config.organizationId = org.id || org._id;
     config.organizationName = org.name;
     saveStoredConfig(config);
     console.log(`💾 Set as default organization`);
@@ -448,15 +530,19 @@ async function setDefaultOrganization(orgId: string): Promise<void> {
 async function listApiKeys(serverUrl: string, authToken: string, orgId: string): Promise<void> {
   try {
     const response = await fetch(`${serverUrl}/organizations/${orgId}/api-keys`, {
-      headers: { 'Authorization': `Bearer ${authToken}` },
+      headers: { 
+        'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
+      },
     });
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || `API error: ${response.status}`);
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
     }
 
-    const keys: ApiKey[] = await response.json();
+    const data = await response.json();
+    const keys = data.apiKeys || data || [];
 
     if (keys.length === 0) {
       console.log("🔑 No API keys found");
@@ -465,16 +551,15 @@ async function listApiKeys(serverUrl: string, authToken: string, orgId: string):
     }
 
     console.log("\n🔑 API Keys:\n");
-    console.log("Prefix".padEnd(15), "Name".padEnd(25), "Permissions".padEnd(25), "Last Used");
-    console.log("─".repeat(80));
+    console.log("ID".padEnd(26), "Prefix".padEnd(16), "Name".padEnd(20), "Permissions");
+    console.log("─".repeat(85));
 
-    keys.forEach((key) => {
-      const lastUsed = key.lastUsedAt ? new Date(key.lastUsedAt).toLocaleDateString() : 'Never';
+    keys.forEach((key: any) => {
       console.log(
-        key.keyPrefix.padEnd(15),
-        key.name.slice(0, 24).padEnd(25),
-        key.permissions.join(', ').slice(0, 24).padEnd(25),
-        lastUsed
+        (key.id || key._id).padEnd(26),
+        (key.keyPrefix || 'jrok_...').padEnd(16),
+        key.name.slice(0, 19).padEnd(20),
+        (key.permissions || []).join(', ').slice(0, 20)
       );
     });
     console.log("");
@@ -496,6 +581,7 @@ async function createApiKey(
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ name, permissions }),
@@ -503,18 +589,19 @@ async function createApiKey(
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || `API error: ${response.status}`);
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
     }
 
-    const result = await response.json();
+    const data = await response.json();
+    const rawKey = data.rawKey || data.key;
     
     console.log(`\n✅ API Key created: ${name}`);
     console.log(`\n⚠️  IMPORTANT: Save this key now! It will only be shown once.\n`);
-    console.log(`🔑 API Key: ${result.key}`);
+    console.log(`🔑 API Key: ${rawKey}`);
     console.log(`\nTo use this key:`);
-    console.log(`  jrok config --auth ${result.key}`);
+    console.log(`  jrok config --auth ${rawKey}`);
     console.log(`  # or`);
-    console.log(`  export JROK_AUTH=${result.key}`);
+    console.log(`  export JROK_AUTH=${rawKey}`);
     console.log("");
   } catch (error) {
     console.error("❌ Error creating API key:", error instanceof Error ? error.message : error);
@@ -526,12 +613,15 @@ async function revokeApiKey(serverUrl: string, authToken: string, orgId: string,
   try {
     const response = await fetch(`${serverUrl}/organizations/${orgId}/api-keys/${keyId}`, {
       method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${authToken}` },
+      headers: { 
+        'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
+      },
     });
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new Error(error.error || `API error: ${response.status}`);
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
     }
 
     console.log(`✅ API key revoked: ${keyId}`);
@@ -590,13 +680,23 @@ async function whoami(serverUrl: string, authToken: string): Promise<void> {
       
       // Try to validate by making a request
       const response = await fetch(`${serverUrl}/organizations`, {
-        headers: { 'Authorization': `Bearer ${authToken}` },
+        headers: { 
+          'Authorization': `Bearer ${authToken}`,
+          'X-API-Key': authToken,
+        },
       });
       
       if (response.ok) {
-        const orgs = await response.json();
+        const data = await response.json();
+        const orgs = data.organizations || data || [];
         console.log(`✅ API Key is valid`);
         console.log(`📋 Access to ${orgs.length} organization(s)`);
+        if (orgs.length > 0) {
+          console.log(`\nOrganizations:`);
+          orgs.forEach((org: any) => {
+            console.log(`  - ${org.name} (${org.slug})`);
+          });
+        }
       } else {
         console.log(`❌ API Key is invalid or expired`);
       }
@@ -610,11 +710,13 @@ async function whoami(serverUrl: string, authToken: string): Promise<void> {
         throw new Error('Invalid session token');
       }
       
-      const user = await response.json();
+      const data = await response.json();
+      const user = data.user || data;
       console.log("\n👤 Current User:\n");
-      console.log(`Name:  ${user.name}`);
-      console.log(`Email: ${user.email}`);
-      console.log(`Role:  ${user.role}`);
+      console.log(`Name:   ${user.fullname || user.name}`);
+      console.log(`Email:  ${user.email}`);
+      console.log(`Role:   ${user.role}`);
+      console.log(`Status: ${user.status}`);
       if (user.avatarUrl) {
         console.log(`Avatar: ${user.avatarUrl}`);
       }
@@ -639,9 +741,15 @@ function showHelp(): void {
 ╚══════════════════════════════════════════════════════════════════════╝
 
 QUICK START:
-  1. Get an API key from your dashboard
-  2. jrok config --server https://tunnel.example.com --auth jrok_xxx
-  3. jrok connect --domain myapp.example.com --port 3000
+  jrok --port 3000                               # That's it! 🚀
+  
+  First time? You'll be prompted for your API key.
+  Get one from: ${DEFAULT_SERVER}
+
+SIMPLE USAGE:
+  jrok --port 3000                    # Expose localhost:3000 (auto subdomain)
+  jrok --port 8080                    # Expose localhost:8080 (auto subdomain)
+  jrok --port 3000 --domain myapp     # Expose as myapp.tunnel.koompi.cloud
 
 COMMANDS:
   connect              Connect a local service to public domain
@@ -681,19 +789,25 @@ API KEY COMMANDS:
   jrok apikey revoke --org <org-id> --id <key>   # Revoke API key
 
 CONNECT EXAMPLES:
+  # Quick start (auto subdomain)
+  jrok --port 3000
+  
+  # With custom subdomain
+  jrok --port 3000 --domain myapp
+
   # TCP Port (local dev server)
-  jrok connect --domain dev.example.com --port 3000
+  jrok connect --domain dev --port 3000
 
   # Docker Swarm service
-  jrok connect --domain api.example.com --docker-service my-api
+  jrok connect --domain api --docker-service my-api
 
   # Kubernetes service
-  jrok connect --domain app.example.com --k8s-service my-svc:8080
+  jrok connect --domain app --k8s-service my-svc:8080
 
 OPTIONS:
-  --server           Server URL (or use config/env)
+  --server           Server URL (default: ${DEFAULT_SERVER})
   --auth             API key (or use config/env)
-  --domain           Public domain name
+  --domain           Subdomain (optional, auto-generated if not provided)
   --port             Local port (default: 3000)
   --host             Local host (default: localhost)
   --docker-service   Docker Swarm service name
@@ -703,9 +817,9 @@ OPTIONS:
   --id               ID for apikey operations
 
 ENVIRONMENT VARIABLES:
-  JROK_SERVER     Server URL
+  JROK_SERVER     Server URL (default: ${DEFAULT_SERVER})
   JROK_AUTH       API key
-  JROK_DOMAIN     Domain name
+  JROK_DOMAIN     Subdomain
   JROK_PORT       Local port
   JROK_HOST       Local host
 
@@ -747,6 +861,34 @@ async function main(): Promise<void> {
     switch (command) {
       case "connect": {
         const config = buildConfig(args);
+        
+        // If no auth token, prompt for it
+        if (!config.authToken) {
+          console.log(`\n🔐 No API key configured.`);
+          console.log(`   Get one from your dashboard at ${config.serverUrl || DEFAULT_SERVER}\n`);
+          const authToken = await promptInput('Enter your API key: ');
+          if (!authToken) {
+            console.error('❌ API key is required');
+            process.exit(1);
+          }
+          config.authToken = authToken;
+          
+          // Save for future use
+          const storedCfg = loadStoredConfig();
+          storedCfg.apiKey = authToken;
+          if (!storedCfg.serverUrl) {
+            storedCfg.serverUrl = config.serverUrl || DEFAULT_SERVER;
+          }
+          saveStoredConfig(storedCfg);
+          console.log(`💾 Configuration saved to ${CONFIG_FILE}\n`);
+        }
+        
+        // Auto-generate domain if not provided
+        if (!config.domain) {
+          config.domain = generateSubdomain();
+          console.log(`🎲 Generated subdomain: ${config.domain}`);
+        }
+        
         validateConnectConfig(config);
         await connectAgent(config);
         // Keep the process running

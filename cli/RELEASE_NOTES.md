@@ -44,19 +44,19 @@ npm run dev
 
 # Expose it to the internet
 jrok connect \
-  --server https://tunnel.matrixchat.space \
+  --server https://tunnel.koompi.cloud \
   --domain myapp \
   --port 3000 \
   --auth your-api-key
 ```
 
-Now accessible at: `https://myapp.tunnel.matrixchat.space`
+Now accessible at: `https://myapp.tunnel.koompi.cloud`
 
 ### 2. Docker Service
 
 ```bash
 jrok connect \
-  --server https://tunnel.matrixchat.space \
+  --server https://tunnel.koompi.cloud \
   --domain api \
   --docker-service my-service \
   --auth your-api-key
@@ -66,7 +66,7 @@ jrok connect \
 
 ```bash
 jrok connect \
-  --server https://tunnel.matrixchat.space \
+  --server https://tunnel.koompi.cloud \
   --domain app \
   --k8s-service web-service:8080 \
   --auth your-api-key
@@ -105,7 +105,7 @@ jrok help
 ## 🔧 Environment Variables
 
 ```bash
-export JROK_SERVER=https://tunnel.matrixchat.space
+export JROK_SERVER=https://tunnel.koompi.cloud
 export JROK_AUTH=your-api-key
 export JROK_DOMAIN=myapp
 export JROK_PORT=3000
@@ -150,7 +150,7 @@ None reported yet!
 ## 🙏 Support
 
 - **Issues:** https://github.com/koompi/jrok/issues
-- **Server:** https://tunnel.matrixchat.space
+- **Server:** https://tunnel.koompi.cloud
 - **Repository:** https://github.com/koompi/jrok
 
 ## 📜 License

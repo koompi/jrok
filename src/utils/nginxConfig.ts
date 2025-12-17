@@ -17,9 +17,9 @@ function generateNginxConfig(
   const certDomain = customDomain || config.baseDomain;
   const fullDomain = customDomain ? `${domain}.${customDomain}` : `${domain}.${config.baseDomain}`;
   
-  // Proxy to the jrok app server (not the agent's local port)
-  // The app server will handle forwarding through WebSocket to the agent
-  const proxyTarget = "localhost:3000";
+  // Always proxy to jrok server (not directly to agent's local port)
+  // The jrok server handles forwarding the request through WebSocket to the agent
+  const jrokPort = process.env.JROK_PORT || "3000";
 
   const sslPart = useSSL
     ? `
@@ -53,7 +53,7 @@ server {
 ${sslPart}
 
     location / {
-        proxy_pass http://${localHost}:${localPort};
+        proxy_pass http://localhost:${jrokPort};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

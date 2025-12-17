@@ -2,6 +2,7 @@ import type { Tunnel, TunnelConfig, CreateTunnelRequest } from "../types/index";
 import * as db from "../utils/database";
 import * as agentService from "./agentService";
 import * as vpsService from "./vpsService";
+import * as activityService from "./activityService";
 import { generateId } from "../utils/helpers";
 import { generateNginxConfig, setConfig as setNginxConfig } from "../utils/nginxConfig";
 import { writeFile, mkdir } from "fs/promises";
@@ -141,7 +142,7 @@ async function syncConfigToAllVps(domain: string, localPort: number, localHost: 
   }
 }
 
-export async function createTunnel(request: CreateTunnelRequest, agentId: string): Promise<Tunnel> {
+export async function createTunnel(request: CreateTunnelRequest, agentId: string, organizationId?: string): Promise<Tunnel> {
   // Verify agent is connected
   const agent = agentService.getAgent(agentId);
   if (!agent || !agent.active) {
@@ -167,6 +168,9 @@ export async function createTunnel(request: CreateTunnelRequest, agentId: string
     domain: request.domain,
     agentId,
     customDomain: request.customDomain,
+    organizationId, // Track which org created this tunnel
+    localPort: request.localPort,
+    localHost: request.localHost,
     createdAt: Date.now(),
     expiresAt: request.expiresIn ? Date.now() + request.expiresIn * 1000 : undefined,
     active: true,
@@ -183,6 +187,13 @@ export async function createTunnel(request: CreateTunnelRequest, agentId: string
     // Save to database
     await db.createTunnel(tunnel);
 
+    // Log activity for tunnel creation
+    if (organizationId) {
+      activityService.logTunnelCreated(organizationId, undefined, tunnel.id, tunnel.domain).catch((err) => {
+        console.error("Failed to log tunnel created activity:", err);
+      });
+    }
+
     return tunnel;
   } catch (error) {
     console.error("Failed to create tunnel:", error);
@@ -196,6 +207,11 @@ export async function getTunnel(id: string): Promise<Tunnel | null> {
 
 export async function listTunnels(): Promise<Tunnel[]> {
   return await db.getAllTunnels();
+}
+
+export async function listTunnelsByOrganization(organizationId: string): Promise<Tunnel[]> {
+  const allTunnels = await db.getAllTunnels();
+  return allTunnels.filter(t => t.organizationId === organizationId);
 }
 
 export async function deleteTunnel(id: string): Promise<void> {
