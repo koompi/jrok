@@ -9,6 +9,7 @@ export interface Agent {
   clientIp?: string;
   organizationId?: string;
   apiKeyId?: string;
+  tunnelId?: string; // Cached for performance - avoids MongoDB lookup per request
 }
 
 export interface AgentMessage {

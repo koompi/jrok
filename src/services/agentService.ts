@@ -2,6 +2,8 @@ import type { Agent, AgentMessage } from "../types/index";
 import { generateId } from "../utils/helpers";
 import * as tunnelService from "./tunnelService";
 import * as activityService from "./activityService";
+import { getTunnelByDomain, invalidateTunnelCache } from "../utils/database";
+import { getCollections } from "../utils/mongodb";
 
 // Store active agent connections
 const agents = new Map<string, { agent: Agent; socket: WebSocket }>();
@@ -50,12 +52,13 @@ export function registerAgent(
 
 async function createTunnelForAgent(agent: Agent, agentId: string, organizationId?: string): Promise<void> {
   try {
-    // Check if tunnel already exists for this domain
-    const { getTunnelByDomain, updateTunnel: dbUpdateTunnel } = await import("../utils/database");
-    const { getCollections } = await import("../utils/mongodb");
+    // Check if tunnel already exists for this domain (uses cached lookup)
     const existingTunnel = await getTunnelByDomain(agent.domain);
     
     if (existingTunnel) {
+      // Cache the tunnel ID on the agent for fast lookup
+      agent.tunnelId = existingTunnel.id;
+      
       // Tunnel already exists, just update it with new agent info
       const collections = getCollections();
       await collections.tunnels.updateOne(
@@ -68,10 +71,12 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
           updatedAt: Date.now(),
         }}
       );
+      // Invalidate cache after update
+      invalidateTunnelCache(agent.domain);
       console.log(`✅ Tunnel updated for domain: ${agent.domain}`);
     } else {
       // Create new tunnel
-      await tunnelService.createTunnel(
+      const newTunnel = await tunnelService.createTunnel(
         {
           domain: agent.domain,
           serviceType: "port",
@@ -81,6 +86,14 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
         agentId,
         organizationId
       );
+      
+      // Cache the new tunnel ID on the agent
+      if (newTunnel?.id) {
+        agent.tunnelId = newTunnel.id;
+      }
+      
+      // Invalidate cache after creation
+      invalidateTunnelCache(agent.domain);
       console.log(`✅ Tunnel created automatically for domain: ${agent.domain}`);
     }
   } catch (error) {
@@ -97,12 +110,13 @@ export async function unregisterAgent(id: string): Promise<void> {
 
     // Mark the tunnel as inactive
     try {
-      const { getCollections } = await import("../utils/mongodb");
       const collections = getCollections();
       await collections.tunnels.updateOne(
         { domain: agent.domain },
         { $set: { active: false, updatedAt: Date.now() } }
       );
+      // Invalidate cache when agent disconnects
+      invalidateTunnelCache(agent.domain);
     } catch (error) {
       console.error(`Failed to mark tunnel inactive for ${agent.domain}:`, error);
     }

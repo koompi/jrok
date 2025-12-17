@@ -2,11 +2,47 @@ import type { Tunnel, CustomDomain } from "../types/index";
 import { getCollections } from "./mongodb";
 import { ObjectId } from "mongodb";
 
+// ===== IN-MEMORY CACHE FOR PERFORMANCE =====
+// Avoids MongoDB queries on every proxied request
+
+interface CacheEntry<T> {
+  data: T;
+  timestamp: number;
+}
+
+// Cache for tunnel lookups by domain (most critical for performance)
+const tunnelDomainCache = new Map<string, CacheEntry<Tunnel | null>>();
+const TUNNEL_CACHE_TTL = 60_000; // 60 seconds cache TTL
+
+// Cache for tunnel lookups by ID
+const tunnelIdCache = new Map<string, CacheEntry<Tunnel | null>>();
+
+export function invalidateTunnelCache(domain?: string, id?: string): void {
+  if (domain) tunnelDomainCache.delete(domain);
+  if (id) tunnelIdCache.delete(id);
+}
+
+export function clearAllTunnelCache(): void {
+  tunnelDomainCache.clear();
+  tunnelIdCache.clear();
+}
+
 // ===== TUNNEL OPERATIONS =====
 
 export async function getTunnel(id: string): Promise<Tunnel | null> {
+  // Check cache first
+  const cached = tunnelIdCache.get(id);
+  if (cached && Date.now() - cached.timestamp < TUNNEL_CACHE_TTL) {
+    return cached.data;
+  }
+  
   const collections = getCollections();
-  return await collections.tunnels.findOne({ _id: new ObjectId(id) });
+  const tunnel = await collections.tunnels.findOne({ _id: new ObjectId(id) });
+  
+  // Update cache
+  tunnelIdCache.set(id, { data: tunnel as Tunnel | null, timestamp: Date.now() });
+  
+  return tunnel as Tunnel | null;
 }
 
 export async function getAllTunnels(): Promise<Tunnel[]> {
@@ -41,8 +77,19 @@ export async function getActiveTunnels(): Promise<Tunnel[]> {
 }
 
 export async function getTunnelByDomain(domain: string): Promise<Tunnel | null> {
+  // Check cache first - critical for performance!
+  const cached = tunnelDomainCache.get(domain);
+  if (cached && Date.now() - cached.timestamp < TUNNEL_CACHE_TTL) {
+    return cached.data;
+  }
+  
   const collections = getCollections();
-  return await collections.tunnels.findOne({ domain });
+  const tunnel = await collections.tunnels.findOne({ domain });
+  
+  // Update cache
+  tunnelDomainCache.set(domain, { data: tunnel as Tunnel | null, timestamp: Date.now() });
+  
+  return tunnel as Tunnel | null;
 }
 
 export async function getTunnelsByAgentId(agentId: string): Promise<Tunnel[]> {

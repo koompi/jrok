@@ -253,6 +253,19 @@ Timestamp: <code>${timestamp}</code>
 }
 
 /**
+ * Notify that certificate sync is available for VPS servers to pull
+ */
+export async function notifyCertSyncAvailable(): Promise<void> {
+  const message = `
+📤 <b>Certificate Sync Available</b>
+New certificates are ready to be pulled by VPS servers.
+Servers will automatically sync within 6 hours.
+  `.trim();
+
+  await sendTelegramMessage(message);
+}
+
+/**
  * Get current Telegram configuration status
  */
 export function getTelegramStatus(): {

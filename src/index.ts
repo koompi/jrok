@@ -636,12 +636,19 @@ async function startServer() {
             ));
           }
 
-          // Get tunnel ID for bandwidth tracking
-          const { getTunnelByDomain } = await import("./utils/database");
-          const tunnel = await getTunnelByDomain(subdomain);
+          // Use cached tunnelId from agent (set when agent connects)
+          // This avoids MongoDB query on EVERY request - massive performance improvement!
+          let tunnelId = agent.tunnelId;
+          
+          // Fallback to DB lookup only if not cached (rare)
+          if (!tunnelId) {
+            const { getTunnelByDomain } = await import("./utils/database");
+            const tunnel = await getTunnelByDomain(subdomain);
+            tunnelId = tunnel?.id;
+          }
 
           // Forward request to agent via WebSocket (with bandwidth tracking)
-          return await forwardRequestToAgent(req, agentWs, agent, tunnel?.id);
+          return await forwardRequestToAgent(req, agentWs, agent, tunnelId);
         }
 
         // ============ Legacy API Routes (require auth) ============
