@@ -586,9 +586,9 @@ async function startServer() {
         // ============ Tunnel Domain Routing ============
         // Check if this is a tunnel domain request (extract subdomain)
         // MUST be before auth check to allow public tunnel access
-        const baseDomain = config.baseDomain; // e.g., "tunnel.matrixchat.space"
+        const baseDomain = config.baseDomain; // e.g., "tunnel.koompi.cloud"
         if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
-          // Extract subdomain (e.g., "demo" from "demo.tunnel.matrixchat.space")
+          // Extract subdomain (e.g., "demo" from "demo.tunnel.koompi.cloud")
           const subdomain = hostname.replace(`.${baseDomain}`, '');
           
           // Look up agent for this domain

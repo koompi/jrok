@@ -61,7 +61,7 @@ sudo mv jrok-linux-x64 /usr/local/bin/jrok
 
 # Expose local port
 jrok connect \
-  --server https://tunnel.matrixchat.space \
+  --server https://tunnel.koompi.cloud \
   --domain myapp \
   --port 3000 \
   --auth your-api-key
@@ -95,7 +95,7 @@ jrok connect \
 
 ## 🙏 Support
 
-- **Server:** https://tunnel.matrixchat.space
+- **Server:** https://tunnel.koompi.cloud
 - **Issues:** https://github.com/koompi/jrok/issues
 - **Docs:** [Full Guide](https://github.com/koompi/jrok)
 ```

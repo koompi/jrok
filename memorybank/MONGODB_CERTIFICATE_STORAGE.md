@@ -34,8 +34,8 @@ Instead of using SSH/SCP for certificate distribution (which requires server-to-
 
 ```javascript
 db.certificates.insertOne({
-  _id: "matrixchat.space",
-  domain: "matrixchat.space",
+  _id: "koompi.cloud",
+  domain: "koompi.cloud",
   cert: "base64-encoded-cert.pem",
   chain: "base64-encoded-chain.pem",
   fullchain: "base64-encoded-fullchain.pem",
@@ -79,7 +79,7 @@ Headers:
   - Content-Type: application/json
 Body:
   {
-    "domain": "matrixchat.space",
+    "domain": "koompi.cloud",
     "certPem": "base64-string",
     "chainPem": "base64-string",
     "fullchainPem": "base64-string",
@@ -89,7 +89,7 @@ Response:
   {
     "success": true,
     "message": "Certificate uploaded and synced to MongoDB",
-    "domain": "matrixchat.space",
+    "domain": "koompi.cloud",
     "expiry": "2026-01-15T00:00:00Z",
     "version": 1
   }
@@ -100,7 +100,7 @@ Headers:
   - Authorization: Bearer $API_KEY
 Response:
   {
-    "domain": "matrixchat.space",
+    "domain": "koompi.cloud",
     "cert": "base64-string",
     "chain": "base64-string",
     "fullchain": "base64-string",
@@ -113,7 +113,7 @@ Response:
 GET /certificates/status/:domain
 Response:
   {
-    "domain": "matrixchat.space",
+    "domain": "koompi.cloud",
     "expiry": "2026-01-15T00:00:00Z",
     "daysRemaining": 31,
     "lastUpdated": "2025-12-15T10:00:00Z",
@@ -126,7 +126,7 @@ GET /certificates/list
 Response:
   [
     {
-      "domain": "matrixchat.space",
+      "domain": "koompi.cloud",
       "expiry": "2026-01-15T00:00:00Z",
       "daysRemaining": 31,
       "lastUpdated": "2025-12-15T10:00:00Z",
@@ -143,7 +143,7 @@ Create a renewal hook script on control server:
 #!/bin/bash
 # /etc/letsencrypt/renewal-hooks/post/mongodb-sync.sh
 
-DOMAIN="matrixchat.space"
+DOMAIN="koompi.cloud"
 API_KEY="your-api-key"
 CONTROL_SERVER="http://localhost:3000"
 CERT_PATH="/etc/letsencrypt/live/$DOMAIN"
@@ -215,7 +215,7 @@ set -e
 # Configuration (set these in environment or here)
 CONTROL_SERVER="http://control-server-ip:3000"
 API_KEY="your-api-key"
-DOMAIN="matrixchat.space"
+DOMAIN="koompi.cloud"
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 LOG_FILE="/var/log/cert-sync.log"
 TEMP_DIR="/tmp/cert-sync-$$"
@@ -378,7 +378,7 @@ TELEGRAM_BOT_TOKEN="your-bot-token"
 TELEGRAM_CHAT_ID="your-chat-id"
 
 # Check all domains
-for domain in matrixchat.space; do
+for domain in koompi.cloud; do
     STATUS=$(curl -s "$CONTROL_SERVER/certificates/status/$domain" \
       -H "Authorization: Bearer $API_KEY")
     
@@ -484,7 +484,7 @@ CONTROL_SERVER="https://control-server:3000"  # Not http://
 ```bash
 # Backup private keys (keep offline)
 tar -czf /secure-backup/certs-privkeys-$(date +%Y%m%d).tar.gz \
-  /etc/letsencrypt/live/matrixchat.space/privkey.pem
+  /etc/letsencrypt/live/koompi.cloud/privkey.pem
 ```
 
 ---
@@ -498,7 +498,7 @@ tar -czf /secure-backup/certs-privkeys-$(date +%Y%m%d).tar.gz \
 tail -100 /var/log/cert-sync.log
 
 # Test API endpoint manually
-curl -v "http://control-server:3000/certificates/download/matrixchat.space" \
+curl -v "http://control-server:3000/certificates/download/koompi.cloud" \
   -H "Authorization: Bearer $API_KEY"
 
 # Check MongoDB has certificates
@@ -558,13 +558,13 @@ Simply add more entries to MongoDB:
 curl -X POST http://localhost:3000/certificates/upload \
   -H "Authorization: Bearer $API_KEY" \
   -d '{
-    "domain": "api.matrixchat.space",
+    "domain": "api.koompi.cloud",
     "certPem": "...",
     ...
   }'
 
 # Each VPS can pull multiple domains
-for domain in matrixchat.space api.matrixchat.space; do
+for domain in koompi.cloud api.koompi.cloud; do
     /usr/local/bin/sync-certificates-from-mongodb.sh "$domain"
 done
 ```

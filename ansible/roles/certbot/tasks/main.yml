@@ -40,8 +40,8 @@
       --email {{ certbot_email }} \
       --agree-tos \
       --non-interactive \
-      -d "tunnel.{{ domain_name }}" \
-      -d "*.tunnel.{{ domain_name }}"
+      -d "{{ domain_name }}" \
+      -d "*.{{ domain_name }}"
   when: not cert_exists.stat.exists
   tags: ["certbot"]
   register: certbot_result

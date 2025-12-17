@@ -191,7 +191,7 @@ SERVER_ID="control-1"  # Change to control-2, control-3, etc.
 
 # On all VPS Servers
 CERT_SYNC_API_KEY="same-as-above"
-CONTROL_SERVER_URL="https://tunnel.matrixchat.space"  # Your control domain
+CONTROL_SERVER_URL="https://tunnel.koompi.cloud"  # Your control domain
 ```
 
 ### Step 7: Update Certbot Renewal Hook
@@ -202,7 +202,7 @@ Create on each control server:
 #!/bin/bash
 # /etc/letsencrypt/renewal-hooks/post/mongodb-sync.sh
 
-DOMAIN="matrixchat.space"
+DOMAIN="koompi.cloud"
 API_KEY="${CERT_SYNC_API_KEY}"
 CONTROL_SERVER="http://localhost:3000"  # Local API
 CERT_PATH="/etc/letsencrypt/live/$DOMAIN"
@@ -252,9 +252,9 @@ Create on each VPS:
 #!/bin/bash
 # /usr/local/bin/sync-certificates-from-mongodb.sh
 
-DOMAIN="matrixchat.space"
+DOMAIN="koompi.cloud"
 API_KEY="${CERT_SYNC_API_KEY}"
-CONTROL_SERVER="${CONTROL_SERVER_URL:-https://tunnel.matrixchat.space}"
+CONTROL_SERVER="${CONTROL_SERVER_URL:-https://tunnel.koompi.cloud}"
 API_ENDPOINT="$CONTROL_SERVER/certificates/download/$DOMAIN"
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 LOG_FILE="/var/log/cert-sync.log"
@@ -353,7 +353,7 @@ curl -X POST http://localhost:3000/certificates/upload \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "domain": "matrixchat.space",
+    "domain": "koompi.cloud",
     "certPem": "base64...",
     "chainPem": "base64...",
     "fullchainPem": "base64...",
@@ -363,14 +363,14 @@ curl -X POST http://localhost:3000/certificates/upload \
 # Should return:
 # {
 #   "success": true,
-#   "domain": "matrixchat.space",
+#   "domain": "koompi.cloud",
 #   "version": 1
 # }
 ```
 
 **Test 3: Download Certificate (on VPS)**
 ```bash
-curl -s https://tunnel.matrixchat.space/certificates/download/matrixchat.space \
+curl -s https://tunnel.koompi.cloud/certificates/download/koompi.cloud \
   -H "Authorization: Bearer $API_KEY" | jq '.'
 
 # Should show certificate in base64

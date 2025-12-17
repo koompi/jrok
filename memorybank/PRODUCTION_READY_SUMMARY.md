@@ -39,7 +39,7 @@ Your `COMPLETE_SETUP_GUIDE.md` has been fully enhanced for production deployment
 - ✅ Production runbook included
 
 ### 🔄 Certificate Management
-- ✅ Wildcard certificates for `*.matrixchat.space`
+- ✅ Wildcard certificates for `*.koompi.cloud`
 - ✅ Automatic renewal 30 days before expiry
 - ✅ Renewal test built in (certbot --dry-run)
 - ✅ Auto-sync to all VPS after renewal
@@ -155,11 +155,11 @@ curl http://localhost:3000/tunnels \
   -H "Authorization: Bearer $API_KEY"
 
 # View certificate expiry
-sudo openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem \
+sudo openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem \
   -noout -dates
 
 # Test backup
-curl -X POST http://localhost:3000/domains/matrixchat.space/backup \
+curl -X POST http://localhost:3000/domains/koompi.cloud/backup \
   -H "Authorization: Bearer $API_KEY"
 ```
 
@@ -168,7 +168,7 @@ curl -X POST http://localhost:3000/domains/matrixchat.space/backup \
 ```bash
 # Check certificate on all VPS
 for ip in 1.2.3.4 5.6.7.8 9.10.11.12; do
-    ssh root@$ip "openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -fingerprint"
+    ssh root@$ip "openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -fingerprint"
 done
 
 # Monitor service in real-time

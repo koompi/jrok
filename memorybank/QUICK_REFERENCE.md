@@ -20,7 +20,7 @@ sudo journalctl -u jrok -n 50
 mongosh "mongodb+srv://jrok:password@cluster0.xxxxx.mongodb.net/jrok"
 
 # Check Certificate Expiry
-sudo openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -dates
+sudo openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -dates
 
 # List Tunnels
 curl http://localhost:3000/tunnels -H "Authorization: Bearer $API_KEY"
@@ -48,7 +48,7 @@ VPS 1 IP: _______________
 VPS 2 IP: _______________
 VPS 3 IP: _______________
 
-Domain: tunnel.matrixchat.space
+Domain: tunnel.koompi.cloud
 MongoDB: cluster0.xxxxx.mongodb.net
 Cloudflare Account: _______________
 ```
@@ -64,14 +64,14 @@ Problem: Service not responding
 └─ Still failing? → See COMPLETE_SETUP_GUIDE.md Troubleshooting section
 
 Problem: Certificate error
-├─ Check expiry: sudo openssl x509 -noout -dates -in /etc/letsencrypt/live/matrixchat.space/cert.pem
+├─ Check expiry: sudo openssl x509 -noout -dates -in /etc/letsencrypt/live/koompi.cloud/cert.pem
 ├─ Renew: sudo certbot renew --force-renewal
-├─ Copy to VPS: scp -r /etc/letsencrypt/live/matrixchat.space/ root@1.2.3.4:/etc/letsencrypt/live/
+├─ Copy to VPS: scp -r /etc/letsencrypt/live/koompi.cloud/ root@1.2.3.4:/etc/letsencrypt/live/
 ├─ Restart nginx: ssh root@1.2.3.4 "sudo systemctl restart nginx"
 └─ Verify: openssl s_client -connect 1.2.3.4:443
 
 Problem: Tunnel not accessible
-├─ Check DNS: nslookup tunnel.matrixchat.space
+├─ Check DNS: nslookup tunnel.koompi.cloud
 ├─ Check nginx on VPS: ssh root@1.2.3.4 "sudo nginx -t && sudo systemctl restart nginx"
 ├─ Check firewall: ssh root@1.2.3.4 "sudo ufw status | grep 443"
 └─ Test directly: curl -k https://1.2.3.4
@@ -92,7 +92,7 @@ echo "1. Service Status:"
 sudo systemctl status jrok | grep Active
 
 echo "2. Certificate (days remaining):"
-sudo openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -dates | grep notAfter
+sudo openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -dates | grep notAfter
 
 echo "3. Disk Space:"
 df -h / | awk 'NR==2 {print $5, "used,", $4, "available"}'
@@ -118,7 +118,7 @@ sudo certbot renew --dry-run
 echo "Checking certificate on all VPS..."
 for ip in 1.2.3.4 5.6.7.8 9.10.11.12; do
     echo "VPS at $ip:"
-    ssh root@$ip "openssl x509 -in /etc/letsencrypt/live/matrixchat.space/cert.pem -noout -fingerprint" 2>/dev/null
+    ssh root@$ip "openssl x509 -in /etc/letsencrypt/live/koompi.cloud/cert.pem -noout -fingerprint" 2>/dev/null
 done
 
 # Backup status
@@ -140,14 +140,14 @@ curl -X POST http://localhost:3000/reset-rate-limit \
 # Or for domain:
 curl -X POST http://localhost:3000/reset-rate-limit \
   -H "Authorization: Bearer $API_KEY" \
-  -d '{"domain":"example.matrixchat.space"}'
+  -d '{"domain":"example.koompi.cloud"}'
 ```
 
 ## Backup/Restore
 
 ```bash
 # Backup all certificates
-tar -czf /backups/certs-$(date +%Y%m%d).tar.gz /etc/letsencrypt/live/matrixchat.space/
+tar -czf /backups/certs-$(date +%Y%m%d).tar.gz /etc/letsencrypt/live/koompi.cloud/
 
 # Restore certificates
 tar -xzf /backups/certs-YYYYMMDD.tar.gz -C /
@@ -169,13 +169,13 @@ sudo certbot renew --force-renewal -v
 
 # If renewal fails:
 # 1. Check Cloudflare token: cat /etc/letsencrypt/cloudflare.ini
-# 2. Check DNS: nslookup _acme-challenge.matrixchat.space
+# 2. Check DNS: nslookup _acme-challenge.koompi.cloud
 # 3. Check Let's Encrypt rate limits: https://letsencrypt.org/stats/
 
 # After successful renewal:
 # Copy to all VPS servers
 for ip in 1.2.3.4 5.6.7.8 9.10.11.12; do
-    scp -r /etc/letsencrypt/live/matrixchat.space/ root@$ip:/etc/letsencrypt/live/
+    scp -r /etc/letsencrypt/live/koompi.cloud/ root@$ip:/etc/letsencrypt/live/
     ssh root@$ip "sudo systemctl restart nginx"
 done
 ```
@@ -185,7 +185,7 @@ done
 ```bash
 # 1. Setup new VPS (follow Step 1 of COMPLETE_SETUP_GUIDE.md)
 # 2. Copy certificate
-scp -r /etc/letsencrypt/live/matrixchat.space/ root@NEW-VPS-IP:/etc/letsencrypt/live/
+scp -r /etc/letsencrypt/live/koompi.cloud/ root@NEW-VPS-IP:/etc/letsencrypt/live/
 
 # 3. Register in control server
 curl -X POST http://localhost:3000/vps \
@@ -200,7 +200,7 @@ curl -X POST http://localhost:3000/vps \
   }'
 
 # 4. Add A record in Cloudflare DNS
-# 5. Test: nslookup tunnel.matrixchat.space (should show 4 IPs now)
+# 5. Test: nslookup tunnel.koompi.cloud (should show 4 IPs now)
 ```
 
 ## Remove Failed VPS
@@ -212,18 +212,18 @@ curl -X DELETE http://localhost:3000/vps/vps-id \
   -H "Authorization: Bearer $API_KEY"
 
 # 3. Test DNS resolution (should show remaining IPs)
-nslookup tunnel.matrixchat.space
+nslookup tunnel.koompi.cloud
 ```
 
 ## Environmental Variables Reference
 
 ```bash
 PORT=3000                           # Application port
-VPS_HOST=tunnel.matrixchat.space    # Base domain
+VPS_HOST=tunnel.koompi.cloud    # Base domain
 VPS_USER=root                       # SSH user
 VPS_PORT=22                         # SSH port
 NGINX_PATH=/etc/nginx/sites-available
-BASE_DOMAIN=tunnel.matrixchat.space
+BASE_DOMAIN=tunnel.koompi.cloud
 API_KEY=<random-32-char-string>    # ❌ NEVER share
 MONGODB_URI=<connection-string>     # ❌ NEVER share
 TELEGRAM_BOT_TOKEN=<token>          # ❌ NEVER share

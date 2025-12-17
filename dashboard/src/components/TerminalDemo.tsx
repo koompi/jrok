@@ -16,11 +16,11 @@ export function TerminalDemo() {
       <TypingAnimation delay={3500}>&gt; jrok --port 3000</TypingAnimation>
 
       <AnimatedSpan delay={5000} className="text-blue-500">
-        <span>Tunnel started: https://pizza-7234986.jrok.koompi.cloud</span>
+        <span>Tunnel started: https://pizza-7234986.jrok.live</span>
       </AnimatedSpan>
       
       <AnimatedSpan delay={5500} className="text-muted-foreground">
-        <span>Forwarding http://localhost:3000 -&gt; https://pizza-7234986.jrok.koompi.cloud</span>
+        <span>Forwarding http://localhost:3000 -&gt; https://pizza-7234986.jrok.live</span>
       </AnimatedSpan>
     </Terminal>
   )
