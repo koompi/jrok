@@ -2,7 +2,7 @@
   <img src="./docs/assets/logo.png" alt="Jrok Logo" width="200">
 </p>
 
-<h1 align="center">Jrok</h1>
+<h1 align="center">Jrok : ជ្រក</h1>
 
 <p align="center">
   <strong>Expose local services to the public internet — Open Source & Self-Hostable</strong>
@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/koompi/jrok/releases"><img src="https://img.shields.io/github/v/release/koompi/jrok" alt="Release"></a>
   <a href="https://github.com/koompi/jrok/blob/main/LICENSE"><img src="https://img.shields.io/github/license/koompi/jrok" alt="License"></a>
-  <a href="https://jrok.koompi.cloud"><img src="https://img.shields.io/badge/managed-KOOMPI%20Cloud-blue" alt="KOOMPI Cloud"></a>
+  <a href="https://jrok.koompi.cloud"><img src="https://img.shields.io/badge/managed-Jrok%20-blue" alt="Jrok Managed Service"></a>
 </p>
 
 <p align="center">
@@ -368,7 +368,7 @@ Built with ❤️ by **[KOOMPI](https://koompi.com)**
 ---
 
 <p align="center">
-  <a href="https://jrok.koompi.cloud">Try KOOMPI Cloud</a> •
+  <a href="https://jrok.koompi.cloud">Try Jrok</a> •
   <a href="./docs/README.md">Documentation</a> •
   <a href="https://github.com/koompi/jrok/issues">Report Bug</a> •
   <a href="https://github.com/koompi/jrok/discussions">Discussions</a>
