@@ -19,19 +19,22 @@ import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext } from "./types/index";
 
 // Store pending requests waiting for agent responses
-const pendingRequests = new Map<string, { resolve: (response: Response) => void; timeout: Timer }>();
+const pendingRequests = new Map<string, { 
+  resolve: (response: Response) => void; 
+  timeout: Timer;
+  bytesIn: number;
+  agent: Agent;
+  tunnelId?: string;
+}>();
 
 // Forward HTTP request to agent via WebSocket
-async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent): Promise<Response> {
+async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string): Promise<Response> {
   return new Promise(async (resolve) => {
     const requestId = generateId();
     const timeout = setTimeout(() => {
       pendingRequests.delete(requestId);
       resolve(new Response("Gateway Timeout - Agent did not respond", { status: 504 }));
     }, 30000); // 30 second timeout
-
-    // Store pending request
-    pendingRequests.set(requestId, { resolve, timeout });
 
     // Prepare request data to send to agent
     const headers: Record<string, string> = {};
@@ -42,6 +45,11 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
     try {
       // Read request body
       const body = await req.text();
+      const bytesIn = new TextEncoder().encode(body).length + 
+                      new TextEncoder().encode(JSON.stringify(headers)).length;
+      
+      // Store pending request with bandwidth tracking info
+      pendingRequests.set(requestId, { resolve, timeout, bytesIn, agent, tunnelId });
       
       // Send request to agent
       agentWs.send(JSON.stringify({
@@ -198,6 +206,23 @@ async function startServer() {
               if (pending) {
                 clearTimeout(pending.timeout);
                 pendingRequests.delete(message.requestId);
+                
+                // Calculate response size (bytes out)
+                const bodyStr = message.body || "";
+                const bytesOut = new TextEncoder().encode(bodyStr).length + 
+                                new TextEncoder().encode(JSON.stringify(message.headers || {})).length;
+                
+                // Record bandwidth usage
+                if (pending.agent.organizationId) {
+                  statsService.recordBandwidth({
+                    organizationId: pending.agent.organizationId,
+                    tunnelId: pending.tunnelId,
+                    agentId: pending.agent.id,
+                    bytesIn: pending.bytesIn,
+                    bytesOut: bytesOut,
+                    requests: 1,
+                  }).catch(err => console.error("Failed to record bandwidth:", err));
+                }
                 
                 // Build response
                 const responseHeaders = new Headers(message.headers || {});
@@ -591,8 +616,12 @@ async function startServer() {
             );
           }
 
-          // Forward request to agent via WebSocket
-          return await forwardRequestToAgent(req, agentWs, agent);
+          // Get tunnel ID for bandwidth tracking
+          const { getTunnelByDomain } = await import("./utils/database");
+          const tunnel = await getTunnelByDomain(subdomain);
+
+          // Forward request to agent via WebSocket (with bandwidth tracking)
+          return await forwardRequestToAgent(req, agentWs, agent, tunnel?.id);
         }
 
         // ============ Legacy API Routes (require auth) ============
