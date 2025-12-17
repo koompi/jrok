@@ -141,7 +141,7 @@ async function syncConfigToAllVps(domain: string, localPort: number, localHost: 
   }
 }
 
-export async function createTunnel(request: CreateTunnelRequest, agentId: string): Promise<Tunnel> {
+export async function createTunnel(request: CreateTunnelRequest, agentId: string, organizationId?: string): Promise<Tunnel> {
   // Verify agent is connected
   const agent = agentService.getAgent(agentId);
   if (!agent || !agent.active) {
@@ -167,6 +167,7 @@ export async function createTunnel(request: CreateTunnelRequest, agentId: string
     domain: request.domain,
     agentId,
     customDomain: request.customDomain,
+    organizationId, // Track which org created this tunnel
     createdAt: Date.now(),
     expiresAt: request.expiresIn ? Date.now() + request.expiresIn * 1000 : undefined,
     active: true,
@@ -196,6 +197,11 @@ export async function getTunnel(id: string): Promise<Tunnel | null> {
 
 export async function listTunnels(): Promise<Tunnel[]> {
   return await db.getAllTunnels();
+}
+
+export async function listTunnelsByOrganization(organizationId: string): Promise<Tunnel[]> {
+  const allTunnels = await db.getAllTunnels();
+  return allTunnels.filter(t => t.organizationId === organizationId);
 }
 
 export async function deleteTunnel(id: string): Promise<void> {

@@ -600,23 +600,23 @@ async function startServer() {
       ));
     }
 
-    // Legacy Tunnel Routes
+    // Tunnel Routes (with auth)
     if (path === "/tunnels" && method === "POST") {
-      return await tunnelHandler.handleCreateTunnel(req);
+      return addCors(await tunnelHandler.handleCreateTunnel(req));
     }
 
     if (path === "/tunnels" && method === "GET") {
-      return await tunnelHandler.handleListTunnels();
+      return addCors(await tunnelHandler.handleListTunnels(req));
     }
 
     if (path.startsWith("/tunnels/") && method === "GET") {
       const id = path.split("/")[2];
-      return await tunnelHandler.handleGetTunnel(id);
+      return addCors(await tunnelHandler.handleGetTunnel(id, req));
     }
 
     if (path.startsWith("/tunnels/") && method === "DELETE") {
       const id = path.split("/")[2];
-      return await tunnelHandler.handleDeleteTunnel(id);
+      return addCors(await tunnelHandler.handleDeleteTunnel(id, req));
     }
 
     if (path === "/agents" && method === "GET") {

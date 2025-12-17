@@ -36,6 +36,7 @@ export interface Tunnel {
   domain: string; // subdomain part, e.g., "myapp"
   customDomain?: string; // parent domain, e.g., "client1.com" (uses baseDomain if not set)
   agentId: string; // reference to connected agent
+  organizationId?: string; // which organization owns this tunnel
   createdAt: number; // timestamp
   expiresAt?: number; // optional expiration
   active: boolean;
