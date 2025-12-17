@@ -52,7 +52,28 @@ export async function handleCreateOrganization(req: Request): Promise<Response> 
 export async function handleGetOrganizations(req: Request): Promise<Response> {
   const authContext = await authService.authenticateRequest(req);
 
-  if (!authContext?.user) {
+  if (!authContext) {
+    return jsonResponse({ success: false, message: "Unauthorized" }, 401);
+  }
+
+  // If using API key auth, return only the organization the key belongs to
+  if (authContext.isApiKeyAuth && authContext.organization) {
+    return jsonResponse({
+      success: true,
+      organizations: [{
+        id: authContext.organization.id,
+        name: authContext.organization.name,
+        slug: authContext.organization.slug,
+        ownerId: authContext.organization.ownerId,
+        memberCount: authContext.organization.members?.length || 1,
+        role: 'api_key',
+        createdAt: authContext.organization.createdAt,
+      }],
+    });
+  }
+
+  // User auth - get all user's organizations
+  if (!authContext.user) {
     return jsonResponse({ success: false, message: "Unauthorized" }, 401);
   }
 
@@ -351,18 +372,29 @@ export async function handleCreateApiKey(req: Request, orgId: string): Promise<R
 export async function handleGetApiKeys(req: Request, orgId: string): Promise<Response> {
   const authContext = await authService.authenticateRequest(req);
 
-  if (!authContext?.user) {
+  if (!authContext) {
     return jsonResponse({ success: false, message: "Unauthorized" }, 401);
   }
 
-  const organization = await organizationService.getOrganizationById(orgId);
+  // For API key auth, verify the key belongs to this org
+  if (authContext.isApiKeyAuth) {
+    if (!authContext.organization || authContext.organization.id !== orgId) {
+      return jsonResponse({ success: false, message: "Forbidden" }, 403);
+    }
+  } else {
+    // User auth
+    if (!authContext.user) {
+      return jsonResponse({ success: false, message: "Unauthorized" }, 401);
+    }
 
-  if (!organization) {
-    return jsonResponse({ success: false, message: "Organization not found" }, 404);
-  }
+    const organization = await organizationService.getOrganizationById(orgId);
+    if (!organization) {
+      return jsonResponse({ success: false, message: "Organization not found" }, 404);
+    }
 
-  if (!organizationService.isMember(organization, authContext.user.id)) {
-    return jsonResponse({ success: false, message: "Forbidden" }, 403);
+    if (!organizationService.isMember(organization, authContext.user.id)) {
+      return jsonResponse({ success: false, message: "Forbidden" }, 403);
+    }
   }
 
   const apiKeys = await apiKeyService.getOrganizationApiKeys(orgId);
@@ -386,18 +418,33 @@ export async function handleGetApiKeys(req: Request, orgId: string): Promise<Res
 export async function handleRevokeApiKey(req: Request, orgId: string, keyId: string): Promise<Response> {
   const authContext = await authService.authenticateRequest(req);
 
-  if (!authContext?.user) {
+  if (!authContext) {
     return jsonResponse({ success: false, message: "Unauthorized" }, 401);
   }
 
-  const organization = await organizationService.getOrganizationById(orgId);
+  // For API key auth, verify the key belongs to this org
+  if (authContext.isApiKeyAuth) {
+    if (!authContext.organization || authContext.organization.id !== orgId) {
+      return jsonResponse({ success: false, message: "Forbidden" }, 403);
+    }
+    // API keys can only revoke other keys, not themselves
+    if (authContext.apiKey?.id === keyId) {
+      return jsonResponse({ success: false, message: "Cannot revoke the API key you're currently using" }, 400);
+    }
+  } else {
+    // User auth
+    if (!authContext.user) {
+      return jsonResponse({ success: false, message: "Unauthorized" }, 401);
+    }
 
-  if (!organization) {
-    return jsonResponse({ success: false, message: "Organization not found" }, 404);
-  }
+    const organization = await organizationService.getOrganizationById(orgId);
+    if (!organization) {
+      return jsonResponse({ success: false, message: "Organization not found" }, 404);
+    }
 
-  if (!organizationService.isAdminOrOwner(organization, authContext.user.id)) {
-    return jsonResponse({ success: false, message: "Forbidden" }, 403);
+    if (!organizationService.isAdminOrOwner(organization, authContext.user.id)) {
+      return jsonResponse({ success: false, message: "Forbidden" }, 403);
+    }
   }
 
   // Verify key belongs to this organization
