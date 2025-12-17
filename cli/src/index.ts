@@ -176,10 +176,26 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
     
     console.log(`📥 ${method} ${path} → ${localUrl}`);
     
+    // Filter out hop-by-hop headers that shouldn't be forwarded
+    const forwardHeaders: Record<string, string> = {};
+    const hopByHopHeaders = new Set([
+      'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+      'te', 'trailers', 'transfer-encoding', 'upgrade',
+      'content-length', // Let fetch handle this
+    ]);
+    
+    if (headers) {
+      for (const [key, value] of Object.entries(headers)) {
+        if (!hopByHopHeaders.has(key.toLowerCase())) {
+          forwardHeaders[key] = value as string;
+        }
+      }
+    }
+    
     // Forward request to local service
     const localResponse = await fetch(localUrl, {
       method,
-      headers: headers || {},
+      headers: forwardHeaders,
       body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
     });
     
