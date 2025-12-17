@@ -9,6 +9,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
+import WebSocket from 'ws';
 
 const VERSION = "2.1.0";
 
@@ -255,7 +256,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
 
     // Send heartbeat every 30 seconds
     heartbeatInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (ws.readyState === 1) {  // WebSocket.OPEN = 1
         ws.send(JSON.stringify({ type: "heartbeat" }));
       }
     }, 30000);

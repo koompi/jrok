@@ -496,8 +496,11 @@ export async function validateApiKeyForAgent(rawKey: string): Promise<{
     return { valid: false, reason: "API key has expired" };
   }
   
-  // Check if key has tunnel:create permission
-  if (!apiKey.permissions.includes('tunnel:create') && !apiKey.permissions.includes('*')) {
+  // Check if key has tunnel:create permission (also accept tunnels:write for backward compatibility)
+  const hasTunnelPermission = apiKey.permissions.includes('tunnel:create') || 
+                               apiKey.permissions.includes('tunnels:write') || 
+                               apiKey.permissions.includes('*');
+  if (!hasTunnelPermission) {
     return { valid: false, reason: "API key does not have tunnel:create permission" };
   }
   

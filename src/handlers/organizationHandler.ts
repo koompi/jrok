@@ -331,13 +331,14 @@ export async function handleCreateApiKey(req: Request, orgId: string): Promise<R
 
     const validPermissions: ApiKeyPermission[] = [
       "tunnels:read", "tunnels:write", "tunnels:delete",
+      "tunnel:create",
       "domains:read", "domains:write", "domains:delete",
       "agents:read"
     ];
 
     const keyPermissions: ApiKeyPermission[] = permissions && Array.isArray(permissions)
       ? permissions.filter(p => validPermissions.includes(p))
-      : ["tunnels:read", "tunnels:write", "agents:read"]; // Default permissions
+      : ["tunnels:read", "tunnels:write", "tunnel:create", "agents:read"]; // Default permissions
 
     const { apiKey, rawKey } = await apiKeyService.createApiKey(
       orgId,

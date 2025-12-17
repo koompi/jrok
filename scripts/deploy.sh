@@ -84,9 +84,9 @@ if [ -f "$PROJECT_ROOT/.deploy.env" ]; then
             KOOMPI_CLIENT_ID=$(prompt_input "KOOMPI Client ID")
             KOOMPI_CLIENT_SECRET=$(prompt_input "KOOMPI Client Secret")
             KOOMPI_REDIRECT_URI=$(prompt_input "KOOMPI Redirect URI" "https://$DOMAIN/api/auth/callback")
-            DASHBOARD_URL=$(prompt_input "Dashboard URL" "https://jrok.$DOMAIN")
-
-    JWT_SECRET=$(openssl rand -hex 32)
+        fi
+        
+        # Generate new JWT_SECRET if not present
         if [ -z "${JWT_SECRET:-}" ]; then
             JWT_SECRET=$(openssl rand -hex 32)
         fi

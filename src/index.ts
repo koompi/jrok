@@ -291,41 +291,6 @@ async function startServer() {
           return await agentHandler.handleAgentUpgrade(req, server);
         }
 
-        // Check if this is a tunnel domain request (extract subdomain)
-        const baseDomain = config.baseDomain; // e.g., "tunnel.matrixchat.space"
-        if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
-          // Extract subdomain (e.g., "demo" from "demo.tunnel.matrixchat.space")
-          const subdomain = hostname.replace(`.${baseDomain}`, '');
-          
-          // Look up agent for this domain
-          const agent = agentService.getAgentByDomain(subdomain);
-          
-          if (!agent || !agent.active) {
-            return new Response(
-              JSON.stringify({
-                success: false,
-                message: `No active agent found for domain: ${subdomain}`,
-              }),
-              { status: 503, headers: { "Content-Type": "application/json" } }
-            );
-          }
-
-          // Get agent's WebSocket
-          const agentWs = agentService.getAgentSocket(agent.id);
-          if (!agentWs || agentWs.readyState !== WebSocket.OPEN) {
-            return new Response(
-              JSON.stringify({
-                success: false,
-                message: `Agent for ${subdomain} is not connected`,
-              }),
-              { status: 503, headers: { "Content-Type": "application/json" } }
-            );
-          }
-
-          // Forward request to agent via WebSocket
-          return await forwardRequestToAgent(req, agentWs, agent);
-        }
-
         // ============ Public Routes (no auth required) ============
 
         // Health check
@@ -336,7 +301,7 @@ async function startServer() {
           ));
         }
 
-        // Auth routes
+        // Auth routes - must be before tunnel domain check
         if (path === "/auth/login" && method === "GET") {
           return addCors(authHandler.handleGetLoginUrl());
         }
@@ -584,6 +549,43 @@ async function startServer() {
             ));
           }
           return addCors(await statsHandler.handleEnhancedDomains(req, authContext));
+        }
+
+        // ============ Tunnel Domain Routing ============
+        // Check if this is a tunnel domain request (extract subdomain)
+        // MUST be before auth check to allow public tunnel access
+        const baseDomain = config.baseDomain; // e.g., "tunnel.matrixchat.space"
+        if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
+          // Extract subdomain (e.g., "demo" from "demo.tunnel.matrixchat.space")
+          const subdomain = hostname.replace(`.${baseDomain}`, '');
+          
+          // Look up agent for this domain
+          const agent = agentService.getAgentByDomain(subdomain);
+          
+          if (!agent || !agent.active) {
+            return new Response(
+              JSON.stringify({
+                success: false,
+                message: `No active agent found for domain: ${subdomain}`,
+              }),
+              { status: 503, headers: { "Content-Type": "application/json" } }
+            );
+          }
+
+          // Get agent's WebSocket
+          const agentWs = agentService.getAgentSocket(agent.id);
+          if (!agentWs || agentWs.readyState !== 1) {  // 1 = WebSocket.OPEN
+            return new Response(
+              JSON.stringify({
+                success: false,
+                message: `Agent for ${subdomain} is not connected`,
+              }),
+              { status: 503, headers: { "Content-Type": "application/json" } }
+            );
+          }
+
+          // Forward request to agent via WebSocket
+          return await forwardRequestToAgent(req, agentWs, agent);
         }
 
         // ============ Legacy API Routes (require auth) ============

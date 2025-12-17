@@ -46,6 +46,9 @@
     "url": "https://github.com/koompi/jrok/issues"
   },
   "homepage": "https://github.com/koompi/jrok#readme",
+  "dependencies": {
+    "ws": "^8.17.0"
+  },
   "devDependencies": {
     "@yao-pkg/pkg": "^6.11.0",
     "esbuild": "^0.27.2"

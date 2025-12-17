@@ -146,6 +146,7 @@ export type ApiKeyPermission =
   | "tunnels:read" 
   | "tunnels:write" 
   | "tunnels:delete"
+  | "tunnel:create"
   | "domains:read"
   | "domains:write"
   | "domains:delete"
