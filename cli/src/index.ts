@@ -9,9 +9,12 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
+import { createInterface } from 'readline';
+import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 
 const VERSION = "2.1.0";
+const DEFAULT_SERVER = "https://tunnel.koompi.cloud";
 
 // Config file path
 const CONFIG_DIR = join(homedir(), '.jrok');
@@ -83,17 +86,58 @@ function saveStoredConfig(config: StoredConfig): void {
   }
 }
 
+// Helper to prompt user for input
+async function promptInput(question: string, isPassword = false): Promise<string> {
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+// Generate a short UUID for subdomain
+function generateSubdomain(): string {
+  return randomUUID().split('-')[0]; // Use first segment (8 chars)
+}
+
+// Extract base domain from server URL
+function getBaseDomain(serverUrl: string): string {
+  try {
+    const url = new URL(serverUrl);
+    return url.hostname;
+  } catch {
+    return 'tunnel.koompi.cloud';
+  }
+}
+
 function parseArgs(): { command: string; subcommand?: string; args: Record<string, string> } {
   const argv = process.argv.slice(2);
-  const command = argv[0]?.toLowerCase() || 'help';
+  let command = argv[0]?.toLowerCase() || 'help';
   let subcommand: string | undefined;
   const args: Record<string, string> = {};
 
   let startIndex = 1;
-  // Check for subcommand (e.g., 'org list', 'apikey create')
-  if (argv[1] && !argv[1].startsWith('--')) {
-    subcommand = argv[1].toLowerCase();
-    startIndex = 2;
+
+  // Check if first arg is --port (shorthand for connect)
+  if (command === '--port' || command === '-p') {
+    command = 'connect';
+    startIndex = 0; // Process all args including --port
+  } else if (command.startsWith('--')) {
+    // Any flag as first argument means implicit connect
+    command = 'connect';
+    startIndex = 0;
+  } else {
+    // Check for subcommand (e.g., 'org list', 'apikey create')
+    if (argv[1] && !argv[1].startsWith('--')) {
+      subcommand = argv[1].toLowerCase();
+      startIndex = 2;
+    }
   }
 
   for (let i = startIndex; i < argv.length; i++) {
@@ -109,6 +153,10 @@ function parseArgs(): { command: string; subcommand?: string; args: Record<strin
       } else {
         args[key] = 'true'; // Flag without value
       }
+    } else if (arg === '-p' && argv[i + 1] && !argv[i + 1].startsWith('-')) {
+      // Support -p as shorthand for --port
+      args['port'] = argv[i + 1];
+      i++;
     }
   }
 
@@ -122,7 +170,7 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
                      'port';
 
   return {
-    serverUrl: args["server"] || process.env.JROK_SERVER || storedConfig.serverUrl,
+    serverUrl: args["server"] || process.env.JROK_SERVER || storedConfig.serverUrl || DEFAULT_SERVER,
     domain: args["domain"] || process.env.JROK_DOMAIN,
     port: args["port"] ? parseInt(args["port"]) : 
           process.env.JROK_PORT ? parseInt(process.env.JROK_PORT) : 
@@ -138,9 +186,7 @@ function validateConnectConfig(config: Partial<ClientConfig>): asserts config is
   if (!config.serverUrl) {
     throw new Error("Missing serverUrl. Use --server or JROK_SERVER env var");
   }
-  if (!config.domain) {
-    throw new Error("Missing domain. Use --domain or JROK_DOMAIN env var");
-  }
+  // Domain is now optional - will auto-generate if not provided
   if (!config.authToken) {
     throw new Error("Missing authToken. Use --auth or JROK_AUTH env var");
   }
@@ -235,6 +281,9 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
 }
 
 async function connectAgent(config: ClientConfig): Promise<void> {
+  const baseDomain = getBaseDomain(config.serverUrl);
+  const fullDomain = `${config.domain}.${baseDomain}`;
+  
   const wsUrl = new URL(config.serverUrl);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
   wsUrl.pathname = "/ws/agent";
@@ -270,7 +319,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   ws.onopen = () => {
     reconnectAttempts = 0;
     console.log("✅ Connected to server!");
-    console.log(`🌐 Your service is now available at: https://${config.domain}`);
+    console.log(`🌐 Your service is now available at: https://${fullDomain}`);
 
     // Send heartbeat every 30 seconds
     heartbeatInterval = setInterval(() => {
@@ -322,6 +371,8 @@ async function connectAgent(config: ClientConfig): Promise<void> {
 
 async function listServices(config: { serverUrl: string; authToken: string }): Promise<void> {
   try {
+    const baseDomain = getBaseDomain(config.serverUrl);
+    
     const response = await fetch(`${config.serverUrl}/tunnels`, {
       method: 'GET',
       headers: {
@@ -339,20 +390,22 @@ async function listServices(config: { serverUrl: string; authToken: string }): P
 
     if (tunnels.length === 0) {
       console.log("📋 No active tunnels");
-      console.log("💡 Create one with: jrok connect --domain myapp --port 3000");
+      console.log("💡 Create one with: jrok --port 3000");
       return;
     }
 
     console.log("\n📋 Active Tunnels:\n");
-    console.log("Domain".padEnd(35), "Local".padEnd(20), "Status".padEnd(12), "Created");
-    console.log("─".repeat(85));
+    console.log("Domain".padEnd(45), "Local".padEnd(20), "Status".padEnd(12), "Created");
+    console.log("─".repeat(95));
 
     tunnels.forEach((tunnel: any) => {
       const status = tunnel.active ? "✅ Online" : "❌ Offline";
       const local = `${tunnel.localHost || 'localhost'}:${tunnel.localPort}`;
       const created = tunnel.createdAt ? new Date(tunnel.createdAt).toLocaleDateString() : 'N/A';
+      const subdomain = tunnel.domain || tunnel.subdomain || 'unknown';
+      const fullDomain = subdomain.includes('.') ? subdomain : `${subdomain}.${baseDomain}`;
       console.log(
-        (tunnel.domain || tunnel.subdomain || 'unknown').padEnd(35),
+        fullDomain.padEnd(45),
         local.padEnd(20),
         status.padEnd(12),
         created
@@ -688,9 +741,15 @@ function showHelp(): void {
 ╚══════════════════════════════════════════════════════════════════════╝
 
 QUICK START:
-  1. Get an API key from your dashboard
-  2. jrok config --server https://tunnel.example.com --auth jrok_xxx
-  3. jrok connect --domain myapp.example.com --port 3000
+  jrok --port 3000                               # That's it! 🚀
+  
+  First time? You'll be prompted for your API key.
+  Get one from: ${DEFAULT_SERVER}
+
+SIMPLE USAGE:
+  jrok --port 3000                    # Expose localhost:3000 (auto subdomain)
+  jrok --port 8080                    # Expose localhost:8080 (auto subdomain)
+  jrok --port 3000 --domain myapp     # Expose as myapp.tunnel.koompi.cloud
 
 COMMANDS:
   connect              Connect a local service to public domain
@@ -730,19 +789,25 @@ API KEY COMMANDS:
   jrok apikey revoke --org <org-id> --id <key>   # Revoke API key
 
 CONNECT EXAMPLES:
+  # Quick start (auto subdomain)
+  jrok --port 3000
+  
+  # With custom subdomain
+  jrok --port 3000 --domain myapp
+
   # TCP Port (local dev server)
-  jrok connect --domain dev.example.com --port 3000
+  jrok connect --domain dev --port 3000
 
   # Docker Swarm service
-  jrok connect --domain api.example.com --docker-service my-api
+  jrok connect --domain api --docker-service my-api
 
   # Kubernetes service
-  jrok connect --domain app.example.com --k8s-service my-svc:8080
+  jrok connect --domain app --k8s-service my-svc:8080
 
 OPTIONS:
-  --server           Server URL (or use config/env)
+  --server           Server URL (default: ${DEFAULT_SERVER})
   --auth             API key (or use config/env)
-  --domain           Public domain name
+  --domain           Subdomain (optional, auto-generated if not provided)
   --port             Local port (default: 3000)
   --host             Local host (default: localhost)
   --docker-service   Docker Swarm service name
@@ -752,9 +817,9 @@ OPTIONS:
   --id               ID for apikey operations
 
 ENVIRONMENT VARIABLES:
-  JROK_SERVER     Server URL
+  JROK_SERVER     Server URL (default: ${DEFAULT_SERVER})
   JROK_AUTH       API key
-  JROK_DOMAIN     Domain name
+  JROK_DOMAIN     Subdomain
   JROK_PORT       Local port
   JROK_HOST       Local host
 
@@ -796,6 +861,34 @@ async function main(): Promise<void> {
     switch (command) {
       case "connect": {
         const config = buildConfig(args);
+        
+        // If no auth token, prompt for it
+        if (!config.authToken) {
+          console.log(`\n🔐 No API key configured.`);
+          console.log(`   Get one from your dashboard at ${config.serverUrl || DEFAULT_SERVER}\n`);
+          const authToken = await promptInput('Enter your API key: ');
+          if (!authToken) {
+            console.error('❌ API key is required');
+            process.exit(1);
+          }
+          config.authToken = authToken;
+          
+          // Save for future use
+          const storedCfg = loadStoredConfig();
+          storedCfg.apiKey = authToken;
+          if (!storedCfg.serverUrl) {
+            storedCfg.serverUrl = config.serverUrl || DEFAULT_SERVER;
+          }
+          saveStoredConfig(storedCfg);
+          console.log(`💾 Configuration saved to ${CONFIG_FILE}\n`);
+        }
+        
+        // Auto-generate domain if not provided
+        if (!config.domain) {
+          config.domain = generateSubdomain();
+          console.log(`🎲 Generated subdomain: ${config.domain}`);
+        }
+        
         validateConnectConfig(config);
         await connectAgent(config);
         // Keep the process running
