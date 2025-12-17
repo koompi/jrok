@@ -33,8 +33,14 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
     const requestId = generateId();
     const timeout = setTimeout(() => {
       pendingRequests.delete(requestId);
-      resolve(new Response("Gateway Timeout - Agent did not respond", { status: 504 }));
-    }, 30000); // 30 second timeout
+      resolve(new Response(
+        JSON.stringify({
+          success: false,
+          message: "Agent timeout - no response within 10 seconds"
+        }),
+        { status: 504, headers: { "Content-Type": "application/json" } }
+      ));
+    }, 10000); // 10 second timeout
 
     // Prepare request data to send to agent
     const headers: Record<string, string> = {};
@@ -207,10 +213,17 @@ async function startServer() {
                 clearTimeout(pending.timeout);
                 pendingRequests.delete(message.requestId);
                 
+                // Decode body if it's base64 encoded
+                let responseBody: string | ArrayBuffer = message.body || "";
+                if (message.isBase64 && typeof message.body === 'string') {
+                  responseBody = Buffer.from(message.body, 'base64');
+                }
+                
                 // Calculate response size (bytes out)
-                const bodyStr = message.body || "";
-                const bytesOut = new TextEncoder().encode(bodyStr).length + 
-                                new TextEncoder().encode(JSON.stringify(message.headers || {})).length;
+                const bytesOut = message.isBase64 && typeof message.body === 'string'
+                  ? Buffer.from(message.body, 'base64').length
+                  : new TextEncoder().encode(message.body || "").length + 
+                    new TextEncoder().encode(JSON.stringify(message.headers || {})).length;
                 
                 // Record bandwidth usage
                 if (pending.agent.organizationId) {
@@ -224,9 +237,16 @@ async function startServer() {
                   }).catch(err => console.error("Failed to record bandwidth:", err));
                 }
                 
-                // Build response
+                // Build response headers
                 const responseHeaders = new Headers(message.headers || {});
-                pending.resolve(new Response(message.body, {
+                
+                // Remove Content-Encoding header when we've decoded the body
+                // This prevents the browser from trying to decompress already-decoded content
+                if (message.isBase64) {
+                  responseHeaders.delete('Content-Encoding');
+                }
+                
+                pending.resolve(new Response(responseBody, {
                   status: message.status || 200,
                   statusText: message.statusText || "OK",
                   headers: responseHeaders,
@@ -595,25 +615,25 @@ async function startServer() {
           const agent = agentService.getAgentByDomain(subdomain);
           
           if (!agent || !agent.active) {
-            return new Response(
+            return addCors(new Response(
               JSON.stringify({
                 success: false,
-                message: `No active agent found for domain: ${subdomain}`,
+                message: `No active agent found for domain: ${subdomain}. Please ensure the agent is running: bun src/index.ts connect --domain ${subdomain}`,
               }),
               { status: 503, headers: { "Content-Type": "application/json" } }
-            );
+            ));
           }
 
           // Get agent's WebSocket
           const agentWs = agentService.getAgentSocket(agent.id);
           if (!agentWs || agentWs.readyState !== 1) {  // 1 = WebSocket.OPEN
-            return new Response(
+            return addCors(new Response(
               JSON.stringify({
                 success: false,
-                message: `Agent for ${subdomain} is not connected`,
+                message: `Agent for ${subdomain} is not connected (readyState: ${agentWs?.readyState || 'null'}). Attempting reconnection...`,
               }),
               { status: 503, headers: { "Content-Type": "application/json" } }
-            );
+            ));
           }
 
           // Get tunnel ID for bandwidth tracking

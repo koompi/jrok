@@ -199,8 +199,9 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
       body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
     });
     
-    // Read response
-    const responseBody = await localResponse.text();
+    // Read response - use ArrayBuffer for binary content
+    const responseBuffer = await localResponse.arrayBuffer();
+    const responseBody = Buffer.from(responseBuffer).toString('base64');
     const responseHeaders: Record<string, string> = {};
     localResponse.headers.forEach((value, key) => {
       responseHeaders[key] = value;
@@ -214,6 +215,7 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
       statusText: localResponse.statusText,
       headers: responseHeaders,
       body: responseBody,
+      isBase64: true,
     }));
     
     console.log(`📤 ${localResponse.status} ${localResponse.statusText}`);
