@@ -299,6 +299,7 @@ export interface Organization {
   ownerId?: string;
   memberCount?: number;
   role?: string;
+  isActive?: boolean;
   createdAt: number;
 }
 
