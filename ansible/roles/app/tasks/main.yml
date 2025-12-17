@@ -99,11 +99,11 @@
       Environment=KOOMPI_CLIENT_ID={{ koompi_client_id }}
       Environment=KOOMPI_CLIENT_SECRET={{ koompi_client_secret }}
       Environment=KOOMPI_REDIRECT_URI={{ koompi_redirect_uri }}
+      Environment=DASHBOARD_URL={{ dashboard_url }}
+      Environment=ALLOWED_ORIGINS={{ dashboard_url }},https://{{ domain_name }}
       Environment=VPS_HOST=localhost
       Environment=VPS_NAME={{ ansible_hostname }}
       Environment=NGINX_PATH=/etc/nginx/sites-available
-
-   
 
       ExecStart=/root/.bun/bin/bun run src/index.ts
 
