@@ -84,6 +84,7 @@ if [ -f "$PROJECT_ROOT/.deploy.env" ]; then
             KOOMPI_CLIENT_ID=$(prompt_input "KOOMPI Client ID")
             KOOMPI_CLIENT_SECRET=$(prompt_input "KOOMPI Client Secret")
             KOOMPI_REDIRECT_URI=$(prompt_input "KOOMPI Redirect URI" "https://$DOMAIN/api/auth/callback")
+            DASHBOARD_URL=$(prompt_input "Dashboard URL" "https://$DOMAIN")
         fi
         
         # Generate new JWT_SECRET if not present
@@ -106,8 +107,9 @@ if [ -f "$PROJECT_ROOT/.deploy.env" ]; then
         
         KOOMPI_CLIENT_ID=$(prompt_input "KOOMPI Client ID")
         KOOMPI_CLIENT_SECRET=$(prompt_input "KOOMPI Client Secret")
-        KOOMPI_REDIRECT_URI=$(prompt_input "KOOMPI Redirect URI" "https://$DOMAIN/api/auth/callback")
+        KOOMPI_REDIRECT_URI=$(prompt_input "KOOMPI Redirect URI" "https://$DOMAIN/auth/callback")
         JWT_SECRET=$(openssl rand -hex 32)
+        DASHBOARD_URL=$(prompt_input "Dashboard URL" "https://$DOMAIN")
     fi
 else
     # Get deployment configuration
@@ -129,6 +131,7 @@ else
     KOOMPI_CLIENT_SECRET=$(prompt_input "KOOMPI Client Secret")
     KOOMPI_REDIRECT_URI=$(prompt_input "KOOMPI Redirect URI" "https://$DOMAIN/api/auth/callback")
     JWT_SECRET=$(openssl rand -hex 32)
+    DASHBOARD_URL=$(prompt_input "Dashboard URL" "https://$DOMAIN")
 fi
 
 # Save configuration
@@ -144,6 +147,7 @@ KOOMPI_CLIENT_ID=$KOOMPI_CLIENT_ID
 KOOMPI_CLIENT_SECRET=$KOOMPI_CLIENT_SECRET
 KOOMPI_REDIRECT_URI=$KOOMPI_REDIRECT_URI
 DEPLOY_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+DASHBOARD_URL=$DASHBOARD_URL
 EOF
 
 echo -e "${GREEN}✓ Configuration saved${NC}"

@@ -168,6 +168,8 @@ export async function createTunnel(request: CreateTunnelRequest, agentId: string
     agentId,
     customDomain: request.customDomain,
     organizationId, // Track which org created this tunnel
+    localPort: request.localPort,
+    localHost: request.localHost,
     createdAt: Date.now(),
     expiresAt: request.expiresIn ? Date.now() + request.expiresIn * 1000 : undefined,
     active: true,

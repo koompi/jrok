@@ -39,6 +39,8 @@ export interface Tunnel {
   customDomain?: string; // parent domain, e.g., "client1.com" (uses baseDomain if not set)
   agentId: string; // reference to connected agent
   organizationId?: string; // which organization owns this tunnel
+  localPort?: number; // local service port
+  localHost?: string; // local service host (e.g., localhost)
   createdAt: number; // timestamp
   expiresAt?: number; // optional expiration
   active: boolean;

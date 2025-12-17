@@ -42,15 +42,39 @@ export function registerAgent(
 
 async function createTunnelForAgent(agent: Agent, agentId: string, organizationId?: string): Promise<void> {
   try {
-    await tunnelService.createTunnel(
-      {
-        domain: agent.domain,
-        serviceType: "port",
-      },
-      agentId,
-      organizationId
-    );
-    console.log(`✅ Tunnel created automatically for domain: ${agent.domain}`);
+    // Check if tunnel already exists for this domain
+    const { getTunnelByDomain, updateTunnel: dbUpdateTunnel } = await import("../utils/database");
+    const { getCollections } = await import("../utils/mongodb");
+    const existingTunnel = await getTunnelByDomain(agent.domain);
+    
+    if (existingTunnel) {
+      // Tunnel already exists, just update it with new agent info
+      const collections = getCollections();
+      await collections.tunnels.updateOne(
+        { domain: agent.domain },
+        { $set: {
+          agentId,
+          localPort: agent.localPort,
+          localHost: agent.localHost,
+          active: true,
+          updatedAt: Date.now(),
+        }}
+      );
+      console.log(`✅ Tunnel updated for domain: ${agent.domain}`);
+    } else {
+      // Create new tunnel
+      await tunnelService.createTunnel(
+        {
+          domain: agent.domain,
+          serviceType: "port",
+          localPort: agent.localPort,
+          localHost: agent.localHost,
+        },
+        agentId,
+        organizationId
+      );
+      console.log(`✅ Tunnel created automatically for domain: ${agent.domain}`);
+    }
   } catch (error) {
     console.error(`Failed to auto-create tunnel for ${agent.domain}:`, error instanceof Error ? error.message : String(error));
   }

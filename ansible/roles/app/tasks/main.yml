@@ -103,6 +103,8 @@
       Environment=VPS_NAME={{ ansible_hostname }}
       Environment=NGINX_PATH=/etc/nginx/sites-available
 
+   
+
       ExecStart=/root/.bun/bin/bun run src/index.ts
 
       Restart=always
