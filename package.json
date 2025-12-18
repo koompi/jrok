@@ -7,6 +7,14 @@
   "bin": {
     "jrok": "./cli/bin/jrok"
   },
+  "files": [
+    "cli/bin/",
+    "cli/dist/",
+    "cli/src/",
+    "cli/package.json",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
