@@ -20,7 +20,7 @@
 
 ```bash
 # Global installation
-npm install -g jrok
+curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.1.0/install.sh | bash
 
 # Verify installation
 jrok version

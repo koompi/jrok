@@ -7,26 +7,18 @@
   "bin": {
     "jrok": "./cli/bin/jrok"
   },
-  "files": [
-    "cli/bin/",
-    "cli/dist/",
-    "cli/src/",
-    "cli/package.json",
-    "LICENSE",
-    "README.md"
-  ],
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target node"
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "prepare": "cd cli && npm install && npm run build"
   },
   "dependencies": {
     "mongodb": "^6.4.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "esbuild": "^0.27.2",
-    "ws": "^8.17.0"
+    "esbuild": "^0.27.2"
   },
   "peerDependencies": {
     "typescript": "^5"

@@ -31,7 +31,7 @@ Add to PATH or run directly
 
 ### NPM (All Platforms)
 ```bash
-npm install -g jrok
+curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.1.0/install.sh | bash
 ```
 
 ## 🚀 Quick Start

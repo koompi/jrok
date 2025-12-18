@@ -24,7 +24,7 @@ jrok version
 
 ```bash
 # Using npm
-npm install -g @koompi/jrok
+curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.1.0/install.sh | bash
 
 # Using Bun
 bun install -g @koompi/jrok

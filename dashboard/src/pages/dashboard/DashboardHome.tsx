@@ -497,13 +497,13 @@ export default function DashboardHome() {
                 </p>
                 <div className="relative">
                   <pre className="bg-muted/50 p-3 rounded-lg text-xs font-mono overflow-x-auto">
-                    npm install -g @jrok/cli
+                    curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.1.0/install.sh | bash
                   </pre>
                   <Button 
                     variant="ghost" 
                     size="icon" 
                     className="absolute top-2 right-2 h-6 w-6"
-                    onClick={() => copyToClipboard('npm install -g @jrok/cli')}
+                    onClick={() => copyToClipboard('curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.1.0/install.sh | bash')}
                   >
                     <Copy className="h-3 w-3" />
                   </Button>
