@@ -3,20 +3,15 @@
 
 # Include only what's needed for the CLI
 !cli/
-!build-cli.cjs
 !package.json
 !LICENSE
 !README.md
 
-# Exclude build artifacts in cli
-cli/node_modules/
-cli/dist/
-
-# Exclude other non-essential cli files
-cli/.gitignore
-cli/build.sh
-cli/build-release.sh
-cli/*.md
-!cli/src/
+# Include specific cli files
 !cli/bin/
+!cli/dist/
+!cli/src/
 !cli/package.json
+
+# Exclude cli node_modules
+cli/node_modules/
