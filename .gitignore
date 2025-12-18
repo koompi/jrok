@@ -8,6 +8,7 @@ terraform*
 # output
 out
 dist
+!cli/dist/
 *.tgz
 jrok.service
 jrok.service
