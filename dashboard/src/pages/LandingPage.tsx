@@ -205,7 +205,7 @@ export default function LandingPage() {
                 <div className="space-y-1">
                   <h3 className="font-semibold">Install the CLI</h3>
                   <code className="relative rounded bg-muted px-[0.3rem] py-[0.2rem] font-mono text-sm">
-                    curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.1.0/install.sh | bash
+                    curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.2.0/install.sh | bash
                   </code>
                 </div>
               </div>

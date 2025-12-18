@@ -122,7 +122,14 @@ export function forwardToClient(wsId: string, data: Buffer | string, isBinary: b
   
   try {
     if (connection.clientWs.readyState === 1) { // WebSocket.OPEN
-      connection.clientWs.send(data);
+      // Ensure we send the correct data type
+      if (isBinary && Buffer.isBuffer(data)) {
+        // Send binary data as ArrayBuffer
+        connection.clientWs.send(data);
+      } else {
+        // Send text data as string
+        connection.clientWs.send(typeof data === 'string' ? data : data.toString());
+      }
       return true;
     }
     return false;

@@ -1,0 +1,15 @@
+{
+  "name": "jrok-websocket-example",
+  "version": "1.0.0",
+  "description": "WebSocket example to test jrok v2.2.0 websocket support",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  },
+  "keywords": ["jrok", "websocket", "test"],
+  "author": "",
+  "license": "MIT"
+}

@@ -48,6 +48,12 @@
         add_header X-XSS-Protection "1; mode=block" always;
         add_header Referrer-Policy "no-referrer-when-downgrade" always;
         
+        # Map for WebSocket upgrades
+        map $http_upgrade $connection_upgrade {
+            default upgrade;
+            ''      close;
+        }
+
         # Rate limiting
         limit_req_zone $binary_remote_addr zone=general:10m rate=10r/s;
         limit_req_zone $binary_remote_addr zone=strict:10m rate=5r/s;
@@ -121,7 +127,10 @@
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_set_header X-Forwarded-Host $server_name;
-            proxy_set_header Connection "";
+            
+            # WebSocket support
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
             
             # Timeouts
             proxy_connect_timeout 60s;

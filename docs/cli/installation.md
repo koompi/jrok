@@ -124,7 +124,7 @@ jrok --port 3000
 jrok version
 
 # Expected output:
-# jrok v2.1.0
+# jrok v2.2.0
 # Node v20.x.x
 
 # Show help

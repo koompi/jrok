@@ -309,7 +309,7 @@ jrok version
 
 **Output:**
 ```
-jrok v2.1.0
+jrok v2.2.0
 Node v20.10.0
 ```
 

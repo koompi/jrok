@@ -35,7 +35,7 @@ async function handleWebSocketTunnel(
   agentWs: WebSocket, 
   agent: Agent, 
   subdomain: string
-): Promise<Response> {
+): Promise<Response | undefined> {
   const url = new URL(req.url);
   const path = url.pathname + url.search;
   
@@ -63,12 +63,11 @@ async function handleWebSocketTunnel(
     },
   });
   
-  if (!success) {
-    return new Response("Failed to upgrade WebSocket connection", { status: 400 });
+  if (success) {
+    return undefined;
   }
   
-  // Return undefined - the connection is now handled by WebSocket handlers
-  return new Response(null, { status: 101 });
+  return new Response("Failed to upgrade WebSocket connection", { status: 400 });
 }
 
 // Forward HTTP request to agent via WebSocket
@@ -281,9 +280,9 @@ async function startServer() {
             } else if (message.type === "ws_message_response") {
               // Forward WebSocket message from agent to client
               const { wsId, data: msgData, isBinary } = message;
-              if (wsId && msgData) {
-                // Decode base64 if binary
-                const payload = isBinary ? Buffer.from(msgData, 'base64') : msgData;
+              if (wsId && msgData !== undefined) {
+                // Decode base64 if binary, otherwise pass as string
+                const payload = isBinary ? Buffer.from(msgData, 'base64') : String(msgData);
                 wsProxyService.forwardToClient(wsId, payload, isBinary);
               }
             } else if (message.type === "ws_close_response") {
@@ -787,7 +786,9 @@ async function startServer() {
           // Check if this is a WebSocket upgrade request
           if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
             // Handle WebSocket tunneling
-            return await handleWebSocketTunnel(req, server, agentWs, agent, subdomain);
+            const response = await handleWebSocketTunnel(req, server, agentWs, agent, subdomain);
+            if (response) return response;
+            return undefined; // Handled by upgrade
           }
 
           // Forward regular HTTP request to agent via WebSocket (with bandwidth tracking)
