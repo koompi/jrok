@@ -325,7 +325,7 @@ export default function DashboardHome() {
                 <div className="text-center py-8 text-muted-foreground">
                   <Globe className="h-8 w-8 mx-auto mb-2 opacity-50" />
                   <p>No active tunnels yet</p>
-                  <p className="text-sm mt-1">Run <code className="bg-muted px-1.5 py-0.5 rounded">jrok connect --port 3000</code> to get started</p>
+                  <p className="text-sm mt-1">Run <code className="bg-muted px-1.5 py-0.5 rounded">jrok --port 3000</code> to get started</p>
                 </div>
               )}
             </div>
@@ -525,13 +525,13 @@ export default function DashboardHome() {
                 </p>
                 <div className="relative">
                   <pre className="bg-muted/50 p-3 rounded-lg text-xs font-mono overflow-x-auto">
-                    jrok connect --port 3000
+                    jrok --port 3000
                   </pre>
                   <Button 
                     variant="ghost" 
                     size="icon" 
                     className="absolute top-2 right-2 h-6 w-6"
-                    onClick={() => copyToClipboard('jrok connect --port 3000')}
+                    onClick={() => copyToClipboard('jrok --port 3000')}
                   >
                     <Copy className="h-3 w-3" />
                   </Button>

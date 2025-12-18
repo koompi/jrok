@@ -536,13 +536,13 @@ export default function TunnelsPage() {
                 <p className="font-medium mb-2">Basic tunnel (random subdomain)</p>
                 <div className="relative">
                   <pre className="bg-background/80 border rounded-lg p-3 text-sm font-mono overflow-x-auto">
-                    jrok connect --port 3000
+                    jrok --port 3000
                   </pre>
                   <Button 
                     variant="ghost" 
                     size="icon" 
                     className="absolute top-2 right-2 h-7 w-7"
-                    onClick={() => copyToClipboard('jrok connect --port 3000')}
+                    onClick={() => copyToClipboard('jrok --port 3000')}
                   >
                     <Copy className="h-3.5 w-3.5" />
                   </Button>
@@ -555,13 +555,13 @@ export default function TunnelsPage() {
                 <p className="font-medium mb-2">Custom subdomain</p>
                 <div className="relative">
                   <pre className="bg-background/80 border rounded-lg p-3 text-sm font-mono overflow-x-auto">
-                    jrok connect --port 3000 --subdomain my-app
+                    jrok --port 3000 --domain my-app
                   </pre>
                   <Button 
                     variant="ghost" 
                     size="icon" 
                     className="absolute top-2 right-2 h-7 w-7"
-                    onClick={() => copyToClipboard('jrok connect --port 3000 --subdomain my-app')}
+                    onClick={() => copyToClipboard('jrok --port 3000 --domain my-app')}
                   >
                     <Copy className="h-3.5 w-3.5" />
                   </Button>
