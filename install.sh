@@ -46,14 +46,11 @@ npm install --silent
 echo -e "${YELLOW}→${NC} Building CLI..."
 npm run build --silent
 
+echo -e "${YELLOW}→${NC} Creating package..."
+PKG_FILE=$(npm pack --silent)
+
 echo -e "${YELLOW}→${NC} Installing globally..."
-npm install -g . --silent
-
-# Clean up
-cd ~
-rm -rf "$TEMP_DIR"
-
-echo ""
+npm install -g "$PKG_FILE" --silent
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                   Installation Complete! 🎉                          ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
