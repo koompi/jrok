@@ -12,6 +12,7 @@
     "bundle": "bun build src/index.ts --compile --outfile bin/jrok-standalone",
     "bundle:all": "npm run build && npx @yao-pkg/pkg dist/index.js --targets node18-linux-x64,node18-macos-x64,node18-win-x64 --output bin/jrok",
     "dev": "bun run src/index.ts",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },
   "pkg": {
