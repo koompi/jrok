@@ -10,9 +10,7 @@
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target node",
-    "preinstall": "node build-cli.cjs || true",
-    "postinstall": "node build-cli.cjs || true"
+    "build": "bun build src/index.ts --outdir dist --target node"
   },
   "dependencies": {
     "mongodb": "^6.4.0"
