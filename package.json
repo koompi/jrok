@@ -1,5 +1,5 @@
 {
-  "name": "jrok",
+  "name": "jrok-server",
   "version": "2.1.0",
   "module": "index.ts",
   "type": "module",
