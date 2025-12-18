@@ -13,7 +13,7 @@ import { createInterface } from 'readline';
 import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 
-const VERSION = "2.1.0";
+const VERSION = "2.2.0"; // Updated for WebSocket support
 const DEFAULT_SERVER = "https://tunnel.koompi.cloud";
 const GITHUB_API = "https://api.github.com/repos/koompi/jrok";
 const GITHUB_RAW = "https://raw.githubusercontent.com/koompi/jrok";
@@ -355,6 +355,107 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
   }
 }
 
+// Store active WebSocket connections to local services
+const localWsConnections = new Map<string, WebSocket>();
+
+// Handle WebSocket connection request from server
+async function handleWsConnect(message: any, serverWs: WebSocket, config: ClientConfig): Promise<void> {
+  const { wsId, path, headers } = message;
+  
+  // Build WebSocket URL to local service
+  const wsUrl = `ws://${config.localHost}:${config.port}${path || '/'}`;
+  
+  console.log(`🔌 WS Connect: ${path} → ${wsUrl} [${wsId}]`);
+  
+  try {
+    // Create WebSocket connection to local service
+    const localWs = new WebSocket(wsUrl, {
+      headers: headers || {},
+    });
+    
+    localWs.on('open', () => {
+      console.log(`✅ WS Connected: ${path} [${wsId}]`);
+      localWsConnections.set(wsId, localWs);
+    });
+    
+    localWs.on('message', (data: Buffer | string) => {
+      // Forward message from local service to server
+      const isBinary = Buffer.isBuffer(data);
+      serverWs.send(JSON.stringify({
+        type: "ws_message_response",
+        wsId,
+        data: isBinary ? data.toString('base64') : data.toString(),
+        isBinary,
+      }));
+    });
+    
+    localWs.on('close', (code: number, reason: Buffer) => {
+      console.log(`🔌 WS Closed: ${path} [${wsId}] (${code})`);
+      localWsConnections.delete(wsId);
+      
+      // Notify server about close
+      serverWs.send(JSON.stringify({
+        type: "ws_close_response",
+        wsId,
+        code,
+        reason: reason?.toString() || '',
+      }));
+    });
+    
+    localWs.on('error', (error: Error) => {
+      console.error(`❌ WS Error: ${path} [${wsId}]:`, error.message);
+      localWsConnections.delete(wsId);
+      
+      // Notify server about error
+      serverWs.send(JSON.stringify({
+        type: "ws_error",
+        wsId,
+        error: error.message,
+      }));
+    });
+  } catch (error) {
+    console.error(`❌ Failed to connect WebSocket [${wsId}]:`, error);
+    
+    // Notify server about error
+    serverWs.send(JSON.stringify({
+      type: "ws_error",
+      wsId,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+  }
+}
+
+// Handle WebSocket message from server (forward to local service)
+function handleWsMessage(message: any): void {
+  const { wsId, data, isBinary } = message;
+  const localWs = localWsConnections.get(wsId);
+  
+  if (!localWs || localWs.readyState !== WebSocket.OPEN) {
+    console.warn(`⚠️ No active WebSocket for [${wsId}]`);
+    return;
+  }
+  
+  try {
+    // Decode and forward message to local service
+    const payload = isBinary ? Buffer.from(data, 'base64') : data;
+    localWs.send(payload);
+  } catch (error) {
+    console.error(`❌ Error forwarding WS message [${wsId}]:`, error);
+  }
+}
+
+// Handle WebSocket close request from server
+function handleWsClose(message: any): void {
+  const { wsId, code, reason } = message;
+  const localWs = localWsConnections.get(wsId);
+  
+  if (localWs) {
+    console.log(`🔌 WS Close request: [${wsId}]`);
+    localWs.close(code || 1000, reason || '');
+    localWsConnections.delete(wsId);
+  }
+}
+
 async function connectAgent(config: ClientConfig): Promise<void> {
   const baseDomain = getBaseDomain(config.serverUrl);
   const fullDomain = `${config.domain}.${baseDomain}`;
@@ -416,6 +517,15 @@ async function connectAgent(config: ClientConfig): Promise<void> {
       } else if (message.type === "http_request") {
         // Handle incoming HTTP request from server
         await handleHttpRequest(message, ws, config);
+      } else if (message.type === "ws_connect") {
+        // Handle WebSocket connection request from server
+        await handleWsConnect(message, ws, config);
+      } else if (message.type === "ws_message") {
+        // Handle WebSocket message from server (forward to local)
+        handleWsMessage(message);
+      } else if (message.type === "ws_close") {
+        // Handle WebSocket close request from server
+        handleWsClose(message);
       } else if (message.type === "status") {
         console.log(`📊 Status: ${message.message}`);
       } else {
@@ -434,6 +544,16 @@ async function connectAgent(config: ClientConfig): Promise<void> {
     clearInterval(heartbeatInterval);
     reconnectAttempts++;
     const delay = Math.min(5000 * reconnectAttempts, 30000); // Max 30s delay
+    
+    // Close all local WebSocket connections
+    for (const [wsId, localWs] of localWsConnections.entries()) {
+      try {
+        localWs.close(1001, 'Server disconnected');
+      } catch (e) {
+        // Ignore close errors
+      }
+    }
+    localWsConnections.clear();
     
     console.log(`\n🔌 Disconnected from server`);
     console.log(`🔄 Attempting to reconnect in ${delay / 1000}s (attempt ${reconnectAttempts})...`);

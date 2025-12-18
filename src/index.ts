@@ -12,6 +12,7 @@ import * as agentService from "./services/agentService";
 import * as vpsService from "./services/vpsService";
 import * as authService from "./services/authService";
 import * as statsService from "./services/statsService";
+import * as wsProxyService from "./services/wsProxyService";
 import { connectDatabase, closeDatabase } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { initTelegram } from "./services/notificationService";
@@ -26,6 +27,49 @@ const pendingRequests = new Map<string, {
   agent: Agent;
   tunnelId?: string;
 }>();
+
+// Handle WebSocket tunnel (client WebSocket -> agent -> local service WebSocket)
+async function handleWebSocketTunnel(
+  req: Request, 
+  server: any, 
+  agentWs: WebSocket, 
+  agent: Agent, 
+  subdomain: string
+): Promise<Response> {
+  const url = new URL(req.url);
+  const path = url.pathname + url.search;
+  
+  // Extract headers to forward to agent
+  const headers: Record<string, string> = {};
+  req.headers.forEach((value, key) => {
+    // Forward relevant headers (exclude hop-by-hop headers)
+    const skipHeaders = new Set(['upgrade', 'connection', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions']);
+    if (!skipHeaders.has(key.toLowerCase())) {
+      headers[key] = value;
+    }
+  });
+  
+  console.log(`🔌 WebSocket upgrade request for ${subdomain}${path}`);
+  
+  // Upgrade the client connection to WebSocket
+  const success = server.upgrade(req, {
+    data: {
+      agentWs,
+      agent,
+      subdomain,
+      path,
+      headers,
+      type: 'client-tunnel',
+    },
+  });
+  
+  if (!success) {
+    return new Response("Failed to upgrade WebSocket connection", { status: 400 });
+  }
+  
+  // Return undefined - the connection is now handled by WebSocket handlers
+  return new Response(null, { status: 101 });
+}
 
 // Forward HTTP request to agent via WebSocket
 async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string): Promise<Response> {
@@ -170,6 +214,24 @@ async function startServer() {
       port: process.env.PORT ? parseInt(process.env.PORT) : 3000,
       websocket: {
         open(ws: any) {
+          // Handle client-tunnel WebSocket (from browser/client to tunneled service)
+          if (ws.data?.type === 'client-tunnel') {
+            const { agentWs, agent, subdomain, path, headers } = ws.data;
+            
+            // Register the client WebSocket connection
+            const wsId = wsProxyService.registerClientWs(ws, agentWs, agent, subdomain, path || '/');
+            
+            // Store wsId in ws.data for later use
+            ws.data.wsId = wsId;
+            
+            console.log(`✅ Client WebSocket connected for ${subdomain}${path || '/'} [${wsId}]`);
+            
+            // Notify agent about the new WebSocket connection
+            wsProxyService.notifyAgentConnect(wsId, path || '/', headers || {});
+            return;
+          }
+
+          // Handle agent WebSocket
           const domain = ws.data?.domain;
           const localPort = ws.data?.localPort;
           const localHost = ws.data?.localHost;
@@ -196,6 +258,16 @@ async function startServer() {
         },
 
         message(ws: any, data: string | Buffer) {
+          // Handle client-tunnel WebSocket messages (forward to agent)
+          if (ws.data?.type === 'client-tunnel') {
+            const wsId = ws.data.wsId;
+            if (wsId) {
+              const isBinary = Buffer.isBuffer(data);
+              wsProxyService.forwardToAgent(wsId, data, isBinary);
+            }
+            return;
+          }
+
           try {
             const message = JSON.parse(data.toString());
 
@@ -205,6 +277,27 @@ async function startServer() {
               if (agentId) {
                 agentService.updateHeartbeat(agentId);
                 ws.send(JSON.stringify({ type: "heartbeat_ack" }));
+              }
+            } else if (message.type === "ws_message_response") {
+              // Forward WebSocket message from agent to client
+              const { wsId, data: msgData, isBinary } = message;
+              if (wsId && msgData) {
+                // Decode base64 if binary
+                const payload = isBinary ? Buffer.from(msgData, 'base64') : msgData;
+                wsProxyService.forwardToClient(wsId, payload, isBinary);
+              }
+            } else if (message.type === "ws_close_response") {
+              // Agent requested to close client WebSocket
+              const { wsId, code, reason } = message;
+              if (wsId) {
+                wsProxyService.closeClientConnection(wsId, code || 1000, reason || '');
+              }
+            } else if (message.type === "ws_error") {
+              // Agent reported WebSocket error
+              const { wsId, error } = message;
+              console.error(`❌ WebSocket error from agent [${wsId}]: ${error}`);
+              if (wsId) {
+                wsProxyService.closeClientConnection(wsId, 1011, error || 'Internal error');
               }
             } else if (message.type === "http_response") {
               // Handle HTTP response from agent
@@ -260,18 +353,43 @@ async function startServer() {
           }
         },
 
-        close(ws: any) {
+        close(ws: any, code: number, reason: string) {
+          // Handle client-tunnel WebSocket close
+          if (ws.data?.type === 'client-tunnel') {
+            const wsId = ws.data.wsId;
+            if (wsId) {
+              // Notify agent about client disconnect
+              wsProxyService.notifyAgentDisconnect(wsId, code, reason?.toString() || '');
+              // Unregister the connection
+              wsProxyService.unregisterClientWs(wsId);
+            }
+            return;
+          }
+
+          // Handle agent WebSocket close
           const agentId = agentService.getAgentIdBySocket(ws);
 
           if (agentId) {
             const agent = agentService.getAgent(agentId);
             console.log(`🔌 Agent disconnected: ${agent?.domain} [${agentId}]`);
+            
+            // Close all client WebSocket connections for this agent
+            wsProxyService.closeConnectionsByAgent(agentId);
+            
             agentService.unregisterAgent(agentId);
           }
         },
 
         error(ws: any, error: Error) {
           console.error("WebSocket error:", error);
+          
+          // Handle client-tunnel WebSocket error
+          if (ws.data?.type === 'client-tunnel') {
+            const wsId = ws.data.wsId;
+            if (wsId) {
+              wsProxyService.closeClientConnection(wsId, 1011, 'WebSocket error');
+            }
+          }
         },
       },
       async fetch(req: Request) {
@@ -666,7 +784,13 @@ async function startServer() {
             tunnelId = tunnel?.id;
           }
 
-          // Forward request to agent via WebSocket (with bandwidth tracking)
+          // Check if this is a WebSocket upgrade request
+          if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+            // Handle WebSocket tunneling
+            return await handleWebSocketTunnel(req, server, agentWs, agent, subdomain);
+          }
+
+          // Forward regular HTTP request to agent via WebSocket (with bandwidth tracking)
           return await forwardRequestToAgent(req, agentWs, agent, tunnelId);
         }
 
