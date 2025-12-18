@@ -43,9 +43,8 @@ Jrok is an **open-source tunnel service** that exposes your local development se
 No server setup required. Get started in 30 seconds:
 
 ```bash
-# Install CLI
-curl -fsSL https://github.com/koompi/jrok/releases/latest/download/jrok-linux-x64 -o jrok
-chmod +x jrok && sudo mv jrok /usr/local/bin/
+# Install CLI with one command
+curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.1.0/install.sh | bash
 
 # Expose your local service (you'll be prompted for API key)
 jrok --port 3000
