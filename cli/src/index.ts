@@ -15,6 +15,9 @@ import WebSocket from 'ws';
 
 const VERSION = "2.1.0";
 const DEFAULT_SERVER = "https://tunnel.koompi.cloud";
+const GITHUB_API = "https://api.github.com/repos/koompi/jrok";
+const GITHUB_RAW = "https://raw.githubusercontent.com/koompi/jrok";
+const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
 
 // Config file path
 const CONFIG_DIR = join(homedir(), '.jrok');
@@ -25,6 +28,8 @@ interface StoredConfig {
   apiKey?: string;
   organizationId?: string;
   organizationName?: string;
+  lastUpdateCheck?: number;
+  skipUpdateCheck?: boolean;
 }
 
 interface ClientConfig {
@@ -99,6 +104,75 @@ async function promptInput(question: string, isPassword = false): Promise<string
       resolve(answer.trim());
     });
   });
+}
+
+// Compare semantic versions
+function compareVersions(v1: string, v2: string): number {
+  const parts1 = v1.replace(/^v/, '').split('.').map(Number);
+  const parts2 = v2.replace(/^v/, '').split('.').map(Number);
+  
+  for (let i = 0; i < 3; i++) {
+    const p1 = parts1[i] || 0;
+    const p2 = parts2[i] || 0;
+    if (p1 > p2) return 1;
+    if (p1 < p2) return -1;
+  }
+  return 0;
+}
+
+// Check for updates from GitHub releases
+async function checkForUpdates(silent = false): Promise<{ hasUpdate: boolean; latestVersion?: string }> {
+  try {
+    const response = await fetch(`${GITHUB_API}/releases/latest`, {
+      headers: { 'Accept': 'application/vnd.github.v3+json' },
+    });
+    
+    if (!response.ok) {
+      if (!silent) console.log('⚠️  Could not check for updates');
+      return { hasUpdate: false };
+    }
+    
+    const data = await response.json();
+    const latestVersion = data.tag_name.replace(/^v/, ''); // Remove 'v' prefix
+    
+    if (compareVersions(latestVersion, VERSION) > 0) {
+      if (!silent) {
+        console.log(`\n📦 Update available: ${VERSION} → ${latestVersion}`);
+        console.log(`   Run 'jrok doctor' to update\n`);
+      }
+      return { hasUpdate: true, latestVersion };
+    }
+    
+    if (!silent) {
+      console.log('✅ You are using the latest version');
+    }
+    return { hasUpdate: false };
+  } catch (error) {
+    if (!silent) {
+      console.log('⚠️  Could not check for updates:', error instanceof Error ? error.message : error);
+    }
+    return { hasUpdate: false };
+  }
+}
+
+// Auto-check for updates on startup (if not checked recently)
+async function autoCheckForUpdates(): Promise<void> {
+  const config = loadStoredConfig();
+  
+  // Skip if user disabled it or checked recently
+  if (config.skipUpdateCheck) return;
+  
+  const now = Date.now();
+  const lastCheck = config.lastUpdateCheck || 0;
+  
+  if (now - lastCheck < UPDATE_CHECK_INTERVAL) return;
+  
+  // Update last check time
+  config.lastUpdateCheck = now;
+  saveStoredConfig(config);
+  
+  // Check for updates silently
+  await checkForUpdates(true);
 }
 
 // Generate a short UUID for subdomain
@@ -768,6 +842,7 @@ COMMANDS:
   apikey create        Create a new API key
   apikey revoke        Revoke an API key
   
+  doctor               Check for updates and system health
   whoami               Show current user/API key info
   version              Show version information
   help                 Show this help message
@@ -834,6 +909,11 @@ For more info: https://github.com/koompi/jrok
 async function main(): Promise<void> {
   try {
     const { command, subcommand, args } = parseArgs();
+    
+    // Auto-check for updates on startup (skip for non-interactive commands)
+    if (!['version', 'help', '--version', '-v', '--help', '-h'].includes(command)) {
+      await autoCheckForUpdates();
+    }
     const storedConfig = loadStoredConfig();
 
     // Helper to get server URL and auth token
@@ -990,6 +1070,70 @@ async function main(): Promise<void> {
             console.log("  --org <id>            Organization ID (or use default)");
             console.log("  --permissions <p1,p2> Comma-separated permissions");
         }
+        break;
+      }
+
+      case "doctor": {
+        console.log('🏥 Running jrok health check...\n');
+        console.log(`📌 Current version: ${VERSION}`);
+        
+        // Check for updates
+        const { hasUpdate, latestVersion } = await checkForUpdates(false);
+        
+        if (hasUpdate) {
+          console.log(`\n🔄 To update to v${latestVersion}, run:`);
+          console.log(`   curl -fsSL ${GITHUB_RAW}/v${latestVersion}/install.sh | bash`);
+          
+          // Prompt for auto-update
+          const answer = await promptInput('\n🚀 Would you like to update now? (y/n): ');
+          if (answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') {
+            console.log('\n📦 Updating jrok...');
+            const { execSync } = require('child_process');
+            try {
+              const installCmd = `curl -fsSL ${GITHUB_RAW}/v${latestVersion}/install.sh | bash`;
+              execSync(installCmd, { stdio: 'inherit', shell: '/bin/bash' });
+              console.log('\n✅ Update complete! Please restart your terminal.');
+            } catch (error) {
+              console.error('\n❌ Update failed. Please try manually:');
+              console.error(`   curl -fsSL ${GITHUB_RAW}/v${latestVersion}/install.sh | bash`);
+            }
+          }
+        }
+        
+        // Check config
+        console.log('\n📝 Configuration:');
+        const config = loadStoredConfig();
+        console.log(`   Config file: ${CONFIG_FILE}`);
+        console.log(`   Server: ${config.serverUrl || 'not set'}`);
+        console.log(`   API Key: ${config.apiKey ? '✓ configured' : '✗ not set'}`);
+        console.log(`   Organization: ${config.organizationName || 'not set'}`);
+        
+        // Test server connection
+        if (config.serverUrl && config.apiKey) {
+          try {
+            console.log('\n🔌 Testing server connection...');
+            const response = await fetch(`${config.serverUrl}/auth/me`, {
+              headers: {
+                'Authorization': `Bearer ${config.apiKey}`,
+                'Content-Type': 'application/json',
+              },
+            });
+            
+            if (response.ok) {
+              const data = await response.json();
+              console.log('✅ Server connection OK');
+              console.log(`   User: ${data.user?.email || data.user?.username || 'unknown'}`);
+            } else {
+              console.log('❌ Server connection failed');
+              console.log(`   Status: ${response.status} ${response.statusText}`);
+            }
+          } catch (error) {
+            console.log('❌ Could not connect to server');
+            console.log(`   Error: ${error instanceof Error ? error.message : error}`);
+          }
+        }
+        
+        console.log('\n✨ Health check complete!');
         break;
       }
 
