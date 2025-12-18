@@ -11,7 +11,7 @@
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target node",
-    "prepare": "node build-cli.cjs"
+    "postinstall": "node build-cli.cjs"
   },
   "dependencies": {
     "mongodb": "^6.4.0"
