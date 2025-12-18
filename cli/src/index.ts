@@ -243,6 +243,7 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
       method,
       headers: forwardHeaders,
       body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
+      redirect: 'manual', // Don't follow redirects automatically
     });
     
     // Read response - use ArrayBuffer for binary content
