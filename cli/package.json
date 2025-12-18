@@ -1,5 +1,5 @@
 {
-  "name": "jrok",
+  "name": "jrok-cli",
   "version": "2.1.0",
   "description": "Expose local services (ports, Docker, Kubernetes) to the internet via secure reverse proxy",
   "main": "dist/index.js",
