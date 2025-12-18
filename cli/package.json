@@ -7,7 +7,7 @@
     "jrok": "./bin/jrok"
   },
   "scripts": {
-    "build": "npx esbuild src/index.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/index.js --minify",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/index.js --minify",
     "build:dev": "bun build src/index.ts --outdir dist --target node",
     "bundle": "bun build src/index.ts --compile --outfile bin/jrok-standalone",
     "bundle:all": "npm run build && npx @yao-pkg/pkg dist/index.js --targets node18-linux-x64,node18-macos-x64,node18-win-x64 --output bin/jrok",

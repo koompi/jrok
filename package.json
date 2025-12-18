@@ -11,7 +11,7 @@
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target node",
-    "build:cli": "npx esbuild cli/src/index.ts --bundle --platform=node --target=node18 --format=cjs --outfile=cli/dist/index.js --minify",
+    "build:cli": "esbuild cli/src/index.ts --bundle --platform=node --target=node18 --format=cjs --outfile=cli/dist/index.js --minify",
     "prepare": "npm run build:cli"
   },
   "dependencies": {
@@ -19,7 +19,8 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "esbuild": "^0.27.2"
+    "esbuild": "^0.27.2",
+    "ws": "^8.17.0"
   },
   "peerDependencies": {
     "typescript": "^5"
