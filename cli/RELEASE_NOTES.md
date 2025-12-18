@@ -155,7 +155,7 @@ None reported yet!
 
 ## 📜 License
 
-MIT License - see [LICENSE](https://github.com/koompi/jrok/blob/main/LICENSE) for details
+Apache License 2.0 - see [LICENSE](https://github.com/koompi/jrok/blob/main/LICENSE) for details
 
 ---
 

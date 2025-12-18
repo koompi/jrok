@@ -420,4 +420,4 @@ bun run dev connect --server ... --domain ... --port ...
 
 ## License
 
-MIT License - see [LICENSE](../LICENSE) for details
+Apache License 2.0 - see [LICENSE](../LICENSE) for details
