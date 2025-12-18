@@ -11,7 +11,8 @@
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target node",
-    "prepare": "esbuild cli/src/index.ts --bundle --platform=node --target=node18 --format=cjs --outfile=cli/dist/index.js --minify"
+    "build:cli": "npx esbuild cli/src/index.ts --bundle --platform=node --target=node18 --format=cjs --outfile=cli/dist/index.js --minify",
+    "prepare": "npm run build:cli"
   },
   "dependencies": {
     "mongodb": "^6.4.0"
