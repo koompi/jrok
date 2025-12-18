@@ -1,12 +1,17 @@
 {
-  "name": "jrok-project",
+  "name": "jrok",
+  "version": "2.1.0",
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "bin": {
+    "jrok": "./cli/bin/jrok"
+  },
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target node"
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "prepare": "cd cli && npm install && npm run build"
   },
   "dependencies": {
     "mongodb": "^6.4.0"
