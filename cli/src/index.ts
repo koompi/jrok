@@ -1112,17 +1112,22 @@ async function main(): Promise<void> {
         if (config.serverUrl && config.apiKey) {
           try {
             console.log('\n🔌 Testing server connection...');
-            const response = await fetch(`${config.serverUrl}/auth/me`, {
+            const response = await fetch(`${config.serverUrl}/organizations`, {
               headers: {
                 'Authorization': `Bearer ${config.apiKey}`,
+                'X-API-Key': config.apiKey,
                 'Content-Type': 'application/json',
               },
             });
             
             if (response.ok) {
               const data = await response.json();
+              const orgs = data.organizations || data || [];
               console.log('✅ Server connection OK');
-              console.log(`   User: ${data.user?.email || data.user?.username || 'unknown'}`);
+              console.log(`   Access to ${orgs.length} organization(s)`);
+              if (orgs.length > 0) {
+                console.log(`   Organizations: ${orgs.map((o: any) => o.name).join(', ')}`);
+              }
             } else {
               console.log('❌ Server connection failed');
               console.log(`   Status: ${response.status} ${response.statusText}`);
