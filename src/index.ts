@@ -13,11 +13,12 @@ import * as vpsService from "./services/vpsService";
 import * as authService from "./services/authService";
 import * as statsService from "./services/statsService";
 import * as wsProxyService from "./services/wsProxyService";
+import * as tcpService from "./services/tcpService";
 import { connectDatabase, closeDatabase } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { initTelegram } from "./services/notificationService";
 import { generateId } from "./utils/helpers";
-import type { TunnelConfig, Agent, AuthContext } from "./types/index";
+import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
 
 // Store pending requests waiting for agent responses
 const pendingRequests = new Map<string, { 
@@ -237,14 +238,20 @@ async function startServer() {
           const clientIp = ws.data?.clientIp;
           const organizationId = ws.data?.organizationId;
           const apiKeyId = ws.data?.apiKeyId;
+          const protocol: TunnelProtocol = ws.data?.protocol || 'http';
 
           if (!domain || !localPort) return;
 
           // Register agent with organization context
-          const agent = agentService.registerAgent(ws, domain, localPort, localHost, clientIp, organizationId, apiKeyId);
+          const agent = agentService.registerAgent(ws, domain, localPort, localHost, clientIp, organizationId, apiKeyId, protocol);
           console.log(
-            `✅ Agent connected: ${domain} (${localHost}:${localPort}) [${agent.id}]`
+            `✅ Agent connected: ${domain} (${localHost}:${localPort}) [${agent.id}] protocol: ${protocol}`
           );
+
+          // Register agent for TCP forwarding if it's a TCP tunnel
+          if (protocol === 'tcp') {
+            tcpService.registerAgentConnection(agent.id, ws);
+          }
 
           // Send welcome message
           ws.send(
@@ -252,8 +259,26 @@ async function startServer() {
               type: "welcome",
               agentId: agent.id,
               message: "Connected to jrok",
+              protocol,
             })
           );
+
+          // For TCP tunnels, send the allocated port after tunnel is created
+          if (protocol === 'tcp') {
+            // Wait for tunnel creation and then send TCP port info
+            setTimeout(async () => {
+              const allocation = tcpService.getPortAllocation(agent.tunnelId || '');
+              if (allocation) {
+                ws.send(JSON.stringify({
+                  type: "welcome",
+                  agentId: agent.id,
+                  message: "TCP tunnel ready",
+                  protocol,
+                  tcpPort: allocation.port,
+                }));
+              }
+            }, 1000); // Wait 1 second for tunnel creation
+          }
         },
 
         message(ws: any, data: string | Buffer) {
@@ -347,6 +372,33 @@ async function startServer() {
             } else if (message.type === "error") {
               console.error("Agent error:", message.payload);
             }
+            // ============ TCP Tunnel Message Handlers ============
+            else if (message.type === "tcp_data_response") {
+              // Forward TCP data from agent to client
+              const { connectionId, data } = message;
+              if (connectionId && data) {
+                tcpService.handleAgentTcpData(connectionId, data);
+              }
+            } else if (message.type === "tcp_connected") {
+              // Agent successfully connected to local TCP service
+              const { connectionId } = message;
+              if (connectionId) {
+                tcpService.handleAgentTcpConnected(connectionId);
+              }
+            } else if (message.type === "tcp_close_response") {
+              // Agent closed TCP connection
+              const { connectionId } = message;
+              if (connectionId) {
+                tcpService.handleAgentTcpClose(connectionId);
+              }
+            } else if (message.type === "tcp_error") {
+              // Agent reported TCP error
+              const { connectionId, error } = message;
+              console.error(`❌ TCP error from agent [${connectionId}]: ${error}`);
+              if (connectionId) {
+                tcpService.handleAgentTcpError(connectionId, error || 'Unknown error');
+              }
+            }
           } catch (error) {
             console.error("Failed to parse agent message:", error);
           }
@@ -374,6 +426,9 @@ async function startServer() {
             
             // Close all client WebSocket connections for this agent
             wsProxyService.closeConnectionsByAgent(agentId);
+            
+            // Clean up TCP connections for this agent
+            tcpService.unregisterAgentConnection(agentId);
             
             agentService.unregisterAgent(agentId);
           }
@@ -703,6 +758,27 @@ async function startServer() {
             ));
           }
           return addCors(await statsHandler.handleBandwidthStats(req, authContext));
+        }
+
+        // TCP tunnel stats (public endpoint for monitoring)
+        if (path === "/stats/tcp" && method === "GET") {
+          const stats = tcpService.getTcpStats();
+          const allocations = tcpService.getAllPortAllocations();
+          return addCors(new Response(
+            JSON.stringify({
+              success: true,
+              stats,
+              allocations: allocations.map(a => ({
+                port: a.port,
+                tunnelId: a.tunnelId,
+                localPort: a.localPort,
+                localHost: a.localHost,
+                createdAt: a.createdAt,
+                active: a.active,
+              })),
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
         }
 
         // Enhanced resource routes

@@ -1,8 +1,9 @@
-import type { Tunnel, TunnelConfig, CreateTunnelRequest } from "../types/index";
+import type { Tunnel, TunnelConfig, CreateTunnelRequest, TunnelProtocol } from "../types/index";
 import * as db from "../utils/database";
 import * as agentService from "./agentService";
 import * as vpsService from "./vpsService";
 import * as activityService from "./activityService";
+import * as tcpService from "./tcpService";
 import { generateId } from "../utils/helpers";
 import { generateNginxConfig, setConfig as setNginxConfig } from "../utils/nginxConfig";
 import { writeFile, mkdir } from "fs/promises";
@@ -163,6 +164,8 @@ export async function createTunnel(request: CreateTunnelRequest, agentId: string
     }
   }
 
+  const protocol: TunnelProtocol = request.protocol || 'http';
+  
   const tunnel: Tunnel = {
     id: generateId(),
     domain: request.domain,
@@ -174,14 +177,37 @@ export async function createTunnel(request: CreateTunnelRequest, agentId: string
     createdAt: Date.now(),
     expiresAt: request.expiresIn ? Date.now() + request.expiresIn * 1000 : undefined,
     active: true,
+    protocol,
   };
 
   try {
-    // Sync nginx config to all healthy VPS servers (non-blocking)
-    try {
-      await syncConfigToAllVps(tunnel.domain, agent.localPort, agent.localHost, request.customDomain);
-    } catch (syncError) {
-      console.warn("⚠️  Nginx config sync failed, but continuing with tunnel creation:", syncError instanceof Error ? syncError.message : String(syncError));
+    if (protocol === 'tcp') {
+      // For TCP tunnels, allocate a public port instead of creating nginx config
+      const allocation = await tcpService.allocatePort(
+        tunnel.id,
+        agentId,
+        agent.localPort,
+        agent.localHost,
+        organizationId
+      );
+      
+      if (!allocation) {
+        throw new Error("Failed to allocate TCP port - no available ports");
+      }
+      
+      tunnel.tcpPort = allocation.port;
+      
+      // Start the TCP server for this tunnel
+      tcpService.startTcpServer(allocation);
+      
+      console.log(`✅ TCP tunnel created: ${tunnel.domain} -> port ${tunnel.tcpPort} -> ${agent.localHost}:${agent.localPort}`);
+    } else {
+      // For HTTP tunnels, sync nginx config to all healthy VPS servers (non-blocking)
+      try {
+        await syncConfigToAllVps(tunnel.domain, agent.localPort, agent.localHost, request.customDomain);
+      } catch (syncError) {
+        console.warn("⚠️  Nginx config sync failed, but continuing with tunnel creation:", syncError instanceof Error ? syncError.message : String(syncError));
+      }
     }
 
     // Save to database
@@ -221,20 +247,26 @@ export async function deleteTunnel(id: string): Promise<void> {
   }
 
   try {
-    // Remove nginx config from all VPS servers
-    const vpsServers = await vpsService.getHealthyVpsServers();
-    const errors: string[] = [];
+    if (tunnel.protocol === 'tcp') {
+      // For TCP tunnels, deallocate the port
+      tcpService.deallocatePortByTunnelId(id);
+      console.log(`✅ TCP tunnel deleted: ${tunnel.domain} (port ${tunnel.tcpPort})`);
+    } else {
+      // For HTTP tunnels, remove nginx config from all VPS servers
+      const vpsServers = await vpsService.getHealthyVpsServers();
+      const errors: string[] = [];
 
-    for (const vps of vpsServers) {
-      try {
-        await removeNginxConfigFromVps(vps.id, tunnel.domain);
-      } catch (error) {
-        errors.push(`${vps.name}: ${error instanceof Error ? error.message : String(error)}`);
+      for (const vps of vpsServers) {
+        try {
+          await removeNginxConfigFromVps(vps.id, tunnel.domain);
+        } catch (error) {
+          errors.push(`${vps.name}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
-    }
 
-    if (errors.length > 0) {
-      console.error("Errors removing tunnel from VPS servers:", errors);
+      if (errors.length > 0) {
+        console.error("Errors removing tunnel from VPS servers:", errors);
+      }
     }
 
     // Remove from database

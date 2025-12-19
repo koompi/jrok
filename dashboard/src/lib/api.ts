@@ -407,6 +407,9 @@ export interface EnhancedTunnel {
   lastRequestAt?: number;
   avgResponseTime?: number;
   errorRate?: number;
+  // TCP tunnel fields
+  protocol?: "http" | "tcp";
+  tcpPort?: number; // Public TCP port (e.g., 10001 for SSH tunnel)
 }
 
 export interface EnhancedAgent {

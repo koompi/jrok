@@ -1,4 +1,4 @@
-import type { Agent, AgentMessage } from "../types/index";
+import type { Agent, AgentMessage, TunnelProtocol } from "../types/index";
 import { generateId } from "../utils/helpers";
 import * as tunnelService from "./tunnelService";
 import * as activityService from "./activityService";
@@ -16,7 +16,8 @@ export function registerAgent(
   localHost: string,
   clientIp?: string,
   organizationId?: string,
-  apiKeyId?: string
+  apiKeyId?: string,
+  protocol: TunnelProtocol = 'http'
 ): Agent {
   const id = generateId();
   const agent: Agent = {
@@ -30,6 +31,7 @@ export function registerAgent(
     clientIp,
     organizationId,
     apiKeyId,
+    protocol,
   };
 
   agents.set(id, { agent, socket });
@@ -82,6 +84,7 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
           serviceType: "port",
           localPort: agent.localPort,
           localHost: agent.localHost,
+          protocol: agent.protocol || 'http',
         },
         agentId,
         organizationId
@@ -94,7 +97,7 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
       
       // Invalidate cache after creation
       invalidateTunnelCache(agent.domain);
-      console.log(`✅ Tunnel created automatically for domain: ${agent.domain}`);
+      console.log(`✅ Tunnel created automatically for domain: ${agent.domain} (protocol: ${agent.protocol || 'http'})`);
     }
   } catch (error) {
     console.error(`Failed to auto-create tunnel for ${agent.domain}:`, error instanceof Error ? error.message : String(error));

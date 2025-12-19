@@ -1,4 +1,4 @@
-import type { AgentMessage } from "../types/index";
+import type { AgentMessage, TunnelProtocol } from "../types/index";
 import * as agentService from "../services/agentService";
 import { validateApiKeyForAgent } from "../services/authService";
 
@@ -12,9 +12,15 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   const localPort = url.searchParams.get("localPort");
   const localHost = url.searchParams.get("localHost") || "localhost";
   const authToken = url.searchParams.get("auth");
+  const protocol = (url.searchParams.get("protocol") || "http") as TunnelProtocol;
 
   if (!domain || !localPort || !authToken) {
     return new Response("Missing required parameters: domain, localPort, and auth are required", { status: 400 });
+  }
+
+  // Validate protocol
+  if (protocol !== 'http' && protocol !== 'tcp') {
+    return new Response("Invalid protocol. Must be 'http' or 'tcp'", { status: 400 });
   }
 
   // Validate the auth token - must be a valid API key with tunnel:create permission
@@ -45,6 +51,7 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
       clientIp: req.headers.get("x-forwarded-for") || "unknown",
       organizationId: authResult.organizationId,
       apiKeyId: authResult.apiKeyId,
+      protocol,
     },
   });
 

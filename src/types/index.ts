@@ -10,6 +10,23 @@ export interface Agent {
   organizationId?: string;
   apiKeyId?: string;
   tunnelId?: string; // Cached for performance - avoids MongoDB lookup per request
+  protocol?: TunnelProtocol; // 'http' or 'tcp'
+}
+
+// ============ TCP Tunnel Types ============
+
+export type TunnelProtocol = 'http' | 'tcp';
+
+export interface TcpPortAllocation {
+  id: string;
+  port: number;
+  tunnelId: string;
+  agentId: string;
+  organizationId?: string;
+  localPort: number;
+  localHost: string;
+  createdAt: number;
+  active: boolean;
 }
 
 export interface AgentMessage {
@@ -45,6 +62,9 @@ export interface Tunnel {
   createdAt: number; // timestamp
   expiresAt?: number; // optional expiration
   active: boolean;
+  // TCP tunnel fields
+  protocol?: TunnelProtocol; // 'http' (default) or 'tcp'
+  tcpPort?: number; // allocated public TCP port (e.g., 10001)
 }
 
 export interface TunnelConfig {
@@ -63,6 +83,7 @@ export interface CreateTunnelRequest {
   localHost?: string;
   expiresIn?: number; // seconds
   agentId?: string;
+  protocol?: TunnelProtocol; // 'http' (default) or 'tcp'
 }
 
 export interface RegisterCustomDomainRequest {

@@ -77,6 +77,7 @@ interface TunnelUIData {
   connectedAt: number | null;
   lastRequest: number | null;
   agentId: string | null;
+  tcpPort?: number; // For TCP tunnels
 }
 
 const transformTunnel = (tunnel: EnhancedTunnel): TunnelUIData => ({
@@ -89,13 +90,14 @@ const transformTunnel = (tunnel: EnhancedTunnel): TunnelUIData => ({
   status: tunnel.status,
   localPort: 3000, // Default, would come from agent data
   localHost: 'localhost',
-  protocol: 'https',
+  protocol: tunnel.protocol === 'tcp' ? 'tcp' : 'https',
   requests: tunnel.totalRequests,
   bytesIn: tunnel.bytesIn,
   bytesOut: tunnel.bytesOut,
   connectedAt: tunnel.active ? tunnel.createdAt : null,
   lastRequest: tunnel.lastRequestAt || null,
   agentId: tunnel.agentId,
+  tcpPort: tunnel.tcpPort,
 });
 
 const formatBytes = (bytes: number) => {
@@ -431,27 +433,48 @@ export default function TunnelsPage() {
                           </Badge>
                         </div>
                         <div className="flex items-center gap-2 mt-1">
-                          <code className="text-sm text-muted-foreground bg-muted/50 px-2 py-0.5 rounded truncate max-w-[250px]">
-                            https://{tunnel.domain}
-                          </code>
-                          <Button 
-                            variant="ghost" 
-                            size="icon" 
-                            className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-                            onClick={() => copyToClipboard(`https://${tunnel.domain}`)}
-                          >
-                            <Copy className="h-3 w-3" />
-                          </Button>
-                          <Button 
-                            variant="ghost" 
-                            size="icon" 
-                            className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-                            asChild
-                          >
-                            <a href={`https://${tunnel.domain}`} target="_blank" rel="noopener">
-                              <ExternalLink className="h-3 w-3" />
-                            </a>
-                          </Button>
+                          {tunnel.protocol === 'tcp' ? (
+                            <>
+                              <Badge variant="outline" className="text-[10px] bg-purple-500/10 text-purple-600 border-purple-500/30">
+                                TCP
+                              </Badge>
+                              <code className="text-sm text-muted-foreground bg-muted/50 px-2 py-0.5 rounded truncate max-w-[250px]">
+                                {tunnel.domain}:{tunnel.tcpPort || 'N/A'}
+                              </code>
+                              <Button 
+                                variant="ghost" 
+                                size="icon" 
+                                className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                                onClick={() => copyToClipboard(`${tunnel.domain}:${tunnel.tcpPort}`)}
+                              >
+                                <Copy className="h-3 w-3" />
+                              </Button>
+                            </>
+                          ) : (
+                            <>
+                              <code className="text-sm text-muted-foreground bg-muted/50 px-2 py-0.5 rounded truncate max-w-[250px]">
+                                https://{tunnel.domain}
+                              </code>
+                              <Button 
+                                variant="ghost" 
+                                size="icon" 
+                                className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                                onClick={() => copyToClipboard(`https://${tunnel.domain}`)}
+                              >
+                                <Copy className="h-3 w-3" />
+                              </Button>
+                              <Button 
+                                variant="ghost" 
+                                size="icon" 
+                                className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                                asChild
+                              >
+                                <a href={`https://${tunnel.domain}`} target="_blank" rel="noopener">
+                                  <ExternalLink className="h-3 w-3" />
+                                </a>
+                              </Button>
+                            </>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -489,16 +512,31 @@ export default function TunnelsPage() {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => copyToClipboard(`https://${tunnel.domain}`)}>
-                            <Copy className="h-4 w-4 mr-2" />
-                            Copy URL
-                          </DropdownMenuItem>
-                          <DropdownMenuItem asChild>
-                            <a href={`https://${tunnel.domain}`} target="_blank" rel="noopener">
-                              <ExternalLink className="h-4 w-4 mr-2" />
-                              Open in Browser
-                            </a>
-                          </DropdownMenuItem>
+                          {tunnel.protocol === 'tcp' ? (
+                            <>
+                              <DropdownMenuItem onClick={() => copyToClipboard(`${tunnel.domain}:${tunnel.tcpPort}`)}>
+                                <Copy className="h-4 w-4 mr-2" />
+                                Copy TCP Address
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => copyToClipboard(`ssh user@${tunnel.domain} -p ${tunnel.tcpPort}`)}>
+                                <Terminal className="h-4 w-4 mr-2" />
+                                Copy SSH Command
+                              </DropdownMenuItem>
+                            </>
+                          ) : (
+                            <>
+                              <DropdownMenuItem onClick={() => copyToClipboard(`https://${tunnel.domain}`)}>
+                                <Copy className="h-4 w-4 mr-2" />
+                                Copy URL
+                              </DropdownMenuItem>
+                              <DropdownMenuItem asChild>
+                                <a href={`https://${tunnel.domain}`} target="_blank" rel="noopener">
+                                  <ExternalLink className="h-4 w-4 mr-2" />
+                                  Open in Browser
+                                </a>
+                              </DropdownMenuItem>
+                            </>
+                          )}
                           <DropdownMenuSeparator />
                           <DropdownMenuItem>
                             <RefreshCw className="h-4 w-4 mr-2" />
@@ -562,6 +600,25 @@ export default function TunnelsPage() {
                     size="icon" 
                     className="absolute top-2 right-2 h-7 w-7"
                     onClick={() => copyToClipboard('jrok --port 3000 --domain my-app')}
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+            </div>
+            <div className="flex items-start gap-3">
+              <div className="h-6 w-6 rounded-full bg-purple-500/10 flex items-center justify-center text-xs font-bold text-purple-600 shrink-0 mt-1">3</div>
+              <div className="flex-1">
+                <p className="font-medium mb-2">TCP tunnel (SSH, MongoDB, etc.)</p>
+                <div className="relative">
+                  <pre className="bg-background/80 border rounded-lg p-3 text-sm font-mono overflow-x-auto">
+                    jrok --tcp --port 22 --domain my-ssh
+                  </pre>
+                  <Button 
+                    variant="ghost" 
+                    size="icon" 
+                    className="absolute top-2 right-2 h-7 w-7"
+                    onClick={() => copyToClipboard('jrok --tcp --port 22 --domain my-ssh')}
                   >
                     <Copy className="h-3.5 w-3.5" />
                   </Button>

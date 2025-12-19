@@ -1,4 +1,4 @@
-import type { TunnelConfig } from "../types/index";
+import type { TunnelConfig, TcpPortAllocation } from "../types/index";
 
 let config: TunnelConfig;
 
@@ -6,6 +6,62 @@ export function setConfig(cfg: TunnelConfig): void {
   config = cfg;
 }
 
+/**
+ * Generate Nginx stream (TCP) configuration for a TCP tunnel
+ * This uses nginx's stream module for raw TCP proxying
+ */
+function generateNginxStreamConfig(
+  port: number,
+  tunnelId: string,
+  comment?: string
+): string {
+  return `# TCP Tunnel: ${comment || tunnelId}
+# Port: ${port}
+upstream tcp_${tunnelId} {
+    server 127.0.0.1:${port};
+}
+
+server {
+    listen ${port};
+    listen [::]:${port};
+    
+    proxy_pass tcp_${tunnelId};
+    proxy_timeout 600s;
+    proxy_connect_timeout 10s;
+}
+`;
+}
+
+/**
+ * Generate the main nginx stream block configuration file
+ * This should be included in nginx.conf within the stream {} block
+ */
+function generateNginxStreamMainConfig(allocations: TcpPortAllocation[]): string {
+  if (allocations.length === 0) {
+    return `# No TCP tunnels configured\n`;
+  }
+
+  let config = `# jrok TCP Tunnels - Auto-generated
+# Last updated: ${new Date().toISOString()}
+# Total tunnels: ${allocations.length}
+
+`;
+
+  for (const alloc of allocations) {
+    config += generateNginxStreamConfig(
+      alloc.port,
+      alloc.tunnelId,
+      `${alloc.localHost}:${alloc.localPort}`
+    );
+    config += '\n';
+  }
+
+  return config;
+}
+
+/**
+ * Generate HTTP/HTTPS Nginx configuration
+ */
 function generateNginxConfig(
   domain: string,
   localPort: number,
@@ -65,4 +121,4 @@ ${sslPart}
 }`;
 }
 
-export { generateNginxConfig };
+export { generateNginxConfig, generateNginxStreamConfig, generateNginxStreamMainConfig };

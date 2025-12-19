@@ -13,7 +13,7 @@ import { createInterface } from 'readline';
 import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 
-const VERSION = "2.2.0"; // Updated for WebSocket support
+const VERSION = "2.3.0"; // Updated for TCP tunnel support (SSH, MongoDB, etc.)
 const DEFAULT_SERVER = "https://tunnel.koompi.cloud";
 const GITHUB_API = "https://api.github.com/repos/koompi/jrok";
 const GITHUB_RAW = "https://raw.githubusercontent.com/koompi/jrok";
@@ -40,6 +40,7 @@ interface ClientConfig {
   authToken: string;
   serviceType?: 'port' | 'docker-swarm' | 'kubernetes';
   serviceName?: string;
+  protocol?: 'http' | 'tcp'; // 'http' for HTTP/HTTPS/WSS, 'tcp' for raw TCP (SSH, MongoDB, etc.)
 }
 
 interface ServiceInfo {
@@ -242,6 +243,9 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
   const serviceType = args['docker-service'] ? 'docker-swarm' : 
                      args['k8s-service'] ? 'kubernetes' : 
                      'port';
+  
+  // Check if TCP protocol is requested
+  const isTcp = args['tcp'] === 'true' || args['tcp'] === '' || process.env.JROK_PROTOCOL === 'tcp';
 
   return {
     serverUrl: args["server"] || process.env.JROK_SERVER || storedConfig.serverUrl || DEFAULT_SERVER,
@@ -253,6 +257,7 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
     authToken: args["auth"] || process.env.JROK_AUTH || storedConfig.apiKey,
     serviceType: serviceType as 'port' | 'docker-swarm' | 'kubernetes',
     serviceName: args["docker-service"] || args["k8s-service"] || process.env.JROK_SERVICE,
+    protocol: isTcp ? 'tcp' : 'http',
   };
 }
 
@@ -456,9 +461,114 @@ function handleWsClose(message: any): void {
   }
 }
 
+// ============ TCP Tunnel Handlers ============
+import * as net from 'net';
+
+// Store active TCP connections to local services
+const localTcpConnections = new Map<string, net.Socket>();
+
+// Handle TCP connection request from server
+async function handleTcpConnect(message: any, serverWs: WebSocket, config: ClientConfig): Promise<void> {
+  const { connectionId, localPort, localHost, remoteAddress, remotePort } = message;
+  
+  console.log(`🔌 TCP Connect: ${remoteAddress}:${remotePort} → ${localHost}:${localPort} [${connectionId}]`);
+  
+  try {
+    // Create TCP connection to local service
+    const localSocket = net.createConnection({
+      host: localHost || config.localHost,
+      port: localPort || config.port,
+    });
+    
+    localSocket.on('connect', () => {
+      console.log(`✅ TCP Connected: ${localHost}:${localPort} [${connectionId}]`);
+      localTcpConnections.set(connectionId, localSocket);
+      
+      // Notify server that we're connected
+      serverWs.send(JSON.stringify({
+        type: "tcp_connected",
+        connectionId,
+      }));
+    });
+    
+    localSocket.on('data', (data: Buffer) => {
+      // Forward data from local service to server
+      serverWs.send(JSON.stringify({
+        type: "tcp_data_response",
+        connectionId,
+        data: data.toString('base64'),
+      }));
+    });
+    
+    localSocket.on('close', () => {
+      console.log(`🔌 TCP Closed: ${localHost}:${localPort} [${connectionId}]`);
+      localTcpConnections.delete(connectionId);
+      
+      // Notify server about close
+      serverWs.send(JSON.stringify({
+        type: "tcp_close_response",
+        connectionId,
+      }));
+    });
+    
+    localSocket.on('error', (error: Error) => {
+      console.error(`❌ TCP Error: ${localHost}:${localPort} [${connectionId}]:`, error.message);
+      localTcpConnections.delete(connectionId);
+      
+      // Notify server about error
+      serverWs.send(JSON.stringify({
+        type: "tcp_error",
+        connectionId,
+        error: error.message,
+      }));
+    });
+  } catch (error) {
+    console.error(`❌ Failed to connect TCP [${connectionId}]:`, error);
+    
+    // Notify server about error
+    serverWs.send(JSON.stringify({
+      type: "tcp_error",
+      connectionId,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+  }
+}
+
+// Handle TCP data from server (forward to local service)
+function handleTcpData(message: any, serverWs: WebSocket): void {
+  const { connectionId, data } = message;
+  const localSocket = localTcpConnections.get(connectionId);
+  
+  if (!localSocket) {
+    console.warn(`⚠️ No active TCP connection for [${connectionId}]`);
+    return;
+  }
+  
+  try {
+    // Decode and forward data to local service
+    const buffer = Buffer.from(data, 'base64');
+    localSocket.write(buffer);
+  } catch (error) {
+    console.error(`❌ Error forwarding TCP data [${connectionId}]:`, error);
+  }
+}
+
+// Handle TCP close request from server
+function handleTcpClose(message: any): void {
+  const { connectionId } = message;
+  const localSocket = localTcpConnections.get(connectionId);
+  
+  if (localSocket) {
+    console.log(`🔌 TCP Close request: [${connectionId}]`);
+    localSocket.end();
+    localTcpConnections.delete(connectionId);
+  }
+}
+
 async function connectAgent(config: ClientConfig): Promise<void> {
   const baseDomain = getBaseDomain(config.serverUrl);
   const fullDomain = `${config.domain}.${baseDomain}`;
+  const protocol = config.protocol || 'http';
   
   const wsUrl = new URL(config.serverUrl);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
@@ -466,6 +576,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   wsUrl.searchParams.set("domain", config.domain);
   wsUrl.searchParams.set("serviceType", config.serviceType || 'port');
   wsUrl.searchParams.set("auth", config.authToken);
+  wsUrl.searchParams.set("protocol", protocol);
 
   // Set target based on service type
   if (config.serviceType === 'port') {
@@ -486,16 +597,25 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   console.log(`\n🔌 Connecting to jrok server...`);
   console.log(`📍 Domain: ${config.domain}`);
   console.log(`🏠 Local Service: ${serviceDesc}`);
+  console.log(`📡 Protocol: ${protocol.toUpperCase()}`);
   console.log(`\n${config.serverUrl}\n`);
 
   const ws = new WebSocket(wsUrl.toString());
   let heartbeatInterval: NodeJS.Timeout;
   let reconnectAttempts = 0;
 
+  // Store TCP port when received from server
+  let tcpPort: number | null = null;
+
   ws.onopen = () => {
     reconnectAttempts = 0;
     console.log("✅ Connected to server!");
-    console.log(`🌐 Your service is now available at: https://${fullDomain}`);
+    
+    if (protocol === 'http') {
+      console.log(`🌐 Your service is now available at: https://${fullDomain}`);
+    } else {
+      console.log(`🔌 TCP tunnel connecting... (port will be assigned)`);
+    }
 
     // Send heartbeat every 30 seconds
     heartbeatInterval = setInterval(() => {
@@ -512,6 +632,16 @@ async function connectAgent(config: ClientConfig): Promise<void> {
       if (message.type === "welcome") {
         console.log(`✨ ${message.message}`);
         console.log(`🆔 Agent ID: ${message.agentId}`);
+        
+        // For TCP tunnels, display the assigned port
+        if (message.tcpPort) {
+          tcpPort = message.tcpPort;
+          const serverHost = new URL(config.serverUrl).hostname;
+          console.log(`\n🚀 TCP tunnel ready!`);
+          console.log(`📡 Connect to: ${serverHost}:${tcpPort}`);
+          console.log(`   Example: ssh user@${serverHost} -p ${tcpPort}`);
+          console.log(`   Example: mongo --host ${serverHost} --port ${tcpPort}`);
+        }
       } else if (message.type === "heartbeat_ack") {
         // Silent heartbeat acknowledgment
       } else if (message.type === "http_request") {
@@ -526,6 +656,15 @@ async function connectAgent(config: ClientConfig): Promise<void> {
       } else if (message.type === "ws_close") {
         // Handle WebSocket close request from server
         handleWsClose(message);
+      } else if (message.type === "tcp_connect") {
+        // Handle TCP connection request from server
+        await handleTcpConnect(message, ws, config);
+      } else if (message.type === "tcp_data") {
+        // Handle TCP data from server (forward to local)
+        handleTcpData(message, ws);
+      } else if (message.type === "tcp_close") {
+        // Handle TCP close request from server
+        handleTcpClose(message);
       } else if (message.type === "status") {
         console.log(`📊 Status: ${message.message}`);
       } else {
@@ -985,14 +1124,20 @@ API KEY COMMANDS:
   jrok apikey revoke --org <org-id> --id <key>   # Revoke API key
 
 CONNECT EXAMPLES:
-  # Quick start (auto subdomain)
+  # Quick start - HTTP/HTTPS tunnel (auto subdomain)
   jrok --port 3000
   
   # With custom subdomain
   jrok --port 3000 --domain myapp
 
-  # TCP Port (local dev server)
-  jrok connect --domain dev --port 3000
+  # TCP tunnel for SSH access
+  jrok --tcp --port 22 --domain ssh-server
+  
+  # TCP tunnel for MongoDB
+  jrok --tcp --port 27017 --domain mongodb
+  
+  # TCP tunnel for Redis
+  jrok --tcp --port 6379 --domain redis
 
   # Docker Swarm service
   jrok connect --domain api --docker-service my-api
@@ -1006,6 +1151,7 @@ OPTIONS:
   --domain           Subdomain (optional, auto-generated if not provided)
   --port             Local port (default: 3000)
   --host             Local host (default: localhost)
+  --tcp              Enable TCP tunneling (for SSH, MongoDB, etc.)
   --docker-service   Docker Swarm service name
   --k8s-service      Kubernetes service:port
   --org              Organization ID

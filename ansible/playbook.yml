@@ -44,7 +44,7 @@
     - app
 
   post_tasks:
-    - name: Setup firewall (UFW)
+    - name: Setup firewall (UFW) - Standard ports
       ufw:
         rule: allow
         port: "{{ item }}"
@@ -54,6 +54,13 @@
         - "80"
         - "443"
         - "3000"
+      tags: ["firewall"]
+
+    - name: Setup firewall (UFW) - TCP tunnel port range
+      ufw:
+        rule: allow
+        port: "10000:20000"
+        proto: tcp
       tags: ["firewall"]
 
     - name: Enable UFW
@@ -81,6 +88,10 @@
           Access your service at:
           - https://{{ domain_name }}
           - http://{{ inventory_hostname }}:3000 (direct)
+          
+          TCP Tunnels:
+          - Port range: 10000-20000
+          - Use --tcp flag with CLI for TCP tunnels (SSH, MongoDB, etc.)
           
           SSH into server:
           - ssh ubuntu@{{ inventory_hostname }}

@@ -1,9 +1,11 @@
 ---
 # Ansible Role: Install and configure Nginx reverse proxy
 
-- name: Install Nginx
+- name: Install Nginx with stream module
   apt:
-    name: nginx
+    name: 
+      - nginx
+      - libnginx-mod-stream
     state: present
   tags: ["nginx"]
 
@@ -15,9 +17,37 @@
       pid /run/nginx.pid;
       error_log /var/log/nginx/error.log warn;
       
+      # Load stream module for TCP tunneling
+      load_module /usr/lib/nginx/modules/ngx_stream_module.so;
+      
       events {
         worker_connections 4096;
         use epoll;
+      }
+      
+      # ============ TCP/UDP Stream Configuration (for TCP tunnels) ============
+      # TCP tunnels are dynamically managed by jrok server on ports 10000-20000
+      # The jrok server handles TCP port allocation and direct socket forwarding
+      # Nginx stream is optional - only needed if you want Nginx to proxy TCP
+      stream {
+        log_format tcp_log '$remote_addr [$time_local] '
+                           '$protocol $status $bytes_sent $bytes_received '
+                           '$session_time';
+        
+        access_log /var/log/nginx/tcp_access.log tcp_log;
+        
+        # TCP tunnel upstream - jrok server handles dynamic port mapping
+        # Ports 10000-20000 are reserved for TCP tunnels
+        # Each TCP tunnel gets a unique port that forwards to the agent
+        
+        # Example: If you want Nginx to proxy a specific TCP port range
+        # Uncomment and modify as needed:
+        # server {
+        #     listen 10001;
+        #     proxy_pass 127.0.0.1:10001;
+        #     proxy_timeout 600s;
+        #     proxy_connect_timeout 10s;
+        # }
       }
       
       http {
