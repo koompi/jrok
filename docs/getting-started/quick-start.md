@@ -93,6 +93,35 @@ jrok --port 3001
 jrok --port 3000 --domain myapp
 
 # Access at: https://myapp.tunnel.koompi.cloud
+
+# If subdomain is taken, you'll get a suffix automatically:
+# → https://myapp-a7b3.tunnel.koompi.cloud
+```
+
+### TCP Tunnels (Databases, SSH, etc.)
+
+```bash
+# Expose PostgreSQL database
+jrok --port 5432 --tcp
+# Access at: tcp://tunnel.koompi.cloud:54321
+
+# Expose MySQL
+jrok --port 3306 --tcp
+
+# Expose SSH
+jrok --port 22 --tcp
+```
+
+### Custom Domains
+
+```bash
+# Register your custom domain
+jrok domain register --domain mysite.com
+
+# Configure DNS (add CNAME record), then verify
+jrok domain verify --domain mysite.com
+
+# Now your domain routes to your tunnel!
 ```
 
 ### Docker Swarm Service

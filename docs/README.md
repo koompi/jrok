@@ -22,12 +22,26 @@ Welcome to the Jrok documentation. This guide will help you set up, deploy, and 
 
 ### CLI Reference
 - [CLI Installation](./cli/installation.md) - Install the Jrok CLI
-- [CLI Commands](./cli/commands.md) - Full command reference
+- [CLI Commands](./cli/commands.md) - Full command reference (HTTP, TCP, domains)
 - [CLI Configuration](./cli/configuration.md) - Configure the CLI
 
 ### API Reference
 - [REST API](./api/rest.md) - HTTP API endpoints
 - [WebSocket API](./api/websocket.md) - Real-time communication
+
+### Features
+- **HTTP/HTTPS Tunnels** - Expose web services with automatic SSL
+- **TCP Tunnels** - Raw TCP for databases, SSH, custom protocols
+- **Custom Domains** - CNAME-verified custom domain support
+- **Smart Subdomain Handling** - Auto-suffix on conflicts, `--force-new` option
+
+### Security
+- **Rate Limiting** - HTTP request limits per tunnel
+- **TCP Connection Limits** - Max concurrent connections per agent
+- **Bandwidth Throttling** - Per-tunnel bandwidth limits
+- **IP Allowlist** - Restrict access to specific IPs
+- **Connection Logging** - Full audit trails
+- **CNAME Verification** - Custom domains require DNS verification
 
 ### Advanced
 - [Custom Domains](./advanced/custom-domains.md) - Use your own domains

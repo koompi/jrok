@@ -17,6 +17,7 @@
 <p align="center">
   <a href="#-quick-start">Quick Start</a> •
   <a href="#-features">Features</a> •
+  <a href="#-security">Security</a> •
   <a href="#-self-hosting">Self-Hosting</a> •
   <a href="#-documentation">Documentation</a> •
   <a href="#-contributing">Contributing</a>
@@ -88,6 +89,38 @@ jrok --port 3000
 # Custom subdomain
 jrok --port 8080 --domain myapp
 # → https://myapp.tunnel.koompi.cloud
+
+# TCP tunnel (raw TCP, databases, SSH, etc.)
+jrok --port 5432 --tcp
+# → tcp://tunnel.koompi.cloud:54321
+```
+
+### 🔄 Smart Subdomain Handling
+
+```bash
+# If "myapp" is already taken by another org, auto-assigns suffix
+jrok --port 3000 --domain myapp
+# → https://myapp-a7b3.tunnel.koompi.cloud
+
+# Force new subdomain even if you own the existing one
+jrok --port 3000 --domain myapp --force-new
+# → https://myapp-c2d4.tunnel.koompi.cloud
+```
+
+### 🌍 Custom Domain Support
+
+```bash
+# Register a custom domain with auto-generated subdomain
+jrok domain register --domain mysite.com
+
+# Register with specific subdomain target
+jrok domain register --domain mysite.com --subdomain myapp
+
+# Verify CNAME and issue SSL certificate
+jrok domain verify --domain mysite.com
+
+# Check domain status
+jrok domain status --domain mysite.com
 ```
 
 ### 🐳 Docker & Kubernetes Support
@@ -113,6 +146,12 @@ jrok connect --domain app --k8s-service my-svc:8080
 - **WebSocket** connections over WSS
 - **API key** authentication with scoped permissions
 - **OAuth** via KOOMPI ID
+- **CNAME verification** required for custom domains (prevents domain abuse)
+- **Rate limiting** on HTTP requests per tunnel
+- **TCP connection limits** per agent
+- **Bandwidth throttling** per tunnel
+- **IP allowlist** support for restricting access
+- **Connection logging** for audit trails
 
 ### 📊 Web Dashboard
 
@@ -129,8 +168,9 @@ jrok connect --domain app --k8s-service my-svc:8080
 ┌─────────────────────────────────────────────────────────────────────┐
 │                            INTERNET                                  │
 └─────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  ▼
+                    │                              │
+           (HTTP/HTTPS)                    (TCP - databases, etc.)
+                    ▼                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        YOUR VPS SERVER                               │
 │  ┌───────────────────────────────────────────────────────────────┐ │
@@ -140,9 +180,10 @@ jrok connect --domain app --k8s-service my-svc:8080
 │  ┌───────────────────────────────────────────────────────────────┐ │
 │  │  Jrok Server (Bun runtime)                                     │ │
 │  │  • WebSocket connection manager                                │ │
-│  │  • HTTP request routing                                        │ │
+│  │  • HTTP/TCP request routing                                    │ │
 │  │  • Authentication (OAuth + API keys)                           │ │
-│  │  • MongoDB (users, orgs, tunnels)                              │ │
+│  │  • Security (rate limits, bandwidth, IP allowlist)             │ │
+│  │  • MongoDB (users, orgs, tunnels, custom domains)              │ │
 │  └───────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────┘
               ▲                    ▲                    ▲
@@ -168,6 +209,12 @@ jrok --port 3000
 # Specify subdomain
 jrok --port 3000 --domain myapp
 
+# TCP tunnel (databases, SSH, custom protocols)
+jrok --port 5432 --tcp
+
+# Force new subdomain (even if you own existing one)
+jrok --port 3000 --domain myapp --force-new
+
 # List active tunnels
 jrok list
 
@@ -179,6 +226,25 @@ jrok config
 
 # Get help
 jrok help
+```
+
+### Custom Domain Commands
+
+```bash
+# Register custom domain (auto-generates subdomain target)
+jrok domain register --domain mysite.com
+
+# Register with specific subdomain
+jrok domain register --domain mysite.com --subdomain myapp
+
+# Verify CNAME configuration and issue SSL
+jrok domain verify --domain mysite.com
+
+# Check domain verification status
+jrok domain status --domain mysite.com
+
+# List all your custom domains
+jrok domain list
 ```
 
 ### Organization & API Keys
@@ -211,7 +277,41 @@ See [CLI Commands Reference](./docs/cli/commands.md) for full documentation.
 
 ---
 
-## 🛠️ Self-Hosting
+## � Security
+
+Jrok includes comprehensive security features to protect your tunnels:
+
+### Built-in Protections
+
+| Feature | Description |
+|---------|-------------|
+| **TCP Connection Limits** | Maximum concurrent TCP connections per agent |
+| **Bandwidth Throttling** | Per-tunnel bandwidth limits prevent abuse |
+| **HTTP Rate Limiting** | Request rate limiting per tunnel |
+| **IP Allowlist** | Restrict tunnel access to specific IPs |
+| **Connection Logging** | Full audit trail of all connections |
+| **CNAME Verification** | Custom domains require DNS verification before SSL |
+
+### Custom Domain Security
+
+When registering a custom domain, Jrok requires CNAME verification:
+
+1. **Register domain** → Jrok provides CNAME target
+2. **Configure DNS** → Add CNAME record pointing to target
+3. **Verify** → Jrok confirms DNS propagation
+4. **SSL Issued** → Certificate generated only after verification
+
+This prevents domain abuse and ensures you own the domain.
+
+### Subdomain Conflict Resolution
+
+- **Different org owns subdomain**: Auto-generates suffix (e.g., `myapp-a7b3`)
+- **Same org owns subdomain**: Updates existing tunnel OR use `--force-new` for new subdomain
+- **Subdomain available**: Assigns as requested
+
+---
+
+## �🛠️ Self-Hosting
 
 ### Prerequisites
 
