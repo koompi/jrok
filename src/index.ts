@@ -16,6 +16,7 @@ import * as wsProxyService from "./services/wsProxyService";
 import * as tcpService from "./services/tcpService";
 import * as securityService from "./services/securityService";
 import * as crossServerService from "./services/crossServerService";
+import * as certSyncService from "./services/certificateSyncService";
 import { connectDatabase, closeDatabase, createDistributedStateIndexes } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { initTelegram } from "./services/notificationService";
@@ -250,6 +251,10 @@ async function startServer() {
     // Initialize cross-server routing
     crossServerService.initCrossServerRouting();
     console.log("✅ Cross-server routing initialized");
+
+    // Initialize certificate sync infrastructure (MongoDB collections + indexes)
+    await certSyncService.initializeCertificateSync();
+    console.log("✅ Certificate sync infrastructure initialized");
 
     // Restore TCP servers on startup (reconnect to allocated ports)
     await tcpService.restoreTcpServersOnStartup();
@@ -1304,6 +1309,138 @@ async function startServer() {
       return await domainHandler.handleDeleteDomain(decodeURIComponent(domain));
     }
 
+    // ============ Certificate Sync API (for multi-server cert distribution) ============
+    
+    // Download certificate from MongoDB (VPS servers call this)
+    if (path.startsWith("/certificates/download/") && method === "GET") {
+      const domain = path.split("/")[3];
+      if (!domain) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: "Domain is required" }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+      
+      try {
+        const cert = await certSyncService.downloadCertificateFromMongoDB(decodeURIComponent(domain));
+        if (!cert) {
+          return addCors(new Response(
+            JSON.stringify({ success: false, error: "Certificate not found" }),
+            { status: 404, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+        
+        return addCors(new Response(
+          JSON.stringify({
+            success: true,
+            domain: cert.domain,
+            cert: cert.cert,
+            chain: cert.chain,
+            fullchain: cert.fullchain,
+            privkey: cert.privkey,
+            expiry: cert.expiry,
+            version: cert.version,
+            uploadedAt: cert.uploadedAt
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ));
+      } catch (error) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: String(error) }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+    }
+
+    // List all certificates
+    if (path === "/certificates/list" && method === "GET") {
+      try {
+        const certs = await certSyncService.listCertificates();
+        return addCors(new Response(
+          JSON.stringify({ success: true, certificates: certs }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ));
+      } catch (error) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: String(error) }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+    }
+
+    // Get certificate status
+    if (path.startsWith("/certificates/status/") && method === "GET") {
+      const domain = path.split("/")[3];
+      if (!domain) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: "Domain is required" }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+      
+      try {
+        const status = await certSyncService.getCertificateStatus(decodeURIComponent(domain));
+        return addCors(new Response(
+          JSON.stringify({ success: true, ...status }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ));
+      } catch (error) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: String(error) }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+    }
+
+    // Check sync queue (for VPS servers to see pending syncs)
+    if (path === "/certificates/sync-queue" && method === "GET") {
+      try {
+        const { getClient } = await import("./utils/mongodb");
+        const queue = getClient()?.db("jrok").collection("cert_sync_queue");
+        const pending = await queue?.find({ processed: false }).toArray() || [];
+        
+        return addCors(new Response(
+          JSON.stringify({ success: true, pending }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ));
+      } catch (error) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: String(error) }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+    }
+
+    // Mark sync as processed (VPS server confirms it pulled the cert)
+    if (path.startsWith("/certificates/sync-queue/") && method === "POST") {
+      const syncId = path.split("/")[3];
+      if (!syncId) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: "Sync ID is required" }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+      
+      try {
+        const { getClient } = await import("./utils/mongodb");
+        const queue = getClient()?.db("jrok").collection("cert_sync_queue");
+        await queue?.updateOne(
+          { _id: decodeURIComponent(syncId) as any },
+          { $set: { processed: true, processedAt: new Date() } }
+        );
+        
+        return addCors(new Response(
+          JSON.stringify({ success: true, message: "Sync marked as processed" }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ));
+      } catch (error) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: String(error) }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+    }
+
     // 404
     return addCors(new Response(
       JSON.stringify({
@@ -1353,6 +1490,46 @@ async function startServer() {
     }, 60 * 60 * 1000);
 
     console.log("✅ Auto-cleanup enabled (agents: 30s, tunnels: 5m, rate limits: 10m, stats: 1h)");
+
+    // Check certificate sync queue every 5 minutes (pull new certs to local storage)
+    setInterval(async () => {
+      try {
+        const { getClient } = await import("./utils/mongodb");
+        const queue = getClient()?.db("jrok").collection("cert_sync_queue");
+        if (!queue) return;
+
+        const serverId = process.env.VPS_ID || process.env.SERVER_ID || "server-1";
+        const pendingCerts = await queue.find({ processed: false }).toArray();
+        
+        for (const item of pendingCerts) {
+          try {
+            const cert = await certSyncService.downloadCertificateFromMongoDB(item.domain);
+            if (cert) {
+              // Write certificates to local filesystem
+              const certDir = `/etc/letsencrypt/live/${item.domain}`;
+              await Bun.spawn(["mkdir", "-p", certDir]).exited;
+              
+              // Decode base64 and write files
+              await Bun.write(`${certDir}/cert.pem`, Buffer.from(cert.cert, 'base64'));
+              await Bun.write(`${certDir}/chain.pem`, Buffer.from(cert.chain, 'base64'));
+              await Bun.write(`${certDir}/fullchain.pem`, Buffer.from(cert.fullchain, 'base64'));
+              await Bun.write(`${certDir}/privkey.pem`, Buffer.from(cert.privkey, 'base64'));
+              
+              // Set proper permissions
+              await Bun.spawn(["chmod", "600", `${certDir}/privkey.pem`]).exited;
+              
+              console.log(`🔐 Synced certificate for ${item.domain} (v${cert.version})`);
+            }
+          } catch (syncError) {
+            console.error(`Failed to sync certificate for ${item.domain}:`, syncError);
+          }
+        }
+      } catch (error) {
+        console.error("Certificate sync error:", error);
+      }
+    }, 5 * 60 * 1000);
+
+    console.log("✅ Certificate sync enabled (check every 5 minutes)");
 
     // Graceful shutdown
     process.on("SIGINT", async () => {

@@ -379,6 +379,153 @@ Failed to allocate TCP port
   db.tcpPortAllocations.deleteMany({ active: false })
   ```
 
+## Custom Domain Certificate Synchronization
+
+### How It Works
+
+Custom domain certificates are automatically synchronized across all servers using MongoDB:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                  Certificate Sync Architecture                        │
+└──────────────────────────────────────────────────────────────────────┘
+
+   User requests custom domain       Leader server issues certificate
+           │                                    │
+           ▼                                    ▼
+   ┌───────────────┐               ┌─────────────────────────┐
+   │  API Server   │               │  Certbot + Cloudflare   │
+   │  (any server) │               │  DNS Challenge          │
+   └───────┬───────┘               └───────────┬─────────────┘
+           │                                   │
+           ▼                                   ▼
+   ┌───────────────┐               ┌─────────────────────────┐
+   │    MongoDB    │◄──────────────│  Upload cert to MongoDB │
+   │ certificates  │               │  (base64 encoded)       │
+   │   collection  │               └─────────────────────────┘
+   └───────┬───────┘
+           │
+     ┌─────┴─────┬─────────────┐
+     ▼           ▼             ▼
+┌─────────┐ ┌─────────┐   ┌─────────┐
+│ Server1 │ │ Server2 │   │ Server3 │
+│  pulls  │ │  pulls  │   │  pulls  │
+│  certs  │ │  certs  │   │  certs  │
+└─────────┘ └─────────┘   └─────────┘
+```
+
+### MongoDB Collections
+
+**`certificates`** - Stores certificate data:
+```javascript
+{
+  domain: "example.com",
+  cert: "base64...",       // cert.pem
+  chain: "base64...",      // chain.pem
+  fullchain: "base64...",  // fullchain.pem
+  privkey: "base64...",    // privkey.pem
+  expiry: ISODate("..."),
+  status: "valid",
+  version: 1,
+  uploadedAt: ISODate("..."),
+  uploadedBy: "server-1"
+}
+```
+
+**`cert_sync_queue`** - Notification queue for new certs:
+```javascript
+{
+  _id: "example.com-1",
+  domain: "example.com",
+  version: 1,
+  createdAt: ISODate("..."),
+  processed: false
+}
+```
+
+**`leader_leases`** - Leader election for cert renewal:
+```javascript
+{
+  leaderId: "server-1",
+  leaseExpiry: ISODate("..."),  // 30-second lease
+  acquiredAt: ISODate("...")
+}
+```
+
+### Certificate Sync API Endpoints
+
+All servers expose these endpoints for certificate management:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/certificates/download/:domain` | GET | Download certificate from MongoDB |
+| `/certificates/list` | GET | List all certificates |
+| `/certificates/status/:domain` | GET | Get certificate status |
+| `/certificates/sync-queue` | GET | Check pending sync items |
+| `/certificates/sync-queue/:id` | POST | Mark sync as processed |
+
+### Automatic Sync Process
+
+1. **Certificate Issuance** (on leader server):
+   - Leader acquires lease via `attemptBecomeLeader()`
+   - Certbot issues certificate via DNS challenge
+   - Certificate uploaded to MongoDB
+   - Sync notification added to queue
+
+2. **Certificate Pull** (all servers, every 5 minutes):
+   - Check `cert_sync_queue` for new certificates
+   - Download from MongoDB via API
+   - Write to local `/etc/letsencrypt/live/{domain}/`
+   - Set proper permissions (600 for privkey)
+
+3. **Certificate Renewal** (leader only):
+   - Certbot renewal hook triggers
+   - New version uploaded to MongoDB
+   - Other servers pull on next sync cycle
+
+### Manual Certificate Operations
+
+**List all certificates:**
+```bash
+curl -H "Authorization: Bearer $API_KEY" \
+  https://tunnel.example.com/certificates/list
+```
+
+**Check certificate status:**
+```bash
+curl -H "Authorization: Bearer $API_KEY" \
+  https://tunnel.example.com/certificates/status/mycustom.domain.com
+```
+
+**Force certificate resync:**
+```bash
+curl -X POST -H "Authorization: Bearer $API_KEY" \
+  https://tunnel.example.com/domains/mycustom.domain.com/resync
+```
+
+### Troubleshooting Certificate Sync
+
+**Certificate not syncing:**
+```bash
+# Check MongoDB certificate collection
+mongosh --eval 'db.certificates.find({ domain: "example.com" })'
+
+# Check sync queue
+mongosh --eval 'db.cert_sync_queue.find({ processed: false })'
+
+# Check server logs
+journalctl -u jrok | grep -i cert
+```
+
+**Leader election issues:**
+```bash
+# Check current leader
+mongosh --eval 'db.leader_leases.find()'
+
+# Force leader release (use with caution)
+mongosh --eval 'db.leader_leases.deleteMany({})'
+```
+
 ## Environment Variables Reference
 
 | Variable | Description | Default | Required |
@@ -391,3 +538,5 @@ Failed to allocate TCP port
 | `MONGODB_URI` | MongoDB connection string | mongodb://localhost:27017/jrok | Yes |
 | `PORT` | HTTP server port | 3000 | No |
 | `BASE_DOMAIN` | Tunnel base domain | tunnel.example.com | Yes |
+| `SERVER_ID` | Server identifier for cert sync | VPS_ID | No |
+| `CERT_SYNC_API_KEY` | API key for cert sync endpoints | API_KEY | No |
