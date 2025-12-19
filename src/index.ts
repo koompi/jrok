@@ -14,6 +14,7 @@ import * as authService from "./services/authService";
 import * as statsService from "./services/statsService";
 import * as wsProxyService from "./services/wsProxyService";
 import * as tcpService from "./services/tcpService";
+import * as securityService from "./services/securityService";
 import { connectDatabase, closeDatabase } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { initTelegram } from "./services/notificationService";
@@ -135,6 +136,37 @@ setConfig(config);
 // Initialize Telegram notifications
 initTelegram();
 
+// Cache for organization plan tiers (avoid DB lookup on every request)
+const orgPlanCache = new Map<string, { tier: string; timestamp: number }>();
+const PLAN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function getPlanTierForOrg(organizationId: string): Promise<string> {
+  // Check cache first
+  const cached = orgPlanCache.get(organizationId);
+  if (cached && Date.now() - cached.timestamp < PLAN_CACHE_TTL) {
+    return cached.tier;
+  }
+  
+  try {
+    const { getCollections } = await import("./utils/mongodb");
+    const collections = getCollections();
+    
+    const subscription = await collections.subscriptions.findOne({ organizationId });
+    if (!subscription) {
+      orgPlanCache.set(organizationId, { tier: 'free', timestamp: Date.now() });
+      return 'free';
+    }
+    
+    const plan = await collections.plans.findOne({ id: subscription.planId });
+    const tier = plan?.tier || 'free';
+    
+    orgPlanCache.set(organizationId, { tier, timestamp: Date.now() });
+    return tier;
+  } catch {
+    return 'free';
+  }
+}
+
 // Legacy Auth middleware (for backward compatibility)
 const isLegacyAuthenticated = createBasicAuthMiddleware(config.apiKey);
 
@@ -205,6 +237,10 @@ async function startServer() {
     // Connect to MongoDB
     await connectDatabase();
     console.log("✅ Database connected");
+
+    // Initialize security service
+    securityService.initSecurityService();
+    console.log("✅ Security service initialized");
 
     // Register current VPS server if running on a VPS with SSH
     await registerLocalVpsServer();
@@ -781,6 +817,189 @@ async function startServer() {
           ));
         }
 
+        // ============ Security Management Endpoints ============
+        
+        // Get security stats (requires admin auth)
+        if (path === "/security/stats" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext || authContext.user?.role !== 'super_admin') {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const stats = securityService.getSecurityStats();
+          return addCors(new Response(
+            JSON.stringify({ success: true, stats }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get blocked IPs (requires admin auth)
+        if (path === "/security/blocked-ips" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext || authContext.user?.role !== 'super_admin') {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const blockedIps = securityService.getBlockedIps();
+          return addCors(new Response(
+            JSON.stringify({ success: true, blockedIps }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Block an IP (requires admin auth)
+        if (path === "/security/block-ip" && method === "POST") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext || authContext.user?.role !== 'super_admin') {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const body = await req.json() as { ip: string; reason: string; duration?: number };
+          if (!body.ip || !body.reason) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing ip or reason" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          securityService.blockIp(body.ip, body.reason, body.duration || 3600);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP ${body.ip} blocked` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Unblock an IP (requires admin auth)
+        if (path === "/security/unblock-ip" && method === "POST") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext || authContext.user?.role !== 'super_admin') {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const body = await req.json() as { ip: string };
+          if (!body.ip) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing ip" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          securityService.unblockIp(body.ip);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP ${body.ip} unblocked` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get IP allowlist for a tunnel
+        if (path.startsWith("/security/allowlist/") && method === "GET") {
+          const tunnelId = path.split("/")[3];
+          if (!tunnelId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing tunnel ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const allowlist = securityService.getIpAllowlist(tunnelId);
+          return addCors(new Response(
+            JSON.stringify({ success: true, tunnelId, allowlist }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Set IP allowlist for a tunnel
+        if (path.startsWith("/security/allowlist/") && method === "POST") {
+          const tunnelId = path.split("/")[3];
+          if (!tunnelId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing tunnel ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const body = await req.json() as { ips: string[] };
+          if (!body.ips || !Array.isArray(body.ips)) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing ips array" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          securityService.setIpAllowlist(tunnelId, body.ips);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `Allowlist updated for tunnel ${tunnelId}` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get connection logs for a tunnel
+        if (path.startsWith("/security/logs/tunnel/") && method === "GET") {
+          const tunnelId = path.split("/")[4];
+          if (!tunnelId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing tunnel ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const urlParams = new URL(req.url).searchParams;
+          const limit = parseInt(urlParams.get("limit") || "100");
+          const offset = parseInt(urlParams.get("offset") || "0");
+          const logs = await securityService.getConnectionLogs(tunnelId, limit, offset);
+          return addCors(new Response(
+            JSON.stringify({ success: true, tunnelId, logs }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get bandwidth usage for an organization
+        if (path.startsWith("/security/bandwidth/") && method === "GET") {
+          const organizationId = path.split("/")[3];
+          if (!organizationId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing organization ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const planTier = await getPlanTierForOrg(organizationId);
+          const bandwidth = securityService.checkMonthlyBandwidth(organizationId, planTier);
+          return addCors(new Response(
+            JSON.stringify({ success: true, organizationId, ...bandwidth }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
         // Enhanced resource routes
         if (path === "/tunnels/enhanced" && method === "GET") {
           const authContext = await authenticateRequest(req);
@@ -859,16 +1078,63 @@ async function startServer() {
             tunnelId = tunnel?.id;
           }
 
+          // ============ Security Check for HTTP Requests ============
+          const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || 
+                          req.headers.get("x-real-ip") || 
+                          "unknown";
+          
+          // Get plan tier for rate limit calculation (defaults to 'free')
+          const planTier = agent.organizationId ? await getPlanTierForOrg(agent.organizationId) : 'free';
+          
+          // Check security limits
+          const securityCheck = await securityService.checkHttpRequest(
+            tunnelId || subdomain,
+            agent.organizationId,
+            clientIp,
+            planTier
+          );
+          
+          if (!securityCheck.allowed) {
+            const headers: Record<string, string> = {
+              "Content-Type": "application/json",
+            };
+            if (securityCheck.retryAfter) {
+              headers["Retry-After"] = securityCheck.retryAfter.toString();
+            }
+            return addCors(new Response(
+              JSON.stringify({
+                success: false,
+                message: securityCheck.reason || "Rate limit exceeded",
+              }),
+              { status: 429, headers }
+            ));
+          }
+
+          // Track HTTP connection
+          securityService.trackHttpConnection(tunnelId || subdomain, true);
+
           // Check if this is a WebSocket upgrade request
           if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
             // Handle WebSocket tunneling
             const response = await handleWebSocketTunnel(req, server, agentWs, agent, subdomain);
-            if (response) return response;
+            if (response) {
+              securityService.trackHttpConnection(tunnelId || subdomain, false);
+              return response;
+            }
             return undefined; // Handled by upgrade
           }
 
           // Forward regular HTTP request to agent via WebSocket (with bandwidth tracking)
-          return await forwardRequestToAgent(req, agentWs, agent, tunnelId);
+          const response = await forwardRequestToAgent(req, agentWs, agent, tunnelId);
+          
+          // Track connection close and bandwidth
+          securityService.trackHttpConnection(tunnelId || subdomain, false);
+          
+          // Track bandwidth usage
+          const responseSize = parseInt(response.headers.get("content-length") || "0");
+          securityService.trackMonthlyBandwidth(agent.organizationId || subdomain, responseSize);
+          
+          return response;
         }
 
         // ============ Legacy API Routes (require auth) ============

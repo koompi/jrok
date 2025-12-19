@@ -270,6 +270,60 @@ class ApiClient {
   async getEnhancedDomains(): Promise<{ success: boolean; domains: EnhancedDomain[] }> {
     return this.request('/domains/enhanced');
   }
+
+  // ============ Security API ============
+
+  async getSecurityStats(): Promise<{ success: boolean } & SecurityStats> {
+    return this.request('/security/stats');
+  }
+
+  async getBlockedIps(): Promise<{ success: boolean; blockedIps: BlockedIp[] }> {
+    return this.request('/security/blocked-ips');
+  }
+
+  async blockIp(ip: string, reason: string, duration?: number): Promise<{ success: boolean; message: string }> {
+    return this.request('/security/block-ip', {
+      method: 'POST',
+      body: JSON.stringify({ ip, reason, duration }),
+    });
+  }
+
+  async unblockIp(ip: string): Promise<{ success: boolean; message: string }> {
+    return this.request('/security/unblock-ip', {
+      method: 'POST',
+      body: JSON.stringify({ ip }),
+    });
+  }
+
+  async getTunnelAllowlist(tunnelId: string): Promise<{ success: boolean; tunnelId: string; allowlist: string[] }> {
+    return this.request(`/security/allowlist/${tunnelId}`);
+  }
+
+  async setTunnelAllowlist(tunnelId: string, ips: string[]): Promise<{ success: boolean; message: string }> {
+    return this.request(`/security/allowlist/${tunnelId}`, {
+      method: 'POST',
+      body: JSON.stringify({ ips }),
+    });
+  }
+
+  async getTunnelConnectionLogs(tunnelId: string, limit?: number, offset?: number): Promise<{ 
+    success: boolean; 
+    tunnelId: string; 
+    logs: ConnectionLog[] 
+  }> {
+    const params = new URLSearchParams();
+    if (limit) params.append('limit', limit.toString());
+    if (offset) params.append('offset', offset.toString());
+    const query = params.toString();
+    return this.request(`/security/logs/tunnel/${tunnelId}${query ? `?${query}` : ''}`);
+  }
+
+  async getOrganizationBandwidth(organizationId: string): Promise<{ 
+    success: boolean; 
+    organizationId: string 
+  } & BandwidthLimit> {
+    return this.request(`/security/bandwidth/${organizationId}`);
+  }
 }
 
 // Types
@@ -501,6 +555,50 @@ export interface BandwidthUsage {
   totalRequests: number;
   byTunnel: Array<{ tunnelId: string; bytesIn: number; bytesOut: number; requests: number }>;
   timeline: Array<{ date: string; bytesIn: number; bytesOut: number; requests: number }>;
+}
+
+// Security Types
+export interface SecurityStats {
+  http: {
+    activeConnections: number;
+    requestsBlocked: number;
+    requestsRateLimited: number;
+  };
+  tcp: {
+    activeConnections: number;
+    connectionsBlocked: number;
+    connectionsRateLimited: number;
+  };
+  blockedIps: number;
+  logsBuffered: number;
+}
+
+export interface BlockedIp {
+  ip: string;
+  reason: string;
+  blockedAt: number;
+  expiresAt: number;
+}
+
+export interface ConnectionLog {
+  id: string;
+  tunnelId: string;
+  organizationId?: string;
+  type: 'http' | 'tcp';
+  remoteIp: string;
+  timestamp: number;
+  bytesIn: number;
+  bytesOut: number;
+  duration?: number;
+  status: 'allowed' | 'blocked' | 'rate_limited';
+  reason?: string;
+}
+
+export interface BandwidthLimit {
+  allowed: boolean;
+  usedBytes: number;
+  limitBytes: number;
+  percentUsed: number;
 }
 
 export const api = new ApiClient();

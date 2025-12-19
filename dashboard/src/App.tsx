@@ -10,6 +10,7 @@ import ApiKeysPage from './pages/dashboard/ApiKeysPage';
 import TunnelsPage from './pages/dashboard/TunnelsPage';
 import DomainsPage from './pages/dashboard/DomainsPage';
 import ActivityPage from './pages/dashboard/ActivityPage';
+import SecurityPage from './pages/dashboard/SecurityPage';
 import AdminDashboard from './pages/AdminDashboard';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -71,6 +72,7 @@ function App() {
         <Route path="organizations/:id" element={<OrganizationDetailPage />} />
         <Route path="api-keys" element={<ApiKeysPage />} />
         <Route path="activity" element={<ActivityPage />} />
+        <Route path="security" element={<SecurityPage />} />
         
         {/* Admin routes */}
         <Route

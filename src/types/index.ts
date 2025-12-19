@@ -207,6 +207,12 @@ export interface PlanLimits {
   sslIncluded: boolean;
   customDomains: boolean;
   prioritySupport: boolean;
+  // Security & Rate Limits
+  maxHttpRequestsPerMinute?: number;  // Per tunnel
+  maxHttpRequestsPerHour?: number;    // Per tunnel
+  maxTcpConnectionsPerTunnel?: number;
+  maxTcpConnectionsPerOrg?: number;
+  maxTcpBandwidthMbPerMinute?: number;
 }
 
 export interface Subscription {

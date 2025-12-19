@@ -91,10 +91,15 @@ const secondaryNavigation: NavItemType[] = [
     href: '/dashboard/activity', 
     icon: Activity,
   },
+  { 
+    name: 'Security', 
+    href: '/dashboard/security', 
+    icon: Shield,
+  },
 ];
 
 const adminNavigation: NavItemType[] = [
-  { name: 'Admin Dashboard', href: '/dashboard/admin', icon: Shield },
+  { name: 'Admin Dashboard', href: '/dashboard/admin', icon: BarChart3 },
 ];
 
 export default function DashboardLayout() {

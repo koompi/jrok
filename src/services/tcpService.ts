@@ -8,6 +8,7 @@
 import type { TcpPortAllocation, Agent } from "../types/index";
 import { generateId } from "../utils/helpers";
 import * as net from "net";
+import * as securityService from "./securityService";
 
 // TCP Port Configuration
 const TCP_PORT_MIN = parseInt(process.env.TCP_PORT_MIN || "10000");
@@ -187,19 +188,38 @@ export function getPortAllocationByPort(port: number): TcpPortAllocation | null 
 /**
  * Start TCP server for a port allocation
  */
-export function startTcpServer(allocation: TcpPortAllocation): boolean {
+export function startTcpServer(allocation: TcpPortAllocation, planTier?: string): boolean {
   if (tcpServers.has(allocation.port)) {
     console.warn(`⚠️ TCP server already running on port ${allocation.port}`);
     return true;
   }
 
-  const server = net.createServer((clientSocket) => {
+  const server = net.createServer(async (clientSocket) => {
     const connectionId = generateId();
-    console.log(`🔌 TCP connection [${connectionId}] on port ${allocation.port}`);
+    const remoteIp = clientSocket.remoteAddress || 'unknown';
+    console.log(`🔌 TCP connection [${connectionId}] on port ${allocation.port} from ${remoteIp}`);
+
+    // Security check: verify connection is allowed
+    const securityCheck = await securityService.checkTcpConnection(
+      allocation.tunnelId,
+      allocation.organizationId,
+      remoteIp,
+      planTier
+    );
+
+    if (!securityCheck.allowed) {
+      console.log(`🚫 TCP connection blocked [${connectionId}]: ${securityCheck.reason}`);
+      clientSocket.end();
+      return;
+    }
+
+    // Track connection for limits
+    securityService.trackTcpConnection(allocation.tunnelId, allocation.organizationId, true);
 
     const agentWs = agentConnections.get(allocation.agentId);
     if (!agentWs || agentWs.readyState !== 1) {
       console.error(`❌ Agent ${allocation.agentId} not connected for TCP tunnel`);
+      securityService.trackTcpConnection(allocation.tunnelId, allocation.organizationId, false);
       clientSocket.end();
       return;
     }
@@ -207,6 +227,8 @@ export function startTcpServer(allocation: TcpPortAllocation): boolean {
     // Buffer for incoming data while waiting for agent connection
     let dataBuffer: Buffer[] = [];
     let isAgentConnected = false;
+    let totalBytesIn = 0;
+    let totalBytesOut = 0;
 
     // Notify agent about new TCP connection
     agentWs.send(JSON.stringify({
@@ -220,6 +242,18 @@ export function startTcpServer(allocation: TcpPortAllocation): boolean {
 
     // Handle data from client
     clientSocket.on('data', (data: Buffer) => {
+      // Track incoming bytes
+      totalBytesIn += data.length;
+      securityService.trackTcpBandwidth(allocation.tunnelId, allocation.organizationId, data.length);
+
+      // Check bandwidth limits
+      const bandwidthCheck = securityService.checkTcpBandwidth(allocation.tunnelId, data.length, planTier);
+      if (!bandwidthCheck.allowed) {
+        console.log(`🚫 TCP bandwidth limit exceeded [${connectionId}]: ${bandwidthCheck.reason}`);
+        clientSocket.end();
+        return;
+      }
+
       if (!isAgentConnected) {
         dataBuffer.push(data);
         return;
@@ -239,7 +273,11 @@ export function startTcpServer(allocation: TcpPortAllocation): boolean {
 
     // Handle client disconnect
     clientSocket.on('close', () => {
-      console.log(`🔌 TCP connection [${connectionId}] closed`);
+      console.log(`🔌 TCP connection [${connectionId}] closed (in: ${totalBytesIn}, out: ${totalBytesOut})`);
+      
+      // Track connection close
+      securityService.trackTcpConnection(allocation.tunnelId, allocation.organizationId, false);
+      
       const agentWs = agentConnections.get(allocation.agentId);
       if (agentWs && agentWs.readyState === 1) {
         agentWs.send(JSON.stringify({

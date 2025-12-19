@@ -18,6 +18,10 @@ export interface Collections {
   usageRecords: Collection;
   sessions: Collection;
   settings: Collection;
+  // Security collections
+  connectionLogs: Collection;
+  blockedIps: Collection;
+  ipAllowlists: Collection;
 }
 
 let collections: Collections;
@@ -47,6 +51,10 @@ export async function connectDatabase(): Promise<void> {
       usageRecords: db.collection("usageRecords"),
       sessions: db.collection("sessions"),
       settings: db.collection("settings"),
+      // Security collections
+      connectionLogs: db.collection("connectionLogs"),
+      blockedIps: db.collection("blockedIps"),
+      ipAllowlists: db.collection("ipAllowlists"),
     };
 
     // Create indexes
@@ -129,6 +137,27 @@ async function createSaaSIndexes(): Promise<void> {
   await collections.sessions.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
   console.log("✅ SaaS database indexes created");
+
+  // Security indexes
+  await createSecurityIndexes();
+}
+
+async function createSecurityIndexes(): Promise<void> {
+  // Connection logs indexes
+  await collections.connectionLogs.createIndex({ tunnelId: 1, timestamp: -1 });
+  await collections.connectionLogs.createIndex({ organizationId: 1, timestamp: -1 });
+  await collections.connectionLogs.createIndex({ remoteIp: 1, timestamp: -1 });
+  await collections.connectionLogs.createIndex({ status: 1 });
+  await collections.connectionLogs.createIndex({ timestamp: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 }); // 30 days TTL
+
+  // Blocked IPs indexes
+  await collections.blockedIps.createIndex({ ip: 1 }, { unique: true });
+  await collections.blockedIps.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+  // IP Allowlists indexes
+  await collections.ipAllowlists.createIndex({ tunnelId: 1 }, { unique: true });
+
+  console.log("✅ Security database indexes created");
 }
 
 export function getCollections(): Collections {
