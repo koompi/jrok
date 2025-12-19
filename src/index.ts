@@ -15,7 +15,8 @@ import * as statsService from "./services/statsService";
 import * as wsProxyService from "./services/wsProxyService";
 import * as tcpService from "./services/tcpService";
 import * as securityService from "./services/securityService";
-import { connectDatabase, closeDatabase } from "./utils/mongodb";
+import * as crossServerService from "./services/crossServerService";
+import { connectDatabase, closeDatabase, createDistributedStateIndexes } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { initTelegram } from "./services/notificationService";
 import { generateId } from "./utils/helpers";
@@ -238,9 +239,21 @@ async function startServer() {
     await connectDatabase();
     console.log("✅ Database connected");
 
+    // Create distributed state indexes
+    await createDistributedStateIndexes();
+    console.log("✅ Distributed state indexes created");
+
     // Initialize security service
     securityService.initSecurityService();
     console.log("✅ Security service initialized");
+
+    // Initialize cross-server routing
+    crossServerService.initCrossServerRouting();
+    console.log("✅ Cross-server routing initialized");
+
+    // Restore TCP servers on startup (reconnect to allocated ports)
+    await tcpService.restoreTcpServersOnStartup();
+    console.log("✅ TCP tunnels restored");
 
     // Register current VPS server if running on a VPS with SSH
     await registerLocalVpsServer();
@@ -317,7 +330,7 @@ async function startServer() {
             if (protocol === 'tcp') {
               // Wait for tunnel creation and then send TCP port info
               setTimeout(async () => {
-                const allocation = tcpService.getPortAllocation(agent.tunnelId || '');
+                const allocation = await tcpService.getPortAllocation(agent.tunnelId || '');
                 if (allocation) {
                   ws.send(JSON.stringify({
                     type: "welcome",
@@ -574,7 +587,20 @@ async function startServer() {
         // Health check
         if (path === "/health" && method === "GET") {
           return addCors(new Response(
-            JSON.stringify({ success: true, message: "Server is running" }),
+            JSON.stringify({ 
+              success: true, 
+              message: "Server is running",
+              serverId: crossServerService.currentServerId,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Cluster stats (for monitoring multi-server deployment)
+        if (path === "/cluster/stats" && method === "GET") {
+          const clusterStats = await crossServerService.getClusterStats();
+          return addCors(new Response(
+            JSON.stringify({ success: true, ...clusterStats }),
             { status: 200, headers: { "Content-Type": "application/json" } }
           ));
         }
@@ -821,19 +847,20 @@ async function startServer() {
 
         // TCP tunnel stats (public endpoint for monitoring)
         if (path === "/stats/tcp" && method === "GET") {
-          const stats = tcpService.getTcpStats();
-          const allocations = tcpService.getAllPortAllocations();
+          const stats = await tcpService.getTcpStatsGlobal();
+          const allocations = await tcpService.getAllPortAllocationsGlobal();
           return addCors(new Response(
             JSON.stringify({
               success: true,
               stats,
-              allocations: allocations.map(a => ({
+              allocations: allocations.map((a: any) => ({
                 port: a.port,
                 tunnelId: a.tunnelId,
                 localPort: a.localPort,
                 localHost: a.localHost,
                 createdAt: a.createdAt,
                 active: a.active,
+                serverId: a.serverId,
               })),
             }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -1065,8 +1092,20 @@ async function startServer() {
           // Extract subdomain (e.g., "demo" from "demo.tunnel.koompi.cloud")
           const subdomain = hostname.replace(`.${baseDomain}`, '');
           
-          // Look up agent for this domain
-          const agent = agentService.getAgentByDomain(subdomain);
+          // Check if agent is on this server or needs cross-server routing
+          const routeResult = await crossServerService.findServerForDomain(subdomain);
+          
+          // If agent is on another server, proxy the request
+          if (!routeResult.isLocal && routeResult.targetServer) {
+            return crossServerService.forwardRequest(
+              routeResult.targetServer,
+              req,
+              url.pathname + url.search
+            );
+          }
+          
+          // Look up agent locally (async for distributed state)
+          const agent = await agentService.getAgentByDomainAsync(subdomain);
           
           if (!agent || !agent.active) {
             return addCors(new Response(
@@ -1078,7 +1117,7 @@ async function startServer() {
             ));
           }
 
-          // Get agent's WebSocket
+          // Get agent's WebSocket (local connections only)
           const agentWs = agentService.getAgentSocket(agent.id);
           if (!agentWs || agentWs.readyState !== 1) {  // 1 = WebSocket.OPEN
             return addCors(new Response(
@@ -1318,6 +1357,14 @@ async function startServer() {
     // Graceful shutdown
     process.on("SIGINT", async () => {
       console.log("\n🛑 Shutting down...");
+      
+      // Shutdown services
+      await crossServerService.shutdownCrossServerRouting();
+      securityService.shutdownSecurityService();
+      
+      // Cleanup TCP tunnels for this server
+      await tcpService.cleanupServerPorts();
+      
       await closeDatabase();
       process.exit(0);
     });

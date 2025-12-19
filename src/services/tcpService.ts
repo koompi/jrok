@@ -1,71 +1,96 @@
 /**
- * TCP Tunnel Service
+ * DISTRIBUTED TCP Tunnel Service
  * 
- * Manages TCP port allocation and raw TCP connections for tunneling
- * protocols like SSH, MongoDB, Redis, MySQL, etc.
+ * Manages TCP port allocation using MongoDB for distributed state.
+ * Each server manages its own port range to prevent conflicts.
+ * Port allocations are stored in MongoDB for cross-server visibility.
  */
 
 import type { TcpPortAllocation, Agent } from "../types/index";
 import { generateId } from "../utils/helpers";
+import { getCollections } from "../utils/mongodb";
 import * as net from "net";
 import * as securityService from "./securityService";
 
-// TCP Port Configuration
+// =============================================================================
+// CONFIGURATION
+// =============================================================================
+
+// Server identity
+const SERVER_ID = process.env.VPS_ID || process.env.HOSTNAME || "default";
+
+// TCP Port Configuration - each server should have unique range
 const TCP_PORT_MIN = parseInt(process.env.TCP_PORT_MIN || "10000");
 const TCP_PORT_MAX = parseInt(process.env.TCP_PORT_MAX || "20000");
 
-// Store TCP port allocations (in-memory for fast lookup)
-const portAllocations = new Map<number, TcpPortAllocation>();
-const tunnelToPort = new Map<string, number>(); // tunnelId -> port
-const agentToPort = new Map<string, number>(); // agentId -> port
+// =============================================================================
+// LOCAL STATE (must be per-server for socket management)
+// =============================================================================
 
-// Store active TCP servers
+// Active TCP servers on THIS server
 const tcpServers = new Map<number, net.Server>();
 
-// Store agent WebSocket connections for TCP forwarding
+// Active TCP connections on THIS server
+interface TcpConnection {
+  socket: net.Socket;
+  allocation: TcpPortAllocation;
+  onAgentConnected: () => void;
+}
+const tcpConnections = new Map<string, TcpConnection>();
+
+// Agent WebSocket connections (local to this server)
 const agentConnections = new Map<string, WebSocket>();
 
-/**
- * Register agent WebSocket for TCP forwarding
- */
+// =============================================================================
+// AGENT CONNECTION MANAGEMENT
+// =============================================================================
+
 export function registerAgentConnection(agentId: string, ws: WebSocket): void {
   agentConnections.set(agentId, ws);
 }
 
-/**
- * Unregister agent WebSocket
- */
-export function unregisterAgentConnection(agentId: string): void {
+export async function unregisterAgentConnection(agentId: string): Promise<void> {
   agentConnections.delete(agentId);
   
   // Clean up any TCP allocations for this agent
-  const port = agentToPort.get(agentId);
-  if (port) {
-    deallocatePort(port);
-  }
+  await deallocatePortByAgentId(agentId);
 }
 
-/**
- * Get agent WebSocket connection
- */
 export function getAgentConnection(agentId: string): WebSocket | undefined {
   return agentConnections.get(agentId);
 }
 
+// =============================================================================
+// DISTRIBUTED PORT ALLOCATION (MongoDB)
+// =============================================================================
+
 /**
- * Find an available port in the configured range
+ * Find an available port in this server's range
+ * Uses MongoDB to check for conflicts across all servers
  */
-function findAvailablePort(): number | null {
+async function findAvailablePort(): Promise<number | null> {
+  const collections = getCollections();
+  
+  // Get all allocated ports for this server
+  const allocatedPorts = await collections.tcpPortAllocations.find({
+    serverId: SERVER_ID,
+    active: true,
+  }).project({ port: 1 }).toArray();
+  
+  const usedPorts = new Set(allocatedPorts.map(a => a.port));
+  
+  // Find first available port in our range
   for (let port = TCP_PORT_MIN; port <= TCP_PORT_MAX; port++) {
-    if (!portAllocations.has(port)) {
+    if (!usedPorts.has(port)) {
       return port;
     }
   }
+  
   return null;
 }
 
 /**
- * Check if a port is actually available on the system
+ * Check if a port is available on the system
  */
 async function isPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -80,7 +105,7 @@ async function isPortAvailable(port: number): Promise<boolean> {
 }
 
 /**
- * Allocate a TCP port for a tunnel
+ * Allocate a TCP port for a tunnel (distributed via MongoDB)
  */
 export async function allocatePort(
   tunnelId: string,
@@ -89,24 +114,41 @@ export async function allocatePort(
   localHost: string,
   organizationId?: string
 ): Promise<TcpPortAllocation | null> {
-  // Check if tunnel already has a port
-  const existingPort = tunnelToPort.get(tunnelId);
-  if (existingPort) {
-    return portAllocations.get(existingPort) || null;
-  }
-
-  // Find an available port
-  let port = findAvailablePort();
-  if (!port) {
-    console.error("❌ No available TCP ports in range");
+  const collections = getCollections();
+  
+  // Check if tunnel already has a port allocated on ANY server
+  const existingAllocation = await collections.tcpPortAllocations.findOne({
+    tunnelId,
+    active: true,
+  });
+  
+  if (existingAllocation) {
+    // If it's on this server, return it
+    if (existingAllocation.serverId === SERVER_ID) {
+      return existingAllocation as TcpPortAllocation;
+    }
+    // If on another server, we need to deallocate there first or return error
+    console.warn(`⚠️ Tunnel ${tunnelId} already has port ${existingAllocation.port} on server ${existingAllocation.serverId}`);
     return null;
   }
 
-  // Verify port is actually available on the system
+  // Find and validate available port
+  let port = await findAvailablePort();
+  if (!port) {
+    console.error(`❌ No available TCP ports in range ${TCP_PORT_MIN}-${TCP_PORT_MAX}`);
+    return null;
+  }
+
+  // Verify port is actually available on system
   let attempts = 0;
   while (!(await isPortAvailable(port)) && attempts < 100) {
-    port = findAvailablePort();
-    if (!port) return null;
+    // Mark this port as temporarily unavailable and try next
+    const nextPort = await findAvailablePort();
+    if (!nextPort || nextPort === port) {
+      attempts++;
+      continue;
+    }
+    port = nextPort;
     attempts++;
   }
 
@@ -115,7 +157,7 @@ export async function allocatePort(
     return null;
   }
 
-  const allocation: TcpPortAllocation = {
+  const allocation: TcpPortAllocation & { serverId: string; serverHost: string } = {
     id: generateId(),
     port,
     tunnelId,
@@ -125,36 +167,43 @@ export async function allocatePort(
     localHost,
     createdAt: Date.now(),
     active: true,
+    serverId: SERVER_ID,
+    serverHost: process.env.VPS_HOST || "localhost",
   };
 
-  // Store allocation
-  portAllocations.set(port, allocation);
-  tunnelToPort.set(tunnelId, port);
-  agentToPort.set(agentId, port);
-
-  console.log(`✅ TCP port ${port} allocated for tunnel ${tunnelId} (agent: ${agentId})`);
-
-  return allocation;
+  // Atomic insert with duplicate key handling
+  try {
+    await collections.tcpPortAllocations.insertOne(allocation);
+    console.log(`✅ TCP port ${port} allocated for tunnel ${tunnelId} on server ${SERVER_ID}`);
+    return allocation;
+  } catch (error: any) {
+    if (error.code === 11000) {
+      // Duplicate key - port was taken by another request
+      console.warn(`⚠️ Port ${port} was taken by concurrent request, retrying...`);
+      return allocatePort(tunnelId, agentId, localPort, localHost, organizationId);
+    }
+    throw error;
+  }
 }
 
 /**
- * Deallocate a TCP port
+ * Deallocate a TCP port (distributed)
  */
-export function deallocatePort(port: number): void {
-  const allocation = portAllocations.get(port);
-  if (!allocation) return;
-
-  // Stop the TCP server if running
+export async function deallocatePort(port: number): Promise<void> {
+  const collections = getCollections();
+  
+  // Stop local TCP server if running
   const server = tcpServers.get(port);
   if (server) {
     server.close();
     tcpServers.delete(port);
   }
 
-  // Remove from maps
-  portAllocations.delete(port);
-  tunnelToPort.delete(allocation.tunnelId);
-  agentToPort.delete(allocation.agentId);
+  // Remove from MongoDB
+  await collections.tcpPortAllocations.deleteOne({
+    port,
+    serverId: SERVER_ID,
+  });
 
   console.log(`🗑️ TCP port ${port} deallocated`);
 }
@@ -162,28 +211,88 @@ export function deallocatePort(port: number): void {
 /**
  * Deallocate port by tunnel ID
  */
-export function deallocatePortByTunnelId(tunnelId: string): void {
-  const port = tunnelToPort.get(tunnelId);
-  if (port) {
-    deallocatePort(port);
+export async function deallocatePortByTunnelId(tunnelId: string): Promise<void> {
+  const collections = getCollections();
+  
+  const allocation = await collections.tcpPortAllocations.findOne({
+    tunnelId,
+    serverId: SERVER_ID,
+    active: true,
+  });
+  
+  if (allocation) {
+    await deallocatePort(allocation.port);
+  }
+}
+
+/**
+ * Deallocate port by agent ID
+ */
+export async function deallocatePortByAgentId(agentId: string): Promise<void> {
+  const collections = getCollections();
+  
+  const allocations = await collections.tcpPortAllocations.find({
+    agentId,
+    serverId: SERVER_ID,
+    active: true,
+  }).toArray();
+  
+  for (const allocation of allocations) {
+    await deallocatePort(allocation.port);
   }
 }
 
 /**
  * Get port allocation by tunnel ID
  */
-export function getPortAllocation(tunnelId: string): TcpPortAllocation | null {
-  const port = tunnelToPort.get(tunnelId);
-  if (!port) return null;
-  return portAllocations.get(port) || null;
+export async function getPortAllocation(tunnelId: string): Promise<TcpPortAllocation | null> {
+  const collections = getCollections();
+  const allocation = await collections.tcpPortAllocations.findOne({
+    tunnelId,
+    active: true,
+  });
+  return allocation as TcpPortAllocation | null;
 }
 
 /**
  * Get port allocation by port number
  */
-export function getPortAllocationByPort(port: number): TcpPortAllocation | null {
-  return portAllocations.get(port) || null;
+export async function getPortAllocationByPort(port: number): Promise<TcpPortAllocation | null> {
+  const collections = getCollections();
+  const allocation = await collections.tcpPortAllocations.findOne({
+    port,
+    serverId: SERVER_ID,
+    active: true,
+  });
+  return allocation as TcpPortAllocation | null;
 }
+
+/**
+ * Get all port allocations for this server
+ */
+export async function getAllPortAllocations(): Promise<TcpPortAllocation[]> {
+  const collections = getCollections();
+  const allocations = await collections.tcpPortAllocations.find({
+    serverId: SERVER_ID,
+    active: true,
+  }).toArray();
+  return allocations as TcpPortAllocation[];
+}
+
+/**
+ * Get all port allocations across all servers
+ */
+export async function getAllPortAllocationsGlobal(): Promise<(TcpPortAllocation & { serverId: string })[]> {
+  const collections = getCollections();
+  const allocations = await collections.tcpPortAllocations.find({
+    active: true,
+  }).toArray();
+  return allocations as (TcpPortAllocation & { serverId: string })[];
+}
+
+// =============================================================================
+// TCP SERVER MANAGEMENT
+// =============================================================================
 
 /**
  * Start TCP server for a port allocation
@@ -199,7 +308,7 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
     const remoteIp = clientSocket.remoteAddress || 'unknown';
     console.log(`🔌 TCP connection [${connectionId}] on port ${allocation.port} from ${remoteIp}`);
 
-    // Security check: verify connection is allowed
+    // Security check
     const securityCheck = await securityService.checkTcpConnection(
       allocation.tunnelId,
       allocation.organizationId,
@@ -213,7 +322,7 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
       return;
     }
 
-    // Track connection for limits
+    // Track connection
     securityService.trackTcpConnection(allocation.tunnelId, allocation.organizationId, true);
 
     const agentWs = agentConnections.get(allocation.agentId);
@@ -224,13 +333,12 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
       return;
     }
 
-    // Buffer for incoming data while waiting for agent connection
     let dataBuffer: Buffer[] = [];
     let isAgentConnected = false;
     let totalBytesIn = 0;
     let totalBytesOut = 0;
 
-    // Notify agent about new TCP connection
+    // Notify agent
     agentWs.send(JSON.stringify({
       type: "tcp_connect",
       connectionId,
@@ -240,13 +348,10 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
       remotePort: clientSocket.remotePort,
     }));
 
-    // Handle data from client
     clientSocket.on('data', (data: Buffer) => {
-      // Track incoming bytes
       totalBytesIn += data.length;
       securityService.trackTcpBandwidth(allocation.tunnelId, allocation.organizationId, data.length);
 
-      // Check bandwidth limits
       const bandwidthCheck = securityService.checkTcpBandwidth(allocation.tunnelId, data.length, planTier);
       if (!bandwidthCheck.allowed) {
         console.log(`🚫 TCP bandwidth limit exceeded [${connectionId}]: ${bandwidthCheck.reason}`);
@@ -259,9 +364,9 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
         return;
       }
 
-      const agentWs = agentConnections.get(allocation.agentId);
-      if (agentWs && agentWs.readyState === 1) {
-        agentWs.send(JSON.stringify({
+      const ws = agentConnections.get(allocation.agentId);
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({
           type: "tcp_data",
           connectionId,
           data: data.toString('base64'),
@@ -271,51 +376,34 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
       }
     });
 
-    // Handle client disconnect
     clientSocket.on('close', () => {
       console.log(`🔌 TCP connection [${connectionId}] closed (in: ${totalBytesIn}, out: ${totalBytesOut})`);
-      
-      // Track connection close
       securityService.trackTcpConnection(allocation.tunnelId, allocation.organizationId, false);
       
-      const agentWs = agentConnections.get(allocation.agentId);
-      if (agentWs && agentWs.readyState === 1) {
-        agentWs.send(JSON.stringify({
-          type: "tcp_close",
-          connectionId,
-        }));
+      const ws = agentConnections.get(allocation.agentId);
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "tcp_close", connectionId }));
       }
-      // Clean up connection
       tcpConnections.delete(connectionId);
     });
 
     clientSocket.on('error', (error) => {
       console.error(`❌ TCP connection [${connectionId}] error:`, error);
-      const agentWs = agentConnections.get(allocation.agentId);
-      if (agentWs && agentWs.readyState === 1) {
-        agentWs.send(JSON.stringify({
-          type: "tcp_error",
-          connectionId,
-          error: error.message,
-        }));
+      const ws = agentConnections.get(allocation.agentId);
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "tcp_error", connectionId, error: error.message }));
       }
     });
 
-    // Store the connection
     tcpConnections.set(connectionId, {
       socket: clientSocket,
       allocation,
       onAgentConnected: () => {
         isAgentConnected = true;
-        // Flush buffered data
         for (const data of dataBuffer) {
-          const agentWs = agentConnections.get(allocation.agentId);
-          if (agentWs && agentWs.readyState === 1) {
-            agentWs.send(JSON.stringify({
-              type: "tcp_data",
-              connectionId,
-              data: data.toString('base64'),
-            }));
+          const ws = agentConnections.get(allocation.agentId);
+          if (ws && ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: "tcp_data", connectionId, data: data.toString('base64') }));
           }
         }
         dataBuffer = [];
@@ -347,17 +435,10 @@ export function stopTcpServer(port: number): void {
   }
 }
 
-// Store active TCP connections (connectionId -> socket)
-interface TcpConnection {
-  socket: net.Socket;
-  allocation: TcpPortAllocation;
-  onAgentConnected: () => void;
-}
-const tcpConnections = new Map<string, TcpConnection>();
+// =============================================================================
+// TCP MESSAGE HANDLERS
+// =============================================================================
 
-/**
- * Handle TCP data from agent (forward to client)
- */
 export function handleAgentTcpData(connectionId: string, data: string): void {
   const conn = tcpConnections.get(connectionId);
   if (!conn) {
@@ -373,9 +454,6 @@ export function handleAgentTcpData(connectionId: string, data: string): void {
   }
 }
 
-/**
- * Handle TCP connection ready from agent
- */
 export function handleAgentTcpConnected(connectionId: string): void {
   const conn = tcpConnections.get(connectionId);
   if (!conn) {
@@ -385,9 +463,6 @@ export function handleAgentTcpConnected(connectionId: string): void {
   conn.onAgentConnected();
 }
 
-/**
- * Handle TCP close from agent
- */
 export function handleAgentTcpClose(connectionId: string): void {
   const conn = tcpConnections.get(connectionId);
   if (!conn) return;
@@ -400,48 +475,131 @@ export function handleAgentTcpClose(connectionId: string): void {
   tcpConnections.delete(connectionId);
 }
 
-/**
- * Handle TCP error from agent
- */
 export function handleAgentTcpError(connectionId: string, error: string): void {
   console.error(`❌ Agent TCP error [${connectionId}]: ${error}`);
   handleAgentTcpClose(connectionId);
 }
 
-/**
- * Get all port allocations
- */
-export function getAllPortAllocations(): TcpPortAllocation[] {
-  return Array.from(portAllocations.values());
-}
+// =============================================================================
+// STATS & CLEANUP
+// =============================================================================
 
 /**
- * Get TCP stats
+ * Get TCP stats for this server
  */
 export function getTcpStats(): {
   allocatedPorts: number;
   activeServers: number;
   activeConnections: number;
   portRange: { min: number; max: number };
+  serverId: string;
 } {
   return {
-    allocatedPorts: portAllocations.size,
+    allocatedPorts: tcpServers.size,
     activeServers: tcpServers.size,
     activeConnections: tcpConnections.size,
     portRange: { min: TCP_PORT_MIN, max: TCP_PORT_MAX },
+    serverId: SERVER_ID,
+  };
+}
+
+/**
+ * Get global TCP stats across all servers
+ */
+export async function getTcpStatsGlobal(): Promise<{
+  totalAllocatedPorts: number;
+  serverStats: Array<{ serverId: string; allocatedPorts: number }>;
+}> {
+  const collections = getCollections();
+  
+  const pipeline = [
+    { $match: { active: true } },
+    { $group: { _id: "$serverId", allocatedPorts: { $sum: 1 } } },
+  ];
+  
+  const results = await collections.tcpPortAllocations.aggregate(pipeline).toArray();
+  
+  return {
+    totalAllocatedPorts: results.reduce((sum, r) => sum + r.allocatedPorts, 0),
+    serverStats: results.map(r => ({
+      serverId: r._id,
+      allocatedPorts: r.allocatedPorts,
+    })),
   };
 }
 
 /**
  * Cleanup inactive allocations (called periodically)
  */
-export function cleanupInactiveAllocations(): void {
-  const entries = Array.from(portAllocations.entries());
-  for (const [port, allocation] of entries) {
+export async function cleanupInactiveAllocations(): Promise<void> {
+  const collections = getCollections();
+  
+  // Get all allocations for this server
+  const allocations = await collections.tcpPortAllocations.find({
+    serverId: SERVER_ID,
+    active: true,
+  }).toArray();
+  
+  for (const allocation of allocations) {
     const agentWs = agentConnections.get(allocation.agentId);
     if (!agentWs || agentWs.readyState !== 1) {
-      console.log(`🧹 Cleaning up TCP allocation for disconnected agent: port ${port}`);
-      deallocatePort(port);
+      console.log(`🧹 Cleaning up TCP allocation for disconnected agent: port ${allocation.port}`);
+      await deallocatePort(allocation.port);
     }
   }
 }
+
+/**
+ * Restore TCP servers on startup (from MongoDB state)
+ */
+export async function restoreTcpServersOnStartup(): Promise<void> {
+  const collections = getCollections();
+  
+  // Mark all allocations for this server as inactive first
+  // (they will be reactivated when agents reconnect)
+  await collections.tcpPortAllocations.updateMany(
+    { serverId: SERVER_ID },
+    { $set: { active: false } }
+  );
+  
+  console.log(`🔄 TCP allocations reset for server ${SERVER_ID} on startup`);
+}
+
+/**
+ * Cleanup all TCP ports for this server (used during shutdown)
+ */
+export async function cleanupServerPorts(): Promise<void> {
+  const collections = getCollections();
+  
+  // Close all TCP servers
+  for (const [port, server] of tcpServers.entries()) {
+    try {
+      server.close();
+      console.log(`🔌 Closed TCP server on port ${port}`);
+    } catch (error) {
+      console.error(`Failed to close TCP server on port ${port}:`, error);
+    }
+  }
+  tcpServers.clear();
+  
+  // Close all TCP connections
+  for (const [connectionId, connection] of tcpConnections.entries()) {
+    try {
+      connection.socket.destroy();
+    } catch (error) {
+      console.error(`Failed to close TCP connection ${connectionId}:`, error);
+    }
+  }
+  tcpConnections.clear();
+  
+  // Mark all allocations for this server as inactive
+  await collections.tcpPortAllocations.updateMany(
+    { serverId: SERVER_ID },
+    { $set: { active: false } }
+  );
+  
+  console.log(`🧹 Cleaned up all TCP resources for server ${SERVER_ID}`);
+}
+
+// Export server identity
+export const currentServerId = SERVER_ID;

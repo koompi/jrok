@@ -166,6 +166,10 @@ export async function createTunnel(request: CreateTunnelRequest, agentId: string
 
   const protocol: TunnelProtocol = request.protocol || 'http';
   
+  // Get current server identity for multi-server tracking
+  const serverId = process.env.VPS_ID || process.env.HOSTNAME || "default";
+  const serverHost = process.env.VPS_HOST || "localhost";
+
   const tunnel: Tunnel = {
     id: generateId(),
     domain: request.domain,
@@ -178,6 +182,9 @@ export async function createTunnel(request: CreateTunnelRequest, agentId: string
     expiresAt: request.expiresIn ? Date.now() + request.expiresIn * 1000 : undefined,
     active: true,
     protocol,
+    // Multi-server: track which server owns this connection
+    serverId,
+    serverHost,
   };
 
   try {

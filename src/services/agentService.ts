@@ -5,9 +5,43 @@ import * as activityService from "./activityService";
 import { getTunnelByDomain, invalidateTunnelCache } from "../utils/database";
 import { getCollections } from "../utils/mongodb";
 
-// Store active agent connections
-const agents = new Map<string, { agent: Agent; socket: WebSocket }>();
-const agentsByDomain = new Map<string, string>(); // domain -> agentId
+// =============================================================================
+// DISTRIBUTED AGENT SERVICE
+// =============================================================================
+// Uses MongoDB for distributed state across multiple servers.
+// Local WebSocket references are still stored in memory (unavoidable for sockets)
+// but agent metadata is stored in MongoDB for cross-server visibility.
+// =============================================================================
+
+// Current server identity
+const SERVER_ID = process.env.VPS_ID || process.env.HOSTNAME || `server-${generateId().substring(0, 8)}`;
+const SERVER_HOST = process.env.VPS_HOST || "localhost";
+const SERVER_PORT = parseInt(process.env.PORT || "3000");
+const SERVER_REGION = process.env.VPS_REGION || "default";
+
+// Local WebSocket references (in-memory, per-server)
+// These MUST be local since WebSocket connections can't be shared
+const localSockets = new Map<string, WebSocket>();
+
+// Agent connection record stored in MongoDB
+interface AgentConnection {
+  agentId: string;
+  domain: string;
+  localPort: number;
+  localHost: string;
+  protocol: TunnelProtocol;
+  serverId: string;
+  serverHost: string;
+  serverPort: number;
+  serverRegion: string;
+  organizationId?: string;
+  apiKeyId?: string;
+  clientIp?: string;
+  connectedAt: Date;
+  lastHeartbeat: Date;
+  active: boolean;
+  tunnelId?: string;
+}
 
 export interface RegisterAgentOptions {
   socket: WebSocket;
@@ -18,61 +52,90 @@ export interface RegisterAgentOptions {
   organizationId?: string;
   apiKeyId?: string;
   protocol?: TunnelProtocol;
-  forceNew?: boolean; // Always create new subdomain even if same org owns it
+  forceNew?: boolean;
 }
 
 export interface RegisterAgentResult {
   agent: Agent;
   finalDomain: string;
-  wasModified: boolean; // True if domain had suffix added
+  wasModified: boolean;
 }
 
-/**
- * Check if a domain is available or owned by the same organization
- * Returns: { available: true } if domain is free or owned by same org (and not forceNew)
- *          { available: false, ownedByOrg: orgId } if domain is taken by different org
- */
+// =============================================================================
+// DOMAIN AVAILABILITY CHECK
+// =============================================================================
+
 async function checkDomainAvailability(
   domain: string, 
   organizationId?: string,
   forceNew?: boolean
 ): Promise<{ available: boolean; ownedByOrg?: string }> {
-  const existingTunnel = await getTunnelByDomain(domain);
+  const collections = getCollections();
   
-  if (!existingTunnel) {
-    return { available: true };
+  // Check for active agent connection on any server
+  const existingConnection = await collections.agentConnections.findOne({ 
+    domain, 
+    active: true 
+  });
+  
+  if (existingConnection) {
+    // Domain has an active agent
+    if (forceNew) {
+      return { available: false, ownedByOrg: existingConnection.organizationId };
+    }
+    
+    // Same org can reuse
+    if (organizationId && existingConnection.organizationId === organizationId) {
+      // Check if it's on this server (can take over) or different server
+      if (existingConnection.serverId === SERVER_ID) {
+        return { available: true };
+      }
+      // Different server owns it - need to wait for disconnect or use --force-new
+      return { available: false, ownedByOrg: existingConnection.organizationId };
+    }
+    
+    return { available: false, ownedByOrg: existingConnection.organizationId };
   }
   
-  // If forceNew is set, always treat as unavailable to create new subdomain
-  if (forceNew) {
+  // Check tunnel ownership (for inactive tunnels)
+  const existingTunnel = await getTunnelByDomain(domain);
+  if (existingTunnel) {
+    if (forceNew) {
+      return { available: false, ownedByOrg: existingTunnel.organizationId };
+    }
+    if (organizationId && existingTunnel.organizationId === organizationId) {
+      return { available: true };
+    }
     return { available: false, ownedByOrg: existingTunnel.organizationId };
   }
   
-  // If same organization owns it, allow reuse
-  if (organizationId && existingTunnel.organizationId === organizationId) {
-    return { available: true };
-  }
-  
-  // Different org or no org - domain is taken
-  return { available: false, ownedByOrg: existingTunnel.organizationId };
+  return { available: true };
 }
 
-/**
- * Generate a unique domain by adding a random suffix
- * Keeps trying until a unique domain is found (max 10 attempts)
- */
 async function generateUniqueDomain(baseDomain: string): Promise<string> {
+  const collections = getCollections();
+  
   for (let i = 0; i < 10; i++) {
     const suffix = generateShortSuffix();
     const newDomain = `${baseDomain}-${suffix}`;
-    const existingTunnel = await getTunnelByDomain(newDomain);
-    if (!existingTunnel) {
+    
+    // Check both agent connections and tunnels
+    const [existingConn, existingTunnel] = await Promise.all([
+      collections.agentConnections.findOne({ domain: newDomain }),
+      getTunnelByDomain(newDomain),
+    ]);
+    
+    if (!existingConn && !existingTunnel) {
       return newDomain;
     }
   }
-  // Fallback: use timestamp if random keeps colliding (very unlikely)
+  
   return `${baseDomain}-${Date.now().toString(36)}`;
 }
+
+// =============================================================================
+// AGENT REGISTRATION (MongoDB + Local Socket)
+// =============================================================================
 
 export async function registerAgent(options: RegisterAgentOptions): Promise<RegisterAgentResult> {
   const {
@@ -87,6 +150,8 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     forceNew = false,
   } = options;
 
+  const collections = getCollections();
+  
   // Check domain availability
   const availability = await checkDomainAvailability(requestedDomain, organizationId, forceNew);
   
@@ -94,56 +159,88 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
   let wasModified = false;
   
   if (!availability.available) {
-    // Domain is taken - generate unique domain with suffix
     finalDomain = await generateUniqueDomain(requestedDomain);
     wasModified = true;
     console.log(`📛 Domain "${requestedDomain}" taken, using "${finalDomain}" instead`);
   }
 
-  const id = generateId();
-  const agent: Agent = {
-    id,
+  const agentId = generateId();
+  const now = new Date();
+
+  // Create agent connection record in MongoDB (distributed state)
+  const connectionRecord: AgentConnection = {
+    agentId,
     domain: finalDomain,
     localPort,
     localHost,
-    connectedAt: Date.now(),
-    lastHeartbeat: Date.now(),
+    protocol,
+    serverId: SERVER_ID,
+    serverHost: SERVER_HOST,
+    serverPort: SERVER_PORT,
+    serverRegion: SERVER_REGION,
+    organizationId,
+    apiKeyId,
+    clientIp,
+    connectedAt: now,
+    lastHeartbeat: now,
+    active: true,
+  };
+
+  // Use upsert to handle reconnections to same domain
+  await collections.agentConnections.updateOne(
+    { domain: finalDomain },
+    { $set: connectionRecord },
+    { upsert: true }
+  );
+
+  // Store local WebSocket reference
+  localSockets.set(agentId, socket);
+
+  // Create Agent object for return value
+  const agent: Agent = {
+    id: agentId,
+    domain: finalDomain,
+    localPort,
+    localHost,
+    connectedAt: now.getTime(),
+    lastHeartbeat: now.getTime(),
     active: true,
     clientIp,
     organizationId,
     apiKeyId,
     protocol,
+    serverId: SERVER_ID,
+    serverHost: SERVER_HOST,
   };
 
-  agents.set(id, { agent, socket });
-  agentsByDomain.set(finalDomain, id);
-
-  // Automatically create tunnel for the agent
-  createTunnelForAgent(agent, id, organizationId).catch((error) => {
-    console.error(`Failed to create tunnel for agent ${id}:`, error);
+  // Create or update tunnel
+  createTunnelForAgent(agent, agentId, organizationId).catch((error) => {
+    console.error(`Failed to create tunnel for agent ${agentId}:`, error);
   });
 
-  // Log activity for agent connection
+  // Log activity
   if (organizationId) {
-    activityService.logAgentConnected(organizationId, id, finalDomain, clientIp).catch((err) => {
+    activityService.logAgentConnected(organizationId, agentId, finalDomain, clientIp).catch((err) => {
       console.error("Failed to log agent connected activity:", err);
     });
   }
 
+  console.log(`✅ Agent registered: ${finalDomain} on server ${SERVER_ID}`);
   return { agent, finalDomain, wasModified };
 }
 
+// =============================================================================
+// TUNNEL CREATION
+// =============================================================================
+
 async function createTunnelForAgent(agent: Agent, agentId: string, organizationId?: string): Promise<void> {
   try {
-    // Check if tunnel already exists for this domain (uses cached lookup)
+    const collections = getCollections();
     const existingTunnel = await getTunnelByDomain(agent.domain);
     
     if (existingTunnel) {
-      // Cache the tunnel ID on the agent for fast lookup
       agent.tunnelId = existingTunnel.id;
       
-      // Tunnel already exists, just update it with new agent info
-      const collections = getCollections();
       await collections.tunnels.updateOne(
         { domain: agent.domain },
         { $set: {
@@ -152,13 +249,20 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
           localHost: agent.localHost,
           active: true,
           updatedAt: Date.now(),
+          serverId: SERVER_ID,
+          serverHost: SERVER_HOST,
         }}
       );
-      // Invalidate cache after update
+      
+      // Update agent connection with tunnel ID
+      await collections.agentConnections.updateOne(
+        { agentId },
+        { $set: { tunnelId: existingTunnel.id } }
+      );
+      
       invalidateTunnelCache(agent.domain);
-      console.log(`✅ Tunnel updated for domain: ${agent.domain}`);
+      console.log(`✅ Tunnel updated: ${agent.domain} (server: ${SERVER_ID})`);
     } else {
-      // Create new tunnel
       const newTunnel = await tunnelService.createTunnel(
         {
           domain: agent.domain,
@@ -171,106 +275,338 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
         organizationId
       );
       
-      // Cache the new tunnel ID on the agent
       if (newTunnel?.id) {
         agent.tunnelId = newTunnel.id;
+        await collections.agentConnections.updateOne(
+          { agentId },
+          { $set: { tunnelId: newTunnel.id } }
+        );
       }
       
-      // Invalidate cache after creation
       invalidateTunnelCache(agent.domain);
-      console.log(`✅ Tunnel created automatically for domain: ${agent.domain} (protocol: ${agent.protocol || 'http'})`);
+      console.log(`✅ Tunnel created: ${agent.domain} (protocol: ${agent.protocol || 'http'})`);
     }
   } catch (error) {
-    console.error(`Failed to auto-create tunnel for ${agent.domain}:`, error instanceof Error ? error.message : String(error));
+    console.error(`Failed to create tunnel for ${agent.domain}:`, error instanceof Error ? error.message : String(error));
   }
 }
 
-export async function unregisterAgent(id: string): Promise<void> {
-  const entry = agents.get(id);
-  if (entry) {
-    const { agent } = entry;
-    agentsByDomain.delete(agent.domain);
-    agents.delete(id);
+// =============================================================================
+// AGENT UNREGISTRATION
+// =============================================================================
 
-    // Mark the tunnel as inactive
+export async function unregisterAgent(id: string): Promise<void> {
+  const collections = getCollections();
+  
+  // Get agent connection from MongoDB
+  const connection = await collections.agentConnections.findOne({ agentId: id });
+  
+  if (connection) {
+    // Remove from MongoDB
+    await collections.agentConnections.deleteOne({ agentId: id });
+    
+    // Mark tunnel as inactive
     try {
-      const collections = getCollections();
       await collections.tunnels.updateOne(
-        { domain: agent.domain },
+        { domain: connection.domain },
         { $set: { active: false, updatedAt: Date.now() } }
       );
-      // Invalidate cache when agent disconnects
-      invalidateTunnelCache(agent.domain);
+      invalidateTunnelCache(connection.domain);
     } catch (error) {
-      console.error(`Failed to mark tunnel inactive for ${agent.domain}:`, error);
+      console.error(`Failed to mark tunnel inactive for ${connection.domain}:`, error);
     }
 
-    // Log activity for agent disconnection
-    if (agent.organizationId) {
-      activityService.logAgentDisconnected(agent.organizationId, id, agent.domain, agent.clientIp).catch((err) => {
+    // Log activity
+    if (connection.organizationId) {
+      activityService.logAgentDisconnected(
+        connection.organizationId, 
+        id, 
+        connection.domain, 
+        connection.clientIp
+      ).catch((err) => {
         console.error("Failed to log agent disconnected activity:", err);
       });
     }
+    
+    console.log(`🔌 Agent unregistered: ${connection.domain}`);
   }
+  
+  // Remove local socket reference
+  localSockets.delete(id);
 }
 
+// =============================================================================
+// AGENT LOOKUP (Local + MongoDB)
+// =============================================================================
+
+/**
+ * Get agent by ID - checks MongoDB
+ */
+export async function getAgentAsync(id: string): Promise<Agent | null> {
+  const collections = getCollections();
+  const connection = await collections.agentConnections.findOne({ agentId: id, active: true });
+  
+  if (!connection) return null;
+  
+  return connectionToAgent(connection);
+}
+
+/**
+ * Synchronous get agent - only returns if agent is on THIS server
+ * For backward compatibility with sync code paths
+ */
 export function getAgent(id: string): Agent | null {
-  return agents.get(id)?.agent || null;
-}
-
-export function getAgentByDomain(domain: string): Agent | null {
-  const id = agentsByDomain.get(domain);
-  return id ? agents.get(id)?.agent || null : null;
-}
-
-export function getAllAgents(): Agent[] {
-  return Array.from(agents.values()).map((e) => e.agent);
-}
-
-export function getAgentSocket(id: string): WebSocket | null {
-  return agents.get(id)?.socket || null;
-}
-
-export function getAgentIdBySocket(socket: WebSocket): string | null {
-  for (const [id, entry] of agents.entries()) {
-    if (entry.socket === socket) {
-      return id;
-    }
-  }
+  // Check if socket exists locally - if not, agent is not on this server
+  if (!localSockets.has(id)) return null;
+  
+  // Return a minimal agent for local socket
+  // Note: This is sync and can't query MongoDB, so it's limited
   return null;
 }
 
-export function updateHeartbeat(id: string): void {
-  const entry = agents.get(id);
-  if (entry) {
-    entry.agent.lastHeartbeat = Date.now();
-  }
+/**
+ * Get agent by domain from MongoDB
+ */
+export async function getAgentByDomainAsync(domain: string): Promise<Agent | null> {
+  const collections = getCollections();
+  const connection = await collections.agentConnections.findOne({ domain, active: true });
+  
+  if (!connection) return null;
+  
+  return connectionToAgent(connection);
 }
 
-export function isAgentConnected(id: string): boolean {
-  const agent = getAgent(id);
-  return agent ? agent.active : false;
+/**
+ * Get agent by domain - backward compatible sync version
+ * Returns null - use async version instead
+ */
+export function getAgentByDomain(domain: string): Agent | null {
+  return null;
 }
 
-export function disconnectStaleAgents(maxAge: number = 30000): void {
-  const now = Date.now();
-  const staleIds: string[] = [];
+/**
+ * Get all agents across all servers
+ */
+export async function getAllAgentsAsync(): Promise<Agent[]> {
+  const collections = getCollections();
+  const connections = await collections.agentConnections.find({ active: true }).toArray();
+  return connections.map(connectionToAgent);
+}
 
-  agents.forEach((entry, id) => {
-    if (now - entry.agent.lastHeartbeat > maxAge) {
-      entry.agent.active = false;
-      staleIds.push(id);
-    }
+/**
+ * Get all local agents (on this server only)
+ */
+export async function getLocalAgentsAsync(): Promise<Agent[]> {
+  const collections = getCollections();
+  const connections = await collections.agentConnections.find({ 
+    serverId: SERVER_ID, 
+    active: true 
+  }).toArray();
+  return connections.map(connectionToAgent);
+}
+
+/**
+ * Get all local agents - sync backward compat
+ */
+export function getAllAgents(): Agent[] {
+  return [];
+}
+
+/**
+ * Get local socket for agent (only if on this server)
+ */
+export function getAgentSocket(id: string): WebSocket | null {
+  return localSockets.get(id) || null;
+}
+
+/**
+ * Check if agent is on this server
+ */
+export function isLocalAgent(id: string): boolean {
+  return localSockets.has(id);
+}
+
+/**
+ * Get agent info including which server owns it
+ */
+export async function getAgentServerInfo(domain: string): Promise<{
+  agentId: string;
+  serverId: string;
+  serverHost: string;
+  serverPort: number;
+  isLocal: boolean;
+} | null> {
+  const collections = getCollections();
+  const connection = await collections.agentConnections.findOne({ domain, active: true });
+  
+  if (!connection) return null;
+  
+  return {
+    agentId: connection.agentId,
+    serverId: connection.serverId,
+    serverHost: connection.serverHost,
+    serverPort: connection.serverPort,
+    isLocal: connection.serverId === SERVER_ID,
+  };
+}
+
+// =============================================================================
+// HEARTBEAT & HEALTH
+// =============================================================================
+
+export async function updateHeartbeat(id: string): Promise<void> {
+  const collections = getCollections();
+  await collections.agentConnections.updateOne(
+    { agentId: id },
+    { $set: { lastHeartbeat: new Date() } }
+  );
+}
+
+export async function isAgentConnected(id: string): Promise<boolean> {
+  const collections = getCollections();
+  const connection = await collections.agentConnections.findOne({ 
+    agentId: id, 
+    active: true 
   });
-
-  staleIds.forEach((id) => unregisterAgent(id));
+  return !!connection;
 }
+
+/**
+ * Clean up stale agent connections (run periodically)
+ */
+export async function cleanupStaleAgents(maxAgeMs: number = 120000): Promise<number> {
+  const collections = getCollections();
+  const cutoff = new Date(Date.now() - maxAgeMs);
+  
+  // Find and remove stale connections ON THIS SERVER ONLY
+  const staleConnections = await collections.agentConnections.find({
+    serverId: SERVER_ID,
+    lastHeartbeat: { $lt: cutoff },
+  }).toArray();
+  
+  for (const conn of staleConnections) {
+    await unregisterAgent(conn.agentId);
+  }
+  
+  return staleConnections.length;
+}
+
+/**
+ * Disconnect stale agents - backward compat wrapper
+ */
+export function disconnectStaleAgents(maxAge: number = 30000): void {
+  cleanupStaleAgents(maxAge).catch(err => {
+    console.error("Failed to cleanup stale agents:", err);
+  });
+}
+
+// =============================================================================
+// MESSAGING
+// =============================================================================
 
 export function sendToAgent(id: string, message: AgentMessage): boolean {
-  const socket = getAgentSocket(id);
+  const socket = localSockets.get(id);
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(message));
     return true;
   }
   return false;
 }
+
+/**
+ * Get agent ID by socket reference (for local socket handling)
+ */
+export function getAgentIdBySocket(socket: WebSocket): string | null {
+  for (const [id, sock] of localSockets.entries()) {
+    if (sock === socket) {
+      return id;
+    }
+  }
+  return null;
+}
+
+// =============================================================================
+// SERVER HEARTBEAT
+// =============================================================================
+
+/**
+ * Send server heartbeat to MongoDB (run every 10 seconds)
+ */
+export async function sendServerHeartbeat(): Promise<void> {
+  const collections = getCollections();
+  
+  const localAgentCount = localSockets.size;
+  
+  await collections.serverHeartbeats.updateOne(
+    { serverId: SERVER_ID },
+    { 
+      $set: {
+        serverId: SERVER_ID,
+        serverHost: SERVER_HOST,
+        serverPort: SERVER_PORT,
+        serverRegion: SERVER_REGION,
+        lastHeartbeat: new Date(),
+        agentCount: localAgentCount,
+        healthy: true,
+      }
+    },
+    { upsert: true }
+  );
+}
+
+/**
+ * Get all healthy servers
+ */
+export async function getHealthyServers(): Promise<Array<{
+  serverId: string;
+  serverHost: string;
+  serverPort: number;
+  serverRegion: string;
+  agentCount: number;
+  lastHeartbeat: Date;
+}>> {
+  const collections = getCollections();
+  const cutoff = new Date(Date.now() - 30000); // 30 second threshold
+  
+  const servers = await collections.serverHeartbeats.find({
+    lastHeartbeat: { $gt: cutoff },
+    healthy: true,
+  }).toArray();
+  
+  return servers.map(s => ({
+    serverId: s.serverId,
+    serverHost: s.serverHost,
+    serverPort: s.serverPort,
+    serverRegion: s.serverRegion,
+    agentCount: s.agentCount,
+    lastHeartbeat: s.lastHeartbeat,
+  }));
+}
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+function connectionToAgent(conn: any): Agent {
+  return {
+    id: conn.agentId,
+    domain: conn.domain,
+    localPort: conn.localPort,
+    localHost: conn.localHost,
+    connectedAt: conn.connectedAt instanceof Date ? conn.connectedAt.getTime() : conn.connectedAt,
+    lastHeartbeat: conn.lastHeartbeat instanceof Date ? conn.lastHeartbeat.getTime() : conn.lastHeartbeat,
+    active: conn.active,
+    clientIp: conn.clientIp,
+    organizationId: conn.organizationId,
+    apiKeyId: conn.apiKeyId,
+    tunnelId: conn.tunnelId,
+    protocol: conn.protocol,
+    serverId: conn.serverId,
+    serverHost: conn.serverHost,
+  };
+}
+
+// Export server identity
+export const currentServerId = SERVER_ID;
+export const currentServerHost = SERVER_HOST;
+export const currentServerPort = SERVER_PORT;

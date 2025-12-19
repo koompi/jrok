@@ -166,6 +166,17 @@ if ! [[ $VPS_COUNT =~ ^[0-9]+$ ]] || [ "$VPS_COUNT" -lt 1 ] || [ "$VPS_COUNT" -g
 fi
 
 echo -e "${GREEN}✓ Will create $VPS_COUNT VPS server(s)${NC}"
+
+# Multi-server TCP port range configuration
+if [ "$VPS_COUNT" -gt 1 ]; then
+    echo ""
+    echo -e "${BLUE}--- Multi-Server TCP Port Configuration ---${NC}"
+    echo "Each server needs a unique TCP port range to prevent conflicts."
+    echo "Total range available: 10000-20000 (10000 ports)"
+    PORTS_PER_SERVER=$((10000 / VPS_COUNT))
+    echo "Ports per server: ~$PORTS_PER_SERVER"
+    echo ""
+fi
 echo ""
 
 # Terraform deployment
@@ -192,10 +203,52 @@ if prompt_yesno "Run Terraform to create VPS servers?"; then
         
         # Extract IPs and save to inventory
         echo -e "${BLUE}Extracting VPS information...${NC}"
-        REGION_LIST=(sgp1 nyc1 lon1)
+        REGION_LIST=(sgp1 nyc1 lon1 sfo1 ams1)
         
-        # This is a simplified approach - in production, parse actual Terraform outputs
-        echo "⚠️  Please manually update ansible/inventory.ini with the following VPS IPs:"
+        # Generate inventory template with port ranges
+        echo ""
+        echo -e "${BLUE}Generating inventory template with TCP port ranges...${NC}"
+        
+        PORTS_PER_SERVER=$((10000 / VPS_COUNT))
+        PORT_START=10000
+        
+        cat > "$PROJECT_ROOT/ansible/inventory.ini.new" <<EOF
+# Ansible Inventory for jrok VPS deployment (auto-generated)
+# Generated: $(date)
+
+[jrok_servers]
+EOF
+        
+        for ((i=0; i<VPS_COUNT; i++)); do
+            PORT_MIN=$((PORT_START + (i * PORTS_PER_SERVER)))
+            PORT_MAX=$((PORT_MIN + PORTS_PER_SERVER - 1))
+            REGION=${REGION_LIST[$((i % ${#REGION_LIST[@]}))]}
+            VPS_ID="vps-$(printf '%03d' $((i+1)))"
+            
+            echo "# Server $((i+1)): Replace YOUR_IP_$((i+1)) with actual IP" >> "$PROJECT_ROOT/ansible/inventory.ini.new"
+            echo "$VPS_ID ansible_host=YOUR_IP_$((i+1)) ansible_user=root vps_id=$VPS_ID vps_region=$REGION tcp_port_min=$PORT_MIN tcp_port_max=$PORT_MAX" >> "$PROJECT_ROOT/ansible/inventory.ini.new"
+            echo "" >> "$PROJECT_ROOT/ansible/inventory.ini.new"
+        done
+        
+        cat >> "$PROJECT_ROOT/ansible/inventory.ini.new" <<EOF
+[jrok_servers:vars]
+ansible_ssh_private_key_file=~/.ssh/id_rsa
+domain_name=$DOMAIN
+certbot_email=$EMAIL
+cloudflare_token=$CF_TOKEN
+cloudflare_email=$CF_EMAIL
+mongodb_uri=$MONGODB_URI
+cert_sync_api_key=$API_KEY
+api_key=$API_KEY
+EOF
+        
+        echo ""
+        echo -e "${YELLOW}Generated inventory template: ansible/inventory.ini.new${NC}"
+        echo "Please update the IP addresses and rename to inventory.ini"
+        echo ""
+        
+        # Show Terraform outputs
+        echo "Terraform outputs:"
         tofu output vps_servers || true
         
     else
@@ -272,37 +325,54 @@ if prompt_yesno "Run Ansible to configure VPS servers?"; then
     
     # If running app deployment, sync code first
     if [[ "$TAGS" == *"app"* ]]; then
-        echo -e "${BLUE}Syncing application code to VPS servers...${NC}"
+        echo -e "${BLUE}Syncing application code to ALL VPS servers...${NC}"
         
-        # Get VPS IP from inventory (skip comment lines)
-        VPS_IP=$(grep -v "^#" "$PROJECT_ROOT/ansible/inventory.ini" | grep "ansible_host=" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
+        # Get ALL VPS IPs from inventory (skip comment lines)
+        VPS_IPS=$(grep -v "^#" "$PROJECT_ROOT/ansible/inventory.ini" | grep "ansible_host=" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
         
-        if [ -z "$VPS_IP" ]; then
-            echo -e "${RED}✗ Could not find VPS IP in inventory${NC}"
+        if [ -z "$VPS_IPS" ]; then
+            echo -e "${RED}✗ Could not find any VPS IPs in inventory${NC}"
             exit 1
         fi
         
-        echo "VPS IP: $VPS_IP"
+        # Count servers
+        SERVER_COUNT=$(echo "$VPS_IPS" | wc -l | tr -d ' ')
+        echo "Found $SERVER_COUNT server(s) in inventory"
         echo ""
         
-        # Sync code to /root first (ubuntu user may not exist on fresh servers)
-        # Ansible will handle moving it to the correct location
-        rsync -avz --delete \
-            --exclude=node_modules \
-            --exclude=.git \
-            --exclude=.env \
-            --exclude=terraform.tfstate \
-            --exclude=terraform.tfstate.backup \
-            --exclude=.terraform \
-            "$PROJECT_ROOT/" "root@$VPS_IP:/root/jrok-staging/"
+        # Sync to each server
+        SYNC_FAILED=0
+        for VPS_IP in $VPS_IPS; do
+            echo -e "${BLUE}Syncing to $VPS_IP...${NC}"
+            
+            rsync -avz --delete \
+                --exclude=node_modules \
+                --exclude=.git \
+                --exclude=.env \
+                --exclude=terraform.tfstate \
+                --exclude=terraform.tfstate.backup \
+                --exclude=.terraform \
+                --exclude=cli/node_modules \
+                --exclude=dashboard/node_modules \
+                "$PROJECT_ROOT/" "root@$VPS_IP:/root/jrok-staging/"
+            
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}✓ Code synced to $VPS_IP${NC}"
+            else
+                echo -e "${RED}✗ Failed to sync code to $VPS_IP${NC}"
+                SYNC_FAILED=1
+            fi
+            echo ""
+        done
         
-        if [ $? -eq 0 ]; then
-            echo -e "${GREEN}✓ Code synced to staging directory${NC}"
-        else
-            echo -e "${RED}✗ Failed to sync code${NC}"
-            exit 1
+        if [ $SYNC_FAILED -eq 1 ]; then
+            echo -e "${RED}✗ Some syncs failed. Check connectivity.${NC}"
+            if ! prompt_yesno "Continue anyway?"; then
+                exit 1
+            fi
         fi
         
+        echo -e "${GREEN}✓ Code synced to all servers${NC}"
         echo ""
     fi
     
@@ -320,6 +390,7 @@ if prompt_yesno "Run Ansible to configure VPS servers?"; then
         -e "koompi_client_id=$KOOMPI_CLIENT_ID" \
         -e "koompi_client_secret=$KOOMPI_CLIENT_SECRET" \
         -e "koompi_redirect_uri=$KOOMPI_REDIRECT_URI" \
+        -e "dashboard_url=$DASHBOARD_URL" \
         -v
     
     echo ""
@@ -338,16 +409,25 @@ echo "Playbook location: $PROJECT_ROOT/ansible/playbook.yml"
 echo ""
 echo "Next steps:"
 echo "  1. Verify all services are running:"
-echo "     ansible all -i ansible/inventory.ini -m command -a 'docker-compose ps'"
+echo "     ansible all -i ansible/inventory.ini -m command -a 'systemctl status jrok'"
 echo ""
 echo "  2. Check certificate status:"
 echo "     ansible all -i ansible/inventory.ini -m command -a 'sudo certbot certificates'"
 echo ""
 echo "  3. Test HTTPS access:"
-echo "     curl -v https://$DOMAIN"
+echo "     curl -v https://$DOMAIN/health"
 echo ""
-echo "  4. View logs on a server:"
-echo "     ssh ubuntu@VPS_IP 'tail -f /var/log/certbot-sync.log'"
+echo "  4. Check cluster status (multi-server):"
+echo "     curl https://$DOMAIN/cluster/stats"
+echo ""
+echo "  5. View logs on a server:"
+echo "     ssh root@VPS_IP 'journalctl -u jrok -f'"
+echo ""
+echo -e "${BLUE}Multi-Server Configuration:${NC}"
+echo "  - Each server has unique VPS_ID and TCP port range"
+echo "  - Port ranges are set in ansible/inventory.ini"
+echo "  - Nginx uses consistent hashing for session affinity"
+echo "  - MongoDB stores distributed state for cross-server routing"
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║  Deployment Complete! ✓              ║${NC}"

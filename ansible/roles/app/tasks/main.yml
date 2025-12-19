@@ -116,8 +116,13 @@
       Environment=DASHBOARD_URL={{ dashboard_url }}
       Environment=ALLOWED_ORIGINS={{ dashboard_url }},https://{{ domain_name }}
       Environment=VPS_HOST=localhost
-      Environment=VPS_NAME={{ ansible_hostname }}
+      Environment=VPS_ID={{ vps_id | default(ansible_hostname) }}
+      Environment=VPS_NAME={{ vps_id | default(ansible_hostname) }}
+      Environment=VPS_REGION={{ vps_region | default('default') }}
       Environment=NGINX_PATH=/etc/nginx/sites-available
+      # TCP port range (unique per server for multi-server setup)
+      Environment=TCP_PORT_MIN={{ tcp_port_min | default('10000') }}
+      Environment=TCP_PORT_MAX={{ tcp_port_max | default('20000') }}
 
       # Run the pre-built bundle for better performance
       ExecStart=/root/.bun/bin/bun run dist/index.js

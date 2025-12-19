@@ -22,6 +22,12 @@ export interface Collections {
   connectionLogs: Collection;
   blockedIps: Collection;
   ipAllowlists: Collection;
+  // Distributed state collections (multi-server)
+  agentConnections: Collection; // Active WebSocket connections registry
+  tcpPortAllocations: Collection; // Distributed TCP port allocation
+  rateLimits: Collection; // Distributed rate limiting
+  bandwidthUsage: Collection; // Distributed bandwidth tracking
+  serverHeartbeats: Collection; // Server health tracking
 }
 
 let collections: Collections;
@@ -55,6 +61,12 @@ export async function connectDatabase(): Promise<void> {
       connectionLogs: db.collection("connectionLogs"),
       blockedIps: db.collection("blockedIps"),
       ipAllowlists: db.collection("ipAllowlists"),
+      // Distributed state collections (multi-server)
+      agentConnections: db.collection("agentConnections"),
+      tcpPortAllocations: db.collection("tcpPortAllocations"),
+      rateLimits: db.collection("rateLimits"),
+      bandwidthUsage: db.collection("bandwidthUsage"),
+      serverHeartbeats: db.collection("serverHeartbeats"),
     };
 
     // Create indexes
@@ -158,6 +170,44 @@ async function createSecurityIndexes(): Promise<void> {
   await collections.ipAllowlists.createIndex({ tunnelId: 1 }, { unique: true });
 
   console.log("✅ Security database indexes created");
+
+  // Create distributed state indexes
+  await createDistributedStateIndexes();
+}
+
+export async function createDistributedStateIndexes(): Promise<void> {
+  // Agent connections - distributed WebSocket registry
+  await collections.agentConnections.createIndex({ agentId: 1 }, { unique: true });
+  await collections.agentConnections.createIndex({ domain: 1 }, { unique: true });
+  await collections.agentConnections.createIndex({ serverId: 1 });
+  await collections.agentConnections.createIndex({ organizationId: 1 });
+  await collections.agentConnections.createIndex({ lastHeartbeat: 1 });
+  // Auto-expire stale connections after 2 minutes of no heartbeat
+  await collections.agentConnections.createIndex({ lastHeartbeat: 1 }, { expireAfterSeconds: 120 });
+
+  // TCP port allocations - distributed port management
+  await collections.tcpPortAllocations.createIndex({ port: 1, serverId: 1 }, { unique: true });
+  await collections.tcpPortAllocations.createIndex({ tunnelId: 1 });
+  await collections.tcpPortAllocations.createIndex({ agentId: 1 });
+  await collections.tcpPortAllocations.createIndex({ serverId: 1 });
+  await collections.tcpPortAllocations.createIndex({ active: 1 });
+
+  // Distributed rate limits - sliding window counters
+  await collections.rateLimits.createIndex({ key: 1 }, { unique: true });
+  await collections.rateLimits.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+  // Bandwidth usage tracking
+  await collections.bandwidthUsage.createIndex({ tunnelId: 1, period: 1 }, { unique: true });
+  await collections.bandwidthUsage.createIndex({ organizationId: 1, period: 1 });
+  await collections.bandwidthUsage.createIndex({ period: 1 });
+
+  // Server heartbeats for health monitoring
+  await collections.serverHeartbeats.createIndex({ serverId: 1 }, { unique: true });
+  await collections.serverHeartbeats.createIndex({ lastHeartbeat: 1 });
+  // Auto-expire dead servers after 1 minute
+  await collections.serverHeartbeats.createIndex({ lastHeartbeat: 1 }, { expireAfterSeconds: 60 });
+
+  console.log("✅ Distributed state indexes created");
 }
 
 export function getCollections(): Collections {

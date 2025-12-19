@@ -59,7 +59,7 @@
     - name: Setup firewall (UFW) - TCP tunnel port range
       ufw:
         rule: allow
-        port: "10000:20000"
+        port: "{{ tcp_port_min | default('10000') }}:{{ tcp_port_max | default('20000') }}"
         proto: tcp
       tags: ["firewall"]
 
@@ -85,19 +85,22 @@
         msg: |
           ✅ Setup Complete!
           
+          Server ID: {{ vps_id | default(ansible_hostname) }}
+          Region: {{ vps_region | default('default') }}
+          
           Access your service at:
           - https://{{ domain_name }}
           - http://{{ inventory_hostname }}:3000 (direct)
           
           TCP Tunnels:
-          - Port range: 10000-20000
+          - Port range: {{ tcp_port_min | default('10000') }}-{{ tcp_port_max | default('20000') }}
           - Use --tcp flag with CLI for TCP tunnels (SSH, MongoDB, etc.)
           
           SSH into server:
           - ssh ubuntu@{{ inventory_hostname }}
           
           Check logs:
-          - docker-compose -f {{ app_dir }}/docker-compose.yml logs -f jrok
+          - journalctl -u jrok -f
           
           Certificate status:
           - sudo certbot certificates

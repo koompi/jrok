@@ -78,7 +78,7 @@ function formatRelativeTime(timestamp: number): string {
 }
 
 export function SecurityPage() {
-  const { user, currentOrg } = useAuth();
+  const { user, currentOrganization: currentOrg } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [blockIpDialog, setBlockIpDialog] = useState(false);
