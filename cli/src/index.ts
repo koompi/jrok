@@ -41,6 +41,7 @@ interface ClientConfig {
   serviceType?: 'port' | 'docker-swarm' | 'kubernetes';
   serviceName?: string;
   protocol?: 'http' | 'tcp'; // 'http' for HTTP/HTTPS/WSS, 'tcp' for raw TCP (SSH, MongoDB, etc.)
+  forceNew?: boolean; // Force creation of new subdomain even if same org owns it
 }
 
 interface ServiceInfo {
@@ -246,6 +247,9 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
   
   // Check if TCP protocol is requested
   const isTcp = args['tcp'] === 'true' || args['tcp'] === '' || process.env.JROK_PROTOCOL === 'tcp';
+  
+  // Check if force-new is requested (always create new subdomain)
+  const forceNew = args['force-new'] === 'true' || args['force-new'] === '' || args['new'] === 'true' || args['new'] === '';
 
   return {
     serverUrl: args["server"] || process.env.JROK_SERVER || storedConfig.serverUrl || DEFAULT_SERVER,
@@ -258,6 +262,7 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
     serviceType: serviceType as 'port' | 'docker-swarm' | 'kubernetes',
     serviceName: args["docker-service"] || args["k8s-service"] || process.env.JROK_SERVICE,
     protocol: isTcp ? 'tcp' : 'http',
+    forceNew,
   };
 }
 
@@ -577,6 +582,9 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   wsUrl.searchParams.set("serviceType", config.serviceType || 'port');
   wsUrl.searchParams.set("auth", config.authToken);
   wsUrl.searchParams.set("protocol", protocol);
+  if (config.forceNew) {
+    wsUrl.searchParams.set("forceNew", "true");
+  }
 
   // Set target based on service type
   if (config.serviceType === 'port') {
@@ -633,10 +641,22 @@ async function connectAgent(config: ClientConfig): Promise<void> {
         console.log(`✨ ${message.message}`);
         console.log(`🆔 Agent ID: ${message.agentId}`);
         
+        // Check if domain was modified due to conflict
+        if (message.domainModified && message.domain) {
+          console.log(`\n⚠️  Requested subdomain "${message.requestedDomain}" was taken`);
+          console.log(`📛 Using "${message.domain}" instead`);
+          // Update the displayed URL with actual domain
+          const actualFullDomain = `${message.domain}.${baseDomain}`;
+          if (protocol === 'http') {
+            console.log(`🌐 Your service is available at: https://${actualFullDomain}`);
+          }
+        }
+        
         // For TCP tunnels, display the assigned port
         if (message.tcpPort) {
           tcpPort = message.tcpPort;
           const serverHost = new URL(config.serverUrl).hostname;
+          const actualDomain = message.domain || config.domain;
           console.log(`\n🚀 TCP tunnel ready!`);
           console.log(`📡 Connect to: ${serverHost}:${tcpPort}`);
           console.log(`   Example: ssh user@${serverHost} -p ${tcpPort}`);
@@ -965,6 +985,165 @@ async function revokeApiKey(serverUrl: string, authToken: string, orgId: string,
   }
 }
 
+// ============== Custom Domain Management ==============
+
+async function registerCustomDomain(
+  serverUrl: string, 
+  authToken: string, 
+  domainName: string, 
+  email: string,
+  subdomain?: string
+): Promise<void> {
+  try {
+    const response = await fetch(`${serverUrl}/domains`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        domain: domainName,
+        certbotEmail: email,
+        subdomain,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const domain = data.domain || data;
+
+    console.log(`\n✅ Custom domain registered: ${domainName}\n`);
+    console.log(`📝 NEXT STEP: Add a CNAME record to your DNS:\n`);
+    console.log(`   ${domainName}  CNAME  ${domain.cnameTarget || domain.targetSubdomain + '.tunnel.koompi.cloud'}\n`);
+    console.log(`After adding the DNS record, verify with:`);
+    console.log(`   jrok domain status --name ${domainName}`);
+    console.log(`   jrok domain verify --name ${domainName}`);
+  } catch (error) {
+    console.error("❌ Error registering domain:", error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}
+
+async function checkDomainStatus(serverUrl: string, authToken: string, domainName: string): Promise<void> {
+  try {
+    const response = await fetch(`${serverUrl}/domains/${encodeURIComponent(domainName)}/verify-status`, {
+      headers: {
+        'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    console.log(`\n📋 CNAME Status for ${domainName}:\n`);
+    console.log(`   Expected CNAME: ${data.cnameTarget}`);
+    console.log(`   Actual CNAME:   ${data.actualCname || '(none found)'}`);
+    console.log(`   Verified:       ${data.verified ? '✅ Yes' : '❌ No'}`);
+    
+    if (!data.verified) {
+      console.log(`\n💡 Add this CNAME record to your DNS:`);
+      console.log(`   ${domainName}  CNAME  ${data.cnameTarget}\n`);
+      if (data.error) {
+        console.log(`   Error: ${data.error}`);
+      }
+    } else {
+      console.log(`\n🎉 CNAME is correctly configured!`);
+      console.log(`   Run: jrok domain verify --name ${domainName}`);
+    }
+  } catch (error) {
+    console.error("❌ Error checking domain status:", error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}
+
+async function verifyCustomDomain(serverUrl: string, authToken: string, domainName: string): Promise<void> {
+  try {
+    console.log(`\n🔍 Verifying CNAME for ${domainName}...`);
+    
+    const response = await fetch(`${serverUrl}/domains/${encodeURIComponent(domainName)}/verify`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const domain = data.domain || data;
+
+    console.log(`\n✅ Domain verified and certificate issued!\n`);
+    console.log(`   Domain: ${domain.domain}`);
+    console.log(`   Active: ${domain.active ? '✅' : '❌'}`);
+    console.log(`   Synced: ${domain.synced ? '✅' : '❌'}`);
+    if (domain.certExpiry) {
+      console.log(`   Certificate expires: ${new Date(domain.certExpiry).toLocaleDateString()}`);
+    }
+    console.log(`\n🎉 Your custom domain is now ready to use!`);
+  } catch (error) {
+    console.error("❌ Error verifying domain:", error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}
+
+async function listCustomDomains(serverUrl: string, authToken: string): Promise<void> {
+  try {
+    const response = await fetch(`${serverUrl}/domains`, {
+      headers: {
+        'Authorization': `Bearer ${authToken}`,
+        'X-API-Key': authToken,
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || error.error || `API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const domains = data.domains || data || [];
+
+    if (domains.length === 0) {
+      console.log("\n📋 No custom domains registered\n");
+      console.log("💡 Register one with: jrok domain register --name example.com --email you@email.com");
+      return;
+    }
+
+    console.log("\n📋 Custom Domains:\n");
+    console.log("Domain".padEnd(30), "CNAME Target".padEnd(35), "Status".padEnd(15), "SSL");
+    console.log("─".repeat(95));
+
+    domains.forEach((d: any) => {
+      const status = d.cnameVerified ? (d.active ? 'Active' : 'Pending SSL') : 'Awaiting CNAME';
+      const ssl = d.active && d.synced ? '✅' : '❌';
+      console.log(
+        d.domain.slice(0, 29).padEnd(30),
+        (d.cnameTarget || '-').slice(0, 34).padEnd(35),
+        status.padEnd(15),
+        ssl
+      );
+    });
+    console.log("");
+  } catch (error) {
+    console.error("❌ Error listing domains:", error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}
+
 // ============== Config Management ==============
 
 function showConfig(): void {
@@ -1101,6 +1280,11 @@ COMMANDS:
   apikey create        Create a new API key
   apikey revoke        Revoke an API key
   
+  domain register      Register a custom domain (e.g., mysite.com)
+  domain verify        Verify CNAME and issue SSL certificate
+  domain status        Check CNAME verification status
+  domain list          List all custom domains
+  
   doctor               Check for updates and system health
   whoami               Show current user/API key info
   version              Show version information
@@ -1123,12 +1307,21 @@ API KEY COMMANDS:
   jrok apikey create --org <org-id> --name "CI"  # Create API key
   jrok apikey revoke --org <org-id> --id <key>   # Revoke API key
 
+CUSTOM DOMAIN COMMANDS:
+  jrok domain register --name mysite.com --email me@email.com
+  jrok domain status --name mysite.com           # Check CNAME
+  jrok domain verify --name mysite.com           # Verify & issue SSL
+  jrok domain list                               # List all domains
+
 CONNECT EXAMPLES:
   # Quick start - HTTP/HTTPS tunnel (auto subdomain)
   jrok --port 3000
   
   # With custom subdomain
   jrok --port 3000 --domain myapp
+
+  # Force new subdomain (creates myapp-a7b3 if myapp exists)
+  jrok --port 3000 --domain myapp --force-new
 
   # TCP tunnel for SSH access
   jrok --tcp --port 22 --domain ssh-server
@@ -1152,10 +1345,13 @@ OPTIONS:
   --port             Local port (default: 3000)
   --host             Local host (default: localhost)
   --tcp              Enable TCP tunneling (for SSH, MongoDB, etc.)
+  --force-new        Force new subdomain (add suffix even if you own the domain)
   --docker-service   Docker Swarm service name
   --k8s-service      Kubernetes service:port
   --org              Organization ID
-  --name             Name for org/apikey
+  --name             Name for org/apikey/domain
+  --email            Email for SSL certificate
+  --subdomain        Custom subdomain for domain mapping
   --id               ID for apikey operations
 
 ENVIRONMENT VARIABLES:
@@ -1335,6 +1531,61 @@ async function main(): Promise<void> {
             console.log("\nOptions:");
             console.log("  --org <id>            Organization ID (or use default)");
             console.log("  --permissions <p1,p2> Comma-separated permissions");
+        }
+        break;
+      }
+
+      case "domain": {
+        const { serverUrl, authToken } = getServerAndAuth();
+        
+        switch (subcommand) {
+          case "register": {
+            if (!args.name) {
+              throw new Error("Missing domain name. Use --name example.com");
+            }
+            if (!args.email) {
+              throw new Error("Missing certbot email. Use --email you@example.com");
+            }
+            await registerCustomDomain(serverUrl, authToken, args.name, args.email, args.subdomain);
+            break;
+          }
+          case "verify": {
+            if (!args.name) {
+              throw new Error("Missing domain name. Use --name example.com");
+            }
+            await verifyCustomDomain(serverUrl, authToken, args.name);
+            break;
+          }
+          case "status": {
+            if (!args.name) {
+              throw new Error("Missing domain name. Use --name example.com");
+            }
+            await checkDomainStatus(serverUrl, authToken, args.name);
+            break;
+          }
+          case "list": {
+            await listCustomDomains(serverUrl, authToken);
+            break;
+          }
+          default:
+            console.log("Usage: jrok domain <register|verify|status|list>");
+            console.log("");
+            console.log("Custom Domain Management:");
+            console.log("  register --name <domain> --email <email>  Register a custom domain");
+            console.log("  verify --name <domain>                     Verify CNAME and issue certificate");
+            console.log("  status --name <domain>                     Check CNAME verification status");
+            console.log("  list                                       List all custom domains");
+            console.log("");
+            console.log("Options:");
+            console.log("  --name <domain>       Domain name (e.g., example.com)");
+            console.log("  --email <email>       Email for SSL certificate");
+            console.log("  --subdomain <name>    Custom subdomain to map to (optional)");
+            console.log("");
+            console.log("Example flow:");
+            console.log("  1. jrok domain register --name mysite.com --email me@email.com");
+            console.log("  2. Add CNAME record: mysite.com -> mysite-com.tunnel.koompi.cloud");
+            console.log("  3. jrok domain status --name mysite.com   # Check CNAME");
+            console.log("  4. jrok domain verify --name mysite.com   # Issue certificate");
         }
         break;
       }

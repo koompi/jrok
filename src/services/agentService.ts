@@ -1,5 +1,5 @@
 import type { Agent, AgentMessage, TunnelProtocol } from "../types/index";
-import { generateId } from "../utils/helpers";
+import { generateId, generateShortSuffix } from "../utils/helpers";
 import * as tunnelService from "./tunnelService";
 import * as activityService from "./activityService";
 import { getTunnelByDomain, invalidateTunnelCache } from "../utils/database";
@@ -9,20 +9,101 @@ import { getCollections } from "../utils/mongodb";
 const agents = new Map<string, { agent: Agent; socket: WebSocket }>();
 const agentsByDomain = new Map<string, string>(); // domain -> agentId
 
-export function registerAgent(
-  socket: WebSocket,
-  domain: string,
-  localPort: number,
-  localHost: string,
-  clientIp?: string,
+export interface RegisterAgentOptions {
+  socket: WebSocket;
+  domain: string;
+  localPort: number;
+  localHost: string;
+  clientIp?: string;
+  organizationId?: string;
+  apiKeyId?: string;
+  protocol?: TunnelProtocol;
+  forceNew?: boolean; // Always create new subdomain even if same org owns it
+}
+
+export interface RegisterAgentResult {
+  agent: Agent;
+  finalDomain: string;
+  wasModified: boolean; // True if domain had suffix added
+}
+
+/**
+ * Check if a domain is available or owned by the same organization
+ * Returns: { available: true } if domain is free or owned by same org (and not forceNew)
+ *          { available: false, ownedByOrg: orgId } if domain is taken by different org
+ */
+async function checkDomainAvailability(
+  domain: string, 
   organizationId?: string,
-  apiKeyId?: string,
-  protocol: TunnelProtocol = 'http'
-): Agent {
+  forceNew?: boolean
+): Promise<{ available: boolean; ownedByOrg?: string }> {
+  const existingTunnel = await getTunnelByDomain(domain);
+  
+  if (!existingTunnel) {
+    return { available: true };
+  }
+  
+  // If forceNew is set, always treat as unavailable to create new subdomain
+  if (forceNew) {
+    return { available: false, ownedByOrg: existingTunnel.organizationId };
+  }
+  
+  // If same organization owns it, allow reuse
+  if (organizationId && existingTunnel.organizationId === organizationId) {
+    return { available: true };
+  }
+  
+  // Different org or no org - domain is taken
+  return { available: false, ownedByOrg: existingTunnel.organizationId };
+}
+
+/**
+ * Generate a unique domain by adding a random suffix
+ * Keeps trying until a unique domain is found (max 10 attempts)
+ */
+async function generateUniqueDomain(baseDomain: string): Promise<string> {
+  for (let i = 0; i < 10; i++) {
+    const suffix = generateShortSuffix();
+    const newDomain = `${baseDomain}-${suffix}`;
+    const existingTunnel = await getTunnelByDomain(newDomain);
+    if (!existingTunnel) {
+      return newDomain;
+    }
+  }
+  // Fallback: use timestamp if random keeps colliding (very unlikely)
+  return `${baseDomain}-${Date.now().toString(36)}`;
+}
+
+export async function registerAgent(options: RegisterAgentOptions): Promise<RegisterAgentResult> {
+  const {
+    socket,
+    domain: requestedDomain,
+    localPort,
+    localHost,
+    clientIp,
+    organizationId,
+    apiKeyId,
+    protocol = 'http',
+    forceNew = false,
+  } = options;
+
+  // Check domain availability
+  const availability = await checkDomainAvailability(requestedDomain, organizationId, forceNew);
+  
+  let finalDomain = requestedDomain;
+  let wasModified = false;
+  
+  if (!availability.available) {
+    // Domain is taken - generate unique domain with suffix
+    finalDomain = await generateUniqueDomain(requestedDomain);
+    wasModified = true;
+    console.log(`📛 Domain "${requestedDomain}" taken, using "${finalDomain}" instead`);
+  }
+
   const id = generateId();
   const agent: Agent = {
     id,
-    domain,
+    domain: finalDomain,
     localPort,
     localHost,
     connectedAt: Date.now(),
@@ -35,7 +116,7 @@ export function registerAgent(
   };
 
   agents.set(id, { agent, socket });
-  agentsByDomain.set(domain, id);
+  agentsByDomain.set(finalDomain, id);
 
   // Automatically create tunnel for the agent
   createTunnelForAgent(agent, id, organizationId).catch((error) => {
@@ -44,12 +125,12 @@ export function registerAgent(
 
   // Log activity for agent connection
   if (organizationId) {
-    activityService.logAgentConnected(organizationId, id, domain, clientIp).catch((err) => {
+    activityService.logAgentConnected(organizationId, id, finalDomain, clientIp).catch((err) => {
       console.error("Failed to log agent connected activity:", err);
     });
   }
 
-  return agent;
+  return { agent, finalDomain, wasModified };
 }
 
 async function createTunnelForAgent(agent: Agent, agentId: string, organizationId?: string): Promise<void> {

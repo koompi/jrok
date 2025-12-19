@@ -49,6 +49,12 @@ export interface CustomDomain {
   active: boolean;
   synced: boolean; // true if cert synced to all VPS servers
   lastSyncedAt?: number;
+  // CNAME verification fields
+  targetSubdomain?: string; // The jrok subdomain to point to, e.g., "jersen-app"
+  cnameTarget?: string; // Full CNAME target, e.g., "jersen-app.tunnel.koompi.cloud"
+  cnameVerified?: boolean; // True if CNAME has been verified
+  cnameVerifiedAt?: number; // When CNAME was verified
+  organizationId?: string; // Owner organization
 }
 
 export interface Tunnel {
@@ -90,6 +96,8 @@ export interface RegisterCustomDomainRequest {
   domain: string; // e.g., client1.com
   certbotEmail: string;
   cloudflareToken?: string; // for auto DNS validation
+  subdomain?: string; // optional: custom subdomain to use (auto-generated from domain if not provided)
+  organizationId?: string; // owner organization
 }
 
 export interface TunnelResponse {

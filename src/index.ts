@@ -275,46 +275,69 @@ async function startServer() {
           const organizationId = ws.data?.organizationId;
           const apiKeyId = ws.data?.apiKeyId;
           const protocol: TunnelProtocol = ws.data?.protocol || 'http';
+          const forceNew = ws.data?.forceNew || false;
 
           if (!domain || !localPort) return;
 
-          // Register agent with organization context
-          const agent = agentService.registerAgent(ws, domain, localPort, localHost, clientIp, organizationId, apiKeyId, protocol);
-          console.log(
-            `✅ Agent connected: ${domain} (${localHost}:${localPort}) [${agent.id}] protocol: ${protocol}`
-          );
+          // Register agent with organization context (async - handles domain conflicts)
+          agentService.registerAgent({
+            socket: ws,
+            domain,
+            localPort,
+            localHost,
+            clientIp,
+            organizationId,
+            apiKeyId,
+            protocol,
+            forceNew,
+          }).then(({ agent, finalDomain, wasModified }) => {
+            console.log(
+              `✅ Agent connected: ${finalDomain} (${localHost}:${localPort}) [${agent.id}] protocol: ${protocol}${wasModified ? ` (requested: ${domain})` : ''}`
+            );
 
-          // Register agent for TCP forwarding if it's a TCP tunnel
-          if (protocol === 'tcp') {
-            tcpService.registerAgentConnection(agent.id, ws);
-          }
+            // Register agent for TCP forwarding if it's a TCP tunnel
+            if (protocol === 'tcp') {
+              tcpService.registerAgentConnection(agent.id, ws);
+            }
 
-          // Send welcome message
-          ws.send(
-            JSON.stringify({
-              type: "welcome",
-              agentId: agent.id,
-              message: "Connected to jrok",
-              protocol,
-            })
-          );
+            // Send welcome message with final domain info
+            ws.send(
+              JSON.stringify({
+                type: "welcome",
+                agentId: agent.id,
+                message: "Connected to jrok",
+                protocol,
+                domain: finalDomain,
+                requestedDomain: wasModified ? domain : undefined,
+                domainModified: wasModified,
+              })
+            );
 
-          // For TCP tunnels, send the allocated port after tunnel is created
-          if (protocol === 'tcp') {
-            // Wait for tunnel creation and then send TCP port info
-            setTimeout(async () => {
-              const allocation = tcpService.getPortAllocation(agent.tunnelId || '');
-              if (allocation) {
-                ws.send(JSON.stringify({
-                  type: "welcome",
-                  agentId: agent.id,
-                  message: "TCP tunnel ready",
-                  protocol,
-                  tcpPort: allocation.port,
-                }));
-              }
-            }, 1000); // Wait 1 second for tunnel creation
-          }
+            // For TCP tunnels, send the allocated port after tunnel is created
+            if (protocol === 'tcp') {
+              // Wait for tunnel creation and then send TCP port info
+              setTimeout(async () => {
+                const allocation = tcpService.getPortAllocation(agent.tunnelId || '');
+                if (allocation) {
+                  ws.send(JSON.stringify({
+                    type: "welcome",
+                    agentId: agent.id,
+                    message: "TCP tunnel ready",
+                    protocol,
+                    tcpPort: allocation.port,
+                    domain: finalDomain,
+                  }));
+                }
+              }, 1000); // Wait 1 second for tunnel creation
+            }
+          }).catch((error) => {
+            console.error(`❌ Failed to register agent for ${domain}:`, error);
+            ws.send(JSON.stringify({
+              type: "error",
+              message: `Failed to register agent: ${error instanceof Error ? error.message : String(error)}`,
+            }));
+            ws.close(1011, "Failed to register agent");
+          });
         },
 
         message(ws: any, data: string | Buffer) {
@@ -1196,6 +1219,18 @@ async function startServer() {
     if (path.startsWith("/domains/") && path.endsWith("/resync") && method === "POST") {
       const domain = path.split("/")[2];
       return await domainHandler.handleResyncDomain(decodeURIComponent(domain));
+    }
+
+    // Check CNAME verification status
+    if (path.startsWith("/domains/") && path.endsWith("/verify-status") && method === "GET") {
+      const domain = path.split("/")[2];
+      return await domainHandler.handleCheckCnameStatus(decodeURIComponent(domain));
+    }
+
+    // Verify CNAME and issue certificate
+    if (path.startsWith("/domains/") && path.endsWith("/verify") && method === "POST") {
+      const domain = path.split("/")[2];
+      return await domainHandler.handleVerifyAndIssueCertificate(decodeURIComponent(domain));
     }
 
     if (path.startsWith("/domains/") && path.endsWith("/transfer") && method === "POST") {

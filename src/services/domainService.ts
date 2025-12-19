@@ -4,11 +4,70 @@ import * as vpsService from "./vpsService";
 import * as backupUtils from "../utils/backupUtils";
 import * as notificationService from "./notificationService";
 import * as certSyncService from "./certificateSyncService";
-import { generateId } from "../utils/helpers";
+import { generateId, sanitizeDomainToSubdomain, generateShortSuffix } from "../utils/helpers";
+import { getTunnelByDomain } from "../utils/database";
+import dns from "dns/promises";
+
+// Get base domain from environment
+const BASE_DOMAIN = process.env.BASE_DOMAIN || "tunnel.koompi.cloud";
 
 /**
- * Register a custom domain and automatically issue wildcard certificate
- * Syncs certificate across all healthy VPS servers
+ * Verify that a domain's CNAME record points to the expected target
+ */
+export async function verifyCname(domain: string, expectedTarget: string): Promise<{ verified: boolean; actualCname?: string; error?: string }> {
+  try {
+    const records = await dns.resolveCname(domain);
+    const normalizedExpected = expectedTarget.toLowerCase().replace(/\.$/, '');
+    
+    for (const record of records) {
+      const normalizedRecord = record.toLowerCase().replace(/\.$/, '');
+      if (normalizedRecord === normalizedExpected) {
+        return { verified: true, actualCname: record };
+      }
+    }
+    
+    return { 
+      verified: false, 
+      actualCname: records[0] || undefined,
+      error: `CNAME points to "${records[0] || 'nothing'}" instead of "${expectedTarget}"` 
+    };
+  } catch (error: any) {
+    if (error.code === 'ENODATA' || error.code === 'ENOTFOUND') {
+      return { verified: false, error: `No CNAME record found for ${domain}` };
+    }
+    return { verified: false, error: `DNS lookup failed: ${error.message}` };
+  }
+}
+
+/**
+ * Generate a unique subdomain for a custom domain
+ * @param baseName - The base name to use (e.g., "jersen-app" from "jersen.app")
+ * @returns A unique subdomain that doesn't conflict with existing tunnels
+ */
+async function generateUniqueSubdomain(baseName: string): Promise<string> {
+  // First try the base name without suffix
+  const existingTunnel = await getTunnelByDomain(baseName);
+  if (!existingTunnel) {
+    return baseName;
+  }
+  
+  // If taken, add random suffix
+  for (let i = 0; i < 10; i++) {
+    const suffix = generateShortSuffix();
+    const newName = `${baseName}-${suffix}`;
+    const existing = await getTunnelByDomain(newName);
+    if (!existing) {
+      return newName;
+    }
+  }
+  
+  // Fallback: use timestamp
+  return `${baseName}-${Date.now().toString(36)}`;
+}
+
+/**
+ * Register a custom domain - creates pending domain awaiting CNAME verification
+ * Does NOT issue certificate until CNAME is verified
  */
 export async function registerCustomDomain(
   request: RegisterCustomDomainRequest
@@ -19,6 +78,11 @@ export async function registerCustomDomain(
     throw new Error(`Domain ${request.domain} is already registered`);
   }
 
+  // Generate subdomain: use provided or auto-generate from domain
+  const baseSubdomain = request.subdomain || sanitizeDomainToSubdomain(request.domain);
+  const targetSubdomain = await generateUniqueSubdomain(baseSubdomain);
+  const cnameTarget = `${targetSubdomain}.${BASE_DOMAIN}`;
+
   const domain: CustomDomain = {
     id: generateId(),
     domain: request.domain,
@@ -28,14 +92,55 @@ export async function registerCustomDomain(
     createdAt: Date.now(),
     active: false, // Will be true once cert is issued
     synced: false,
+    // New verification fields
+    targetSubdomain,
+    cnameTarget,
+    cnameVerified: false,
+    organizationId: request.organizationId,
   };
 
-  try {
-    // Save domain to database (before issuing cert)
-    await db.createCustomDomain(domain);
+  // Save domain to database (pending verification)
+  await db.createCustomDomain(domain);
 
+  console.log(`📝 Custom domain registered (pending verification): ${request.domain} -> ${cnameTarget}`);
+  
+  return domain;
+}
+
+/**
+ * Verify CNAME and issue certificate if verification passes
+ */
+export async function verifyAndIssueCertificate(domainName: string): Promise<CustomDomain> {
+  const domain = await db.getCustomDomainByName(domainName);
+  if (!domain) {
+    throw new Error(`Domain ${domainName} not found`);
+  }
+
+  if (domain.active && domain.synced) {
+    throw new Error(`Domain ${domainName} is already active with a valid certificate`);
+  }
+
+  if (!domain.cnameTarget) {
+    throw new Error(`Domain ${domainName} has no CNAME target configured`);
+  }
+
+  // Verify CNAME
+  const verification = await verifyCname(domain.domain, domain.cnameTarget);
+  if (!verification.verified) {
+    throw new Error(`CNAME verification failed: ${verification.error}. Please add a CNAME record: ${domain.domain} -> ${domain.cnameTarget}`);
+  }
+
+  console.log(`✅ CNAME verified for ${domain.domain} -> ${verification.actualCname}`);
+
+  // Update verification status
+  await db.updateCustomDomainByName(domainName, {
+    cnameVerified: true,
+    cnameVerifiedAt: Date.now(),
+  });
+
+  try {
     // Issue wildcard certificate for this domain
-    const certPath = await issueCertificate(request.domain, request.certbotEmail, request.cloudflareToken);
+    const certPath = await issueCertificate(domain.domain, domain.certbotEmail, domain.cloudflareToken);
 
     // Attempt to become leader and upload certificate to MongoDB
     const serverId = process.env.SERVER_ID || process.env.HOSTNAME || "control-1";
@@ -55,7 +160,7 @@ export async function registerCustomDomain(
       const privkeyB64 = Buffer.from(privkeyPem).toString('base64');
       
       await certSyncService.uploadCertificateToMongoDB(
-        request.domain,
+        domain.domain,
         certB64,
         chainB64,
         fullchainB64,
@@ -68,7 +173,7 @@ export async function registerCustomDomain(
 
     // Update domain as active and synced
     const expiry = Date.now() + 90 * 24 * 60 * 60 * 1000; // 90 days
-    await db.updateCustomDomainByName(request.domain, {
+    await db.updateCustomDomainByName(domainName, {
       active: true,
       synced: true,
       certPath,
@@ -76,17 +181,46 @@ export async function registerCustomDomain(
       lastSyncedAt: Date.now(),
     });
 
-    const updatedDomain = await db.getCustomDomainByName(request.domain) as CustomDomain;
+    const updatedDomain = await db.getCustomDomainByName(domainName) as CustomDomain;
 
     // Send Telegram notification
-    await notificationService.notifyCertIssued(request.domain, expiry);
+    await notificationService.notifyCertIssued(domainName, expiry);
 
     return updatedDomain;
   } catch (error) {
-    // Clean up if something fails
-    await db.deleteCustomDomain(domain.id);
-    throw error;
+    // Don't delete domain on cert failure - user can retry
+    throw new Error(`Certificate issuance failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+/**
+ * Check CNAME verification status without issuing certificate
+ */
+export async function checkCnameStatus(domainName: string): Promise<{
+  domain: string;
+  cnameTarget: string;
+  verified: boolean;
+  actualCname?: string;
+  error?: string;
+}> {
+  const domain = await db.getCustomDomainByName(domainName);
+  if (!domain) {
+    throw new Error(`Domain ${domainName} not found`);
+  }
+
+  if (!domain.cnameTarget) {
+    throw new Error(`Domain ${domainName} has no CNAME target configured`);
+  }
+
+  const verification = await verifyCname(domain.domain, domain.cnameTarget);
+  
+  return {
+    domain: domain.domain,
+    cnameTarget: domain.cnameTarget,
+    verified: verification.verified,
+    actualCname: verification.actualCname,
+    error: verification.error,
+  };
 }
 
 /**

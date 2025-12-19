@@ -13,6 +13,7 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   const localHost = url.searchParams.get("localHost") || "localhost";
   const authToken = url.searchParams.get("auth");
   const protocol = (url.searchParams.get("protocol") || "http") as TunnelProtocol;
+  const forceNew = url.searchParams.get("forceNew") === "true";
 
   if (!domain || !localPort || !authToken) {
     return new Response("Missing required parameters: domain, localPort, and auth are required", { status: 400 });
@@ -52,6 +53,7 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
       organizationId: authResult.organizationId,
       apiKeyId: authResult.apiKeyId,
       protocol,
+      forceNew,
     },
   });
 

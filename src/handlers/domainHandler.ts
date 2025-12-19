@@ -467,3 +467,78 @@ function isValidDomain(domain: string): boolean {
 
   return true;
 }
+
+/**
+ * Check CNAME verification status for a domain
+ * GET /domains/:domain/verify-status
+ */
+export async function handleCheckCnameStatus(domain: string): Promise<Response> {
+  try {
+    if (!domain) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          message: "Domain name is required",
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    const status = await domainService.checkCnameStatus(domain);
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        ...status,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return new Response(
+      JSON.stringify({
+        success: false,
+        message: errorMsg,
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
+/**
+ * Verify CNAME and issue certificate
+ * POST /domains/:domain/verify
+ */
+export async function handleVerifyAndIssueCertificate(domain: string): Promise<Response> {
+  try {
+    if (!domain) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          message: "Domain name is required",
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    const updatedDomain = await domainService.verifyAndIssueCertificate(domain);
+
+    return new Response(
+      JSON.stringify({
+        success: true,
+        message: `Certificate issued for ${domain}`,
+        domain: updatedDomain,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return new Response(
+      JSON.stringify({
+        success: false,
+        message: errorMsg,
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
