@@ -1,6 +1,7 @@
 import * as authService from "../services/authService";
 import * as organizationService from "../services/organizationService";
 import * as apiKeyService from "../services/apiKeyService";
+import * as planLimitService from "../services/planLimitService";
 import type { ApiKeyPermission } from "../types/index";
 
 // Helper to create JSON response
@@ -225,6 +226,17 @@ export async function handleAddMember(req: Request, orgId: string): Promise<Resp
 
   if (!organizationService.isAdminOrOwner(organization, authContext.user.id)) {
     return jsonResponse({ success: false, message: "Forbidden" }, 403);
+  }
+
+  // Check member limit
+  const memberLimitCheck = await planLimitService.checkMemberLimit(orgId);
+  if (!memberLimitCheck.allowed) {
+    return jsonResponse({ 
+      success: false, 
+      message: memberLimitCheck.reason,
+      current: memberLimitCheck.current,
+      limit: memberLimitCheck.limit
+    }, 402); // Payment Required
   }
 
   try {

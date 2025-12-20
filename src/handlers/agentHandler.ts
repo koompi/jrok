@@ -2,6 +2,7 @@ import type { AgentMessage, TunnelProtocol } from "../types/index";
 import * as agentService from "../services/agentService";
 import { validateApiKeyForAgent } from "../services/authService";
 import * as monitoringService from "../services/monitoringService";
+import * as planLimitService from "../services/planLimitService";
 
 export async function handleAgentUpgrade(req: Request, server: any): Promise<Response> {
   if (req.headers.get("upgrade") !== "websocket") {
@@ -42,6 +43,48 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   if (!authResult.valid) {
     console.warn(`🚫 Agent auth failed for domain ${domain}: ${authResult.reason}`);
     return new Response(`Authentication failed: ${authResult.reason}`, { status: 401 });
+  }
+
+  // ====== PLAN LIMIT CHECK: Tunnel Count ======
+  if (authResult.organizationId) {
+    const tunnelLimit = await planLimitService.checkTunnelLimit(authResult.organizationId);
+    if (!tunnelLimit.allowed) {
+      console.warn(`🚫 Tunnel limit reached for org ${authResult.organizationId}: ${tunnelLimit.current}/${tunnelLimit.limit}`);
+      monitoringService.addLog('warn', 'plan_limits', `Tunnel limit reached`, { 
+        organizationId: authResult.organizationId, 
+        current: tunnelLimit.current, 
+        limit: tunnelLimit.limit,
+        domain 
+      });
+      return new Response(
+        JSON.stringify({ 
+          error: tunnelLimit.reason,
+          current: tunnelLimit.current,
+          limit: tunnelLimit.limit,
+        }),
+        { status: 402, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    
+    // ====== PLAN LIMIT CHECK: Bandwidth ======
+    const bandwidthLimit = await planLimitService.checkBandwidthLimit(authResult.organizationId);
+    if (!bandwidthLimit.allowed || bandwidthLimit.suspended) {
+      console.warn(`🚫 Bandwidth limit exceeded for org ${authResult.organizationId}`);
+      monitoringService.addLog('warn', 'plan_limits', `Bandwidth limit exceeded`, { 
+        organizationId: authResult.organizationId, 
+        current: bandwidthLimit.current, 
+        limit: bandwidthLimit.limit,
+        domain 
+      });
+      return new Response(
+        JSON.stringify({ 
+          error: bandwidthLimit.reason,
+          currentGb: bandwidthLimit.current,
+          limitGb: bandwidthLimit.limit,
+        }),
+        { status: 402, headers: { "Content-Type": "application/json" } }
+      );
+    }
   }
 
   // Domain name validation to prevent injection

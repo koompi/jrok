@@ -1333,7 +1333,7 @@ async function startServer() {
           // Get plan tier for rate limit calculation (defaults to 'free')
           const planTier = agent.organizationId ? await getPlanTierForOrg(agent.organizationId) : 'free';
           
-          // Check security limits
+          // Check security limits (rate limits)
           const securityCheck = await securityService.checkHttpRequest(
             tunnelId || subdomain,
             agent.organizationId,
@@ -1355,6 +1355,25 @@ async function startServer() {
               }),
               { status: 429, headers }
             ));
+          }
+
+          // ============ Bandwidth Limit Check ============
+          // Block requests if organization has exceeded monthly bandwidth
+          if (agent.organizationId) {
+            const bandwidthCheck = securityService.checkMonthlyBandwidth(agent.organizationId, planTier);
+            if (!bandwidthCheck.allowed) {
+              console.warn(`🚫 Bandwidth limit exceeded for org ${agent.organizationId}: ${(bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2)}GB / ${(bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2)}GB`);
+              return addCors(new Response(
+                JSON.stringify({
+                  success: false,
+                  message: "Monthly bandwidth limit exceeded. Please upgrade your plan.",
+                  usedGb: (bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2),
+                  limitGb: (bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2),
+                  percentUsed: bandwidthCheck.percentUsed.toFixed(1),
+                }),
+                { status: 402, headers: { "Content-Type": "application/json" } }
+              ));
+            }
           }
 
           // Track HTTP connection
