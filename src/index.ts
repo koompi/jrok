@@ -32,6 +32,27 @@ const pendingRequests = new Map<string, {
   tunnelId?: string;
 }>();
 
+// Memory safety: Limit pending requests to prevent memory exhaustion
+const MAX_PENDING_REQUESTS = 10000;
+
+function cleanupOldestPendingRequest() {
+  if (pendingRequests.size >= MAX_PENDING_REQUESTS) {
+    // Remove oldest entry
+    const firstKey = pendingRequests.keys().next().value;
+    if (firstKey) {
+      const entry = pendingRequests.get(firstKey);
+      if (entry) {
+        clearTimeout(entry.timeout);
+        entry.resolve(new Response(
+          JSON.stringify({ success: false, message: "Server overloaded" }),
+          { status: 503, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+      pendingRequests.delete(firstKey);
+    }
+  }
+}
+
 // Handle WebSocket tunnel (client WebSocket -> agent -> local service WebSocket)
 async function handleWebSocketTunnel(
   req: Request, 
@@ -101,6 +122,9 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
       const bytesIn = new TextEncoder().encode(body).length + 
                       new TextEncoder().encode(JSON.stringify(headers)).length;
       
+      // Memory safety: Cleanup oldest request if map is full
+      cleanupOldestPendingRequest();
+      
       // Store pending request with bandwidth tracking info
       pendingRequests.set(requestId, { resolve, timeout, bytesIn, agent, tunnelId });
       
@@ -132,6 +156,39 @@ const config: TunnelConfig = {
   apiKey: process.env.API_KEY || "your-secret-key-change-this",
 };
 
+// Production environment validation
+if (process.env.NODE_ENV === "production") {
+  const requiredEnvVars = [
+    'MONGODB_URI',
+    'JWT_SECRET',
+    'BASE_DOMAIN',
+    'KOOMPI_CLIENT_ID',
+    'KOOMPI_CLIENT_SECRET',
+  ];
+  
+  const missing = requiredEnvVars.filter(key => !process.env[key]);
+  
+  if (missing.length > 0) {
+    console.error("❌ CRITICAL: Missing required environment variables in production:");
+    missing.forEach(key => console.error(`   - ${key}`));
+    console.error("\nPlease set all required environment variables before starting in production.");
+    process.exit(1);
+  }
+  
+  // Check for default/weak credentials
+  if (config.apiKey === "your-secret-key-change-this") {
+    console.error("❌ CRITICAL: Default API_KEY detected in production!");
+    console.error("   Please set a secure API_KEY environment variable.");
+    process.exit(1);
+  }
+  
+  if ((process.env.JWT_SECRET || "").length < 32) {
+    console.error("❌ CRITICAL: JWT_SECRET must be at least 32 characters in production!");
+    console.error("   Generate a secure secret: openssl rand -base64 64");
+    process.exit(1);
+  }
+}
+
 // Initialize tunnel service with config
 setConfig(config);
 
@@ -141,12 +198,37 @@ initTelegram();
 // Cache for organization plan tiers (avoid DB lookup on every request)
 const orgPlanCache = new Map<string, { tier: string; timestamp: number }>();
 const PLAN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const MAX_PLAN_CACHE_SIZE = 10000; // Prevent unbounded growth
+
+// Periodic cleanup of expired plan cache entries
+setInterval(() => {
+  const now = Date.now();
+  let cleanedCount = 0;
+  for (const [key, value] of orgPlanCache.entries()) {
+    if (now - value.timestamp > PLAN_CACHE_TTL) {
+      orgPlanCache.delete(key);
+      cleanedCount++;
+    }
+  }
+  if (cleanedCount > 0) {
+    console.log(`🧹 Plan cache cleanup: ${cleanedCount} expired entries removed`);
+  }
+}, 10 * 60 * 1000); // Run every 10 minutes
 
 async function getPlanTierForOrg(organizationId: string): Promise<string> {
   // Check cache first
   const cached = orgPlanCache.get(organizationId);
   if (cached && Date.now() - cached.timestamp < PLAN_CACHE_TTL) {
     return cached.tier;
+  }
+  
+  // Memory safety: Prevent unbounded cache growth
+  if (orgPlanCache.size >= MAX_PLAN_CACHE_SIZE) {
+    // Remove oldest entry
+    const firstKey = orgPlanCache.keys().next().value;
+    if (firstKey) {
+      orgPlanCache.delete(firstKey);
+    }
   }
   
   try {

@@ -107,7 +107,7 @@ export async function exchangeCodeForTokens(
   }
 
   console.log("Exchanging code for tokens...", { 
-    code: code.substring(0, 10) + "...", 
+    hasCode: !!code,
     redirect_uri: KOOMPI_REDIRECT_URI,
     has_verifier: !!codeVerifier 
   });
@@ -129,8 +129,9 @@ export async function exchangeCodeForTokens(
   const data = await response.json();
 
   if (!response.ok) {
-    console.error("Token exchange failed:", data);
-    throw new Error(data.error || data.message || "Token exchange failed");
+    console.error("Token exchange failed:", { status: response.status, hasError: !!data.error });
+    // Generic error message for security - don't expose OAuth details
+    throw new Error("Authentication failed. Please try again.");
   }
 
   return data as KoompiOAuthTokens;
