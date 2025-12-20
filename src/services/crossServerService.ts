@@ -257,7 +257,7 @@ export async function getBestServerForNewConnection(): Promise<ServerHealth | nu
   // Sort by agent count (ascending) - prefer servers with fewer connections
   servers.sort((a, b) => a.agentCount - b.agentCount);
 
-  return servers[0];
+  return servers[0] || null;
 }
 
 /**
@@ -299,8 +299,38 @@ export async function getClusterStats(): Promise<{
 export async function findServerForDomain(subdomain: string): Promise<RouteResult> {
   const collections = getCollections();
   
-  // Find tunnel for this domain
-  const tunnel = await collections.tunnels.findOne({ subdomain, connected: true });
+  // First check agentConnections (most reliable for active connections)
+  const agentConn = await collections.agentConnections.findOne({ 
+    domain: subdomain, 
+    active: true 
+  });
+  
+  if (agentConn) {
+    // Check if agent is on this server
+    if (agentConn.serverId === SERVER_ID) {
+      return { isLocal: true };
+    }
+    
+    // Get server info for cross-server routing
+    const server = await getServer(agentConn.serverId);
+    if (server && server.healthy) {
+      return {
+        isLocal: false,
+        targetServer: {
+          serverId: server.serverId,
+          serverHost: server.serverHost,
+          serverPort: server.serverPort,
+        },
+        proxyUrl: `http://${server.serverHost}:${server.serverPort}`,
+      };
+    }
+  }
+  
+  // Fallback: check tunnels collection (for cases where agent just connected)
+  const tunnel = await collections.tunnels.findOne({ 
+    domain: subdomain, 
+    active: true 
+  });
   
   if (!tunnel) {
     return { isLocal: false };
