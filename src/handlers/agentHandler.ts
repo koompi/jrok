@@ -1,8 +1,9 @@
-import type { AgentMessage, TunnelProtocol } from "../types/index";
+import type { AgentMessage, TunnelProtocol, TunnelIpSecurity } from "../types/index";
 import * as agentService from "../services/agentService";
 import { validateApiKeyForAgent } from "../services/authService";
 import * as monitoringService from "../services/monitoringService";
 import * as planLimitService from "../services/planLimitService";
+import * as securityService from "../services/securityService";
 
 export async function handleAgentUpgrade(req: Request, server: any): Promise<Response> {
   if (req.headers.get("upgrade") !== "websocket") {
@@ -16,6 +17,11 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   const authToken = url.searchParams.get("auth");
   const protocol = (url.searchParams.get("protocol") || "http") as TunnelProtocol;
   const forceNew = url.searchParams.get("forceNew") === "true";
+  
+  // IP Security parameters from CLI
+  const ipSecurityMode = url.searchParams.get("ipSecurityMode") as TunnelIpSecurity['mode'] | null;
+  const allowedIpsParam = url.searchParams.get("allowedIps");
+  const blockedIpsParam = url.searchParams.get("blockedIps");
 
   const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
 
@@ -110,6 +116,12 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
       apiKeyId: authResult.apiKeyId,
       protocol,
       forceNew,
+      // IP Security settings from CLI
+      ipSecurity: ipSecurityMode ? {
+        mode: ipSecurityMode,
+        allowedIps: allowedIpsParam ? allowedIpsParam.split(',').map(ip => ip.trim()) : [],
+        blockedIps: blockedIpsParam ? blockedIpsParam.split(',').map(ip => ip.trim()) : [],
+      } : undefined,
     },
   });
 

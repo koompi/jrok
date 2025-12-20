@@ -306,6 +306,47 @@ class ApiClient {
     });
   }
 
+  // ============ New IP Security API ============
+
+  async getTunnelIpSecurity(tunnelId: string): Promise<{ 
+    success: boolean; 
+    tunnelId: string; 
+    ipSecurity: TunnelIpSecurity 
+  }> {
+    return this.request(`/security/ip/${tunnelId}`);
+  }
+
+  async setTunnelIpSecurity(
+    tunnelId: string, 
+    ipSecurity: TunnelIpSecurity
+  ): Promise<{ success: boolean; message: string; mode: string }> {
+    return this.request(`/security/ip/${tunnelId}`, {
+      method: 'POST',
+      body: JSON.stringify(ipSecurity),
+    });
+  }
+
+  async addIpToTunnelSecurity(
+    tunnelId: string, 
+    ip: string, 
+    listType: 'allow' | 'block'
+  ): Promise<{ success: boolean; message: string }> {
+    return this.request(`/security/ip/${tunnelId}/add`, {
+      method: 'POST',
+      body: JSON.stringify({ ip, listType }),
+    });
+  }
+
+  async removeIpFromTunnelSecurity(
+    tunnelId: string, 
+    ip: string
+  ): Promise<{ success: boolean; message: string }> {
+    return this.request(`/security/ip/${tunnelId}/remove`, {
+      method: 'POST',
+      body: JSON.stringify({ ip }),
+    });
+  }
+
   async getTunnelConnectionLogs(tunnelId: string, limit?: number, offset?: number): Promise<{ 
     success: boolean; 
     tunnelId: string; 
@@ -621,6 +662,14 @@ export interface SecurityStats {
   };
   blockedIps: number;
   logsBuffered: number;
+}
+
+export interface TunnelIpSecurity {
+  mode: 'allow-all' | 'allowlist' | 'blocklist';
+  allowedIps?: string[];
+  blockedIps?: string[];
+  updatedAt?: number;
+  updatedBy?: string;
 }
 
 export interface BlockedIp {

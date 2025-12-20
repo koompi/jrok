@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/components/ui/use-toast';
+import { TunnelIpSecurityDialog } from '@/components/TunnelIpSecurityDialog';
 import { 
   Plus, 
   Globe, 
@@ -58,6 +59,7 @@ import {
   XCircle,
   Pause,
   Play,
+  Shield,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -140,6 +142,10 @@ export default function TunnelsPage() {
   const [newTunnelSubdomain, setNewTunnelSubdomain] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'offline'>('all');
+  
+  // IP Security dialog state
+  const [ipSecurityDialogOpen, setIpSecurityDialogOpen] = useState(false);
+  const [selectedTunnelForSecurity, setSelectedTunnelForSecurity] = useState<TunnelUIData | null>(null);
 
   // Fetch tunnels from API
   const { data: tunnelsData, isLoading } = useQuery({
@@ -538,6 +544,13 @@ export default function TunnelsPage() {
                             </>
                           )}
                           <DropdownMenuSeparator />
+                          <DropdownMenuItem onClick={() => {
+                            setSelectedTunnelForSecurity(tunnel);
+                            setIpSecurityDialogOpen(true);
+                          }}>
+                            <Shield className="h-4 w-4 mr-2" />
+                            IP Security
+                          </DropdownMenuItem>
                           <DropdownMenuItem>
                             <RefreshCw className="h-4 w-4 mr-2" />
                             Reconnect
@@ -628,6 +641,16 @@ export default function TunnelsPage() {
           </div>
         </CardContent>
       </Card>
+      
+      {/* IP Security Dialog */}
+      {selectedTunnelForSecurity && (
+        <TunnelIpSecurityDialog
+          tunnelId={selectedTunnelForSecurity.id}
+          tunnelDomain={selectedTunnelForSecurity.subdomain}
+          open={ipSecurityDialogOpen}
+          onOpenChange={setIpSecurityDialogOpen}
+        />
+      )}
     </div>
   );
 }

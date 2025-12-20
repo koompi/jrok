@@ -78,6 +78,17 @@ export interface Tunnel {
   serverId?: string; // VPS_ID of server owning the agent connection
   serverHost?: string; // Public host for direct routing
   updatedAt?: number; // Last update timestamp
+  // IP Access Control
+  ipSecurity?: TunnelIpSecurity;
+}
+
+// IP Security settings for a tunnel
+export interface TunnelIpSecurity {
+  mode: 'allow-all' | 'allowlist' | 'blocklist'; // default: 'allow-all'
+  allowedIps?: string[]; // IPs/CIDRs allowed when mode='allowlist'
+  blockedIps?: string[]; // IPs/CIDRs blocked when mode='blocklist'
+  updatedAt?: number;
+  updatedBy?: string; // userId who last updated
 }
 
 export interface TunnelConfig {

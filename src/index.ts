@@ -331,6 +331,10 @@ async function startServer() {
     securityService.initSecurityService();
     console.log("✅ Security service initialized");
 
+    // Load IP security settings from DB
+    await securityService.loadIpSecurityFromDb();
+    console.log("✅ IP security settings loaded");
+
     // Initialize cross-server routing
     crossServerService.initCrossServerRouting();
     console.log("✅ Cross-server routing initialized");
@@ -380,6 +384,7 @@ async function startServer() {
           const apiKeyId = ws.data?.apiKeyId;
           const protocol: TunnelProtocol = ws.data?.protocol || 'http';
           const forceNew = ws.data?.forceNew || false;
+          const ipSecurity = ws.data?.ipSecurity;
 
           if (!domain || !localPort) return;
 
@@ -394,28 +399,51 @@ async function startServer() {
             apiKeyId,
             protocol,
             forceNew,
-          }).then(({ agent, finalDomain, wasModified }) => {
+          }).then(async ({ agent, finalDomain, wasModified }) => {
             console.log(
               `✅ Agent connected: ${finalDomain} (${localHost}:${localPort}) [${agent.id}] protocol: ${protocol}${wasModified ? ` (requested: ${domain})` : ''}`
             );
+
+            // Apply IP security settings if provided from CLI
+            if (ipSecurity && ipSecurity.mode) {
+              try {
+                await securityService.setTunnelIpSecurity(agent.tunnelId || finalDomain, {
+                  mode: ipSecurity.mode,
+                  allowedIps: ipSecurity.allowedIps || [],
+                  blockedIps: ipSecurity.blockedIps || [],
+                });
+                console.log(`🔐 IP Security applied for ${finalDomain}: mode=${ipSecurity.mode}`);
+              } catch (err) {
+                console.error(`⚠️ Failed to apply IP security for ${finalDomain}:`, err);
+              }
+            }
 
             // Register agent for TCP forwarding if it's a TCP tunnel
             if (protocol === 'tcp') {
               tcpService.registerAgentConnection(agent.id, ws);
             }
 
-            // Send welcome message with final domain info
-            ws.send(
-              JSON.stringify({
-                type: "welcome",
-                agentId: agent.id,
-                message: "Connected to jrok",
-                protocol,
-                domain: finalDomain,
-                requestedDomain: wasModified ? domain : undefined,
-                domainModified: wasModified,
-              })
-            );
+            // Prepare welcome message
+            const welcomeMessage: any = {
+              type: "welcome",
+              agentId: agent.id,
+              message: "Connected to jrok",
+              protocol,
+              domain: finalDomain,
+              requestedDomain: wasModified ? domain : undefined,
+              domainModified: wasModified,
+            };
+            
+            // Include IP security status if enabled
+            if (ipSecurity && ipSecurity.mode && ipSecurity.mode !== 'allow-all') {
+              welcomeMessage.ipSecurity = {
+                mode: ipSecurity.mode,
+                allowedIps: ipSecurity.allowedIps?.length || 0,
+                blockedIps: ipSecurity.blockedIps?.length || 0,
+              };
+            }
+            
+            ws.send(JSON.stringify(welcomeMessage));
 
             // For TCP tunnels, send the allocated port after tunnel is created
             if (protocol === 'tcp') {
@@ -1155,7 +1183,7 @@ async function startServer() {
           ));
         }
 
-        // Set IP allowlist for a tunnel
+        // Set IP allowlist for a tunnel (legacy - kept for backward compatibility)
         if (path.startsWith("/security/allowlist/") && method === "POST") {
           const tunnelId = path.split("/")[3];
           if (!tunnelId) {
@@ -1178,9 +1206,129 @@ async function startServer() {
               { status: 400, headers: { "Content-Type": "application/json" } }
             ));
           }
-          securityService.setIpAllowlist(tunnelId, body.ips);
+          // Use new persistent security system
+          await securityService.setTunnelAllowlist(tunnelId, body.ips, authContext.user?.id);
           return addCors(new Response(
             JSON.stringify({ success: true, message: `Allowlist updated for tunnel ${tunnelId}` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // ============ New IP Security Endpoints ============
+
+        // GET /security/ip/:tunnelId - Get comprehensive IP security settings
+        if (path.startsWith("/security/ip/") && method === "GET") {
+          const tunnelId = path.split("/")[3];
+          if (!tunnelId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing tunnel ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const ipSecurity = securityService.getTunnelIpSecurity(tunnelId);
+          return addCors(new Response(
+            JSON.stringify({ success: true, tunnelId, ipSecurity }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // POST /security/ip/:tunnelId - Set IP security settings
+        if (path.startsWith("/security/ip/") && method === "POST") {
+          const tunnelId = path.split("/")[3];
+          if (!tunnelId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing tunnel ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          
+          const body = await req.json() as { 
+            mode: 'allow-all' | 'allowlist' | 'blocklist';
+            allowedIps?: string[];
+            blockedIps?: string[];
+          };
+          
+          if (!body.mode || !['allow-all', 'allowlist', 'blocklist'].includes(body.mode)) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Invalid mode. Use: 'allow-all', 'allowlist', or 'blocklist'" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          
+          await securityService.setTunnelIpSecurity(tunnelId, {
+            mode: body.mode,
+            allowedIps: body.allowedIps || [],
+            blockedIps: body.blockedIps || [],
+          }, authContext.user?.id);
+          
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP security updated for tunnel ${tunnelId}`, mode: body.mode }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // POST /security/ip/:tunnelId/add - Add IP to allowlist or blocklist
+        if (path.match(/^\/security\/ip\/[^\/]+\/add$/) && method === "POST") {
+          const tunnelId = path.split("/")[3];
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          
+          const body = await req.json() as { ip: string; listType: 'allow' | 'block' };
+          if (!body.ip || !body.listType) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing ip or listType ('allow' or 'block')" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          
+          await securityService.addIpToTunnelSecurity(tunnelId, body.ip, body.listType, authContext.user?.id);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP ${body.ip} added to ${body.listType} list` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // POST /security/ip/:tunnelId/remove - Remove IP from lists
+        if (path.match(/^\/security\/ip\/[^\/]+\/remove$/) && method === "POST") {
+          const tunnelId = path.split("/")[3];
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          
+          const body = await req.json() as { ip: string };
+          if (!body.ip) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing ip" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          
+          await securityService.removeIpFromTunnelSecurity(tunnelId, body.ip, authContext.user?.id);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP ${body.ip} removed from security lists` }),
             { status: 200, headers: { "Content-Type": "application/json" } }
           ));
         }
