@@ -17,6 +17,7 @@ import * as tcpService from "./services/tcpService";
 import * as securityService from "./services/securityService";
 import * as crossServerService from "./services/crossServerService";
 import * as certSyncService from "./services/certificateSyncService";
+import * as monitoringService from "./services/monitoringService";
 import { connectDatabase, closeDatabase, createDistributedStateIndexes } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { initTelegram } from "./services/notificationService";
@@ -342,6 +343,9 @@ async function startServer() {
     await tcpService.restoreTcpServersOnStartup();
     console.log("✅ TCP tunnels restored");
 
+    // Initialize monitoring service with map references for size tracking
+    monitoringService.initMonitoringService(pendingRequests, orgPlanCache);
+
     // Register current VPS server if running on a VPS with SSH
     await registerLocalVpsServer();
 
@@ -578,10 +582,14 @@ async function startServer() {
 
           // Handle agent WebSocket close
           const agentId = agentService.getAgentIdBySocket(ws);
+          const clientIp = ws.data?.clientIp || "unknown";
 
           if (agentId) {
             const agent = agentService.getAgent(agentId);
             console.log(`🔌 Agent disconnected: ${agent?.domain} [${agentId}]`);
+            
+            // Unregister from monitoring service
+            monitoringService.unregisterAgentConnection(clientIp);
             
             // Close all client WebSocket connections for this agent
             wsProxyService.closeConnectionsByAgent(agentId);
@@ -871,6 +879,96 @@ async function startServer() {
         // Admin cleanup duplicates
         if (path === "/admin/cleanup-tunnels" && method === "POST") {
           return addCors(await adminHandler.handleCleanupTunnels(req));
+        }
+
+        // ============ Monitoring API Routes (Super Admin Only) ============
+
+        // Get full monitoring dashboard data
+        if (path === "/admin/monitoring" && method === "GET") {
+          return addCors(new Response(
+            JSON.stringify({ success: true, data: monitoringService.getDashboardData() }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get system health status
+        if (path === "/admin/monitoring/health" && method === "GET") {
+          return addCors(new Response(
+            JSON.stringify({ success: true, health: monitoringService.getSystemHealth() }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get metrics history for graphs
+        if (path === "/admin/monitoring/metrics" && method === "GET") {
+          const url = new URL(req.url);
+          const minutes = parseInt(url.searchParams.get("minutes") || "60");
+          return addCors(new Response(
+            JSON.stringify({ success: true, history: monitoringService.getMetricsHistory(minutes) }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get recent logs
+        if (path === "/admin/monitoring/logs" && method === "GET") {
+          const url = new URL(req.url);
+          const count = parseInt(url.searchParams.get("count") || "100");
+          const level = url.searchParams.get("level") as 'info' | 'warn' | 'error' | 'debug' | undefined;
+          const category = url.searchParams.get("category") || undefined;
+          return addCors(new Response(
+            JSON.stringify({ success: true, logs: monitoringService.getRecentLogs(count, level, category) }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get rate limit statistics
+        if (path === "/admin/monitoring/rate-limits" && method === "GET") {
+          return addCors(new Response(
+            JSON.stringify({ success: true, rateLimits: monitoringService.getRateLimitStats() }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get authentication metrics
+        if (path === "/admin/monitoring/auth" && method === "GET") {
+          return addCors(new Response(
+            JSON.stringify({ success: true, auth: monitoringService.getAuthMetrics() }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get certificate metrics
+        if (path === "/admin/monitoring/certificates" && method === "GET") {
+          return addCors(new Response(
+            JSON.stringify({ success: true, certificates: monitoringService.getCertMetrics() }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get system configuration
+        if (path === "/admin/monitoring/config" && method === "GET") {
+          const config = await monitoringService.getSystemConfig();
+          return addCors(new Response(
+            JSON.stringify({ success: true, config }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Update system configuration
+        if (path === "/admin/monitoring/config" && method === "PUT") {
+          try {
+            const body = await req.json() as Partial<monitoringService.SystemConfig>;
+            const config = await monitoringService.updateSystemConfig(body);
+            return addCors(new Response(
+              JSON.stringify({ success: true, config }),
+              { status: 200, headers: { "Content-Type": "application/json" } }
+            ));
+          } catch (error) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, error: String(error) }),
+              { status: 500, headers: { "Content-Type": "application/json" } }
+            ));
+          }
         }
 
         // ============ Dashboard Stats & Activity Routes ============
@@ -1620,6 +1718,7 @@ async function startServer() {
       // Shutdown services
       await crossServerService.shutdownCrossServerRouting();
       securityService.shutdownSecurityService();
+      monitoringService.shutdownMonitoringService();
       
       // Cleanup TCP tunnels for this server
       await tcpService.cleanupServerPorts();

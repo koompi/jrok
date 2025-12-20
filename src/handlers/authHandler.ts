@@ -1,5 +1,6 @@
 import * as authService from "../services/authService";
 import * as organizationService from "../services/organizationService";
+import * as monitoringService from "../services/monitoringService";
 import type { User } from "../types/index";
 
 // Helper to create JSON response
@@ -24,11 +25,14 @@ export function handleGetLoginUrl(): Response {
 
 // POST /auth/callback - Handle OAuth callback
 export async function handleOAuthCallback(req: Request): Promise<Response> {
+  const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  
   try {
     const body = await req.json();
     const { code, state, codeVerifier } = body;
 
     if (!code) {
+      monitoringService.trackAuthAttempt(false, clientIp);
       return jsonResponse({ success: false, message: "Authorization code is required" }, 400);
     }
 
@@ -49,6 +53,9 @@ export async function handleOAuthCallback(req: Request): Promise<Response> {
     // Get user's organizations
     const organizations = await organizationService.getUserOrganizations(user.id);
 
+    // Track successful auth
+    monitoringService.trackAuthAttempt(true, user.email || clientIp);
+
     return jsonResponse({
       success: true,
       token: session.token,
@@ -62,6 +69,9 @@ export async function handleOAuthCallback(req: Request): Promise<Response> {
     });
   } catch (error) {
     console.error("OAuth callback error:", error);
+    // Track failed auth
+    monitoringService.trackAuthAttempt(false, clientIp);
+    
     return jsonResponse({
       success: false,
       message: error instanceof Error ? error.message : "Authentication failed",

@@ -1,6 +1,7 @@
 import type { AgentMessage, TunnelProtocol } from "../types/index";
 import * as agentService from "../services/agentService";
 import { validateApiKeyForAgent } from "../services/authService";
+import * as monitoringService from "../services/monitoringService";
 
 export async function handleAgentUpgrade(req: Request, server: any): Promise<Response> {
   if (req.headers.get("upgrade") !== "websocket") {
@@ -14,6 +15,18 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   const authToken = url.searchParams.get("auth");
   const protocol = (url.searchParams.get("protocol") || "http") as TunnelProtocol;
   const forceNew = url.searchParams.get("forceNew") === "true";
+
+  const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+
+  // Check connection limits before processing
+  const connectionCheck = monitoringService.canAcceptAgentConnection(clientIp);
+  if (!connectionCheck.allowed) {
+    monitoringService.addLog('warn', 'connections', `Agent connection rejected: ${connectionCheck.reason}`, { clientIp, domain });
+    return new Response(
+      JSON.stringify({ error: connectionCheck.reason }),
+      { status: 503, headers: { "Content-Type": "application/json" } }
+    );
+  }
 
   if (!domain || !localPort || !authToken) {
     return new Response("Missing required parameters: domain, localPort, and auth are required", { status: 400 });
@@ -49,7 +62,7 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
       domain,
       localPort: port,
       localHost,
-      clientIp: req.headers.get("x-forwarded-for") || "unknown",
+      clientIp,
       organizationId: authResult.organizationId,
       apiKeyId: authResult.apiKeyId,
       protocol,
@@ -60,6 +73,9 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   if (!success) {
     return new Response("Failed to upgrade connection", { status: 400 });
   }
+
+  // Track the connection after successful upgrade
+  monitoringService.registerAgentConnection(clientIp);
 
   return undefined as any;
 }

@@ -4,6 +4,7 @@ import * as vpsService from "./vpsService";
 import * as backupUtils from "../utils/backupUtils";
 import * as notificationService from "./notificationService";
 import * as certSyncService from "./certificateSyncService";
+import * as monitoringService from "./monitoringService";
 import { generateId, sanitizeDomainToSubdomain, generateShortSuffix } from "../utils/helpers";
 import { getTunnelByDomain } from "../utils/database";
 import dns from "dns/promises";
@@ -188,8 +189,13 @@ export async function verifyAndIssueCertificate(domainName: string): Promise<Cus
 
     return updatedDomain;
   } catch (error) {
+    // Track certificate failure
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    monitoringService.trackCertRenewal(false, errorMsg);
+    monitoringService.addLog('error', 'certificates', `Certificate issuance failed for ${domainName}`, { error: errorMsg });
+    
     // Don't delete domain on cert failure - user can retry
-    throw new Error(`Certificate issuance failed: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Certificate issuance failed: ${errorMsg}`);
   }
 }
 
@@ -349,6 +355,11 @@ async function issueCertificate(
   }
 
   console.log(`✅ Certificate issued for ${safeDomain}`);
+  
+  // Track successful certificate issuance
+  monitoringService.trackCertRenewal(true);
+  monitoringService.addLog('info', 'certificates', `Certificate issued for ${safeDomain}`);
+  
   return certPath;
 }
 
