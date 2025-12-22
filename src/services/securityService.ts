@@ -619,8 +619,23 @@ export async function setTunnelIpSecurity(
   security.updatedAt = Date.now();
   if (updatedBy) security.updatedBy = updatedBy;
   
-  // Update cache
+  // Update cache with provided key
   ipSecurityCache.set(tunnelId, security);
+  
+  // Find the tunnel to get both ID and domain for caching
+  const tunnel = await collections.tunnels.findOne(
+    { $or: [{ id: tunnelId }, { domain: tunnelId }] }
+  );
+  
+  // Also cache by the alternate key (domain or ID) for lookups
+  if (tunnel) {
+    if (tunnel.id && tunnel.id !== tunnelId) {
+      ipSecurityCache.set(tunnel.id, security);
+    }
+    if (tunnel.domain && tunnel.domain !== tunnelId) {
+      ipSecurityCache.set(tunnel.domain, security);
+    }
+  }
   
   // Persist to MongoDB (update tunnel document)
   await collections.tunnels.updateOne(

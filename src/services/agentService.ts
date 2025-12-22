@@ -245,19 +245,51 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
       
       // If switching to TCP, we need to allocate a port
       let tcpPort = existingTunnel.tcpPort;
-      if (newProtocol === 'tcp' && (!existingTunnel.tcpPort || protocolChanged)) {
+      if (newProtocol === 'tcp') {
         const tcpService = await import("./tcpService");
-        const allocation = await tcpService.allocatePort(
-          existingTunnel.id,
-          agentId,
-          agent.localPort,
-          agent.localHost,
-          organizationId
-        );
-        if (allocation) {
-          tcpPort = allocation.port;
-          tcpService.startTcpServer(allocation);
-          console.log(`✅ TCP port allocated for existing tunnel: ${agent.domain} -> port ${tcpPort}`);
+        
+        if (!existingTunnel.tcpPort || protocolChanged) {
+          // Need to allocate a new port
+          const allocation = await tcpService.allocatePort(
+            existingTunnel.id,
+            agentId,
+            agent.localPort,
+            agent.localHost,
+            organizationId
+          );
+          if (allocation) {
+            tcpPort = allocation.port;
+            tcpService.startTcpServer(allocation);
+            console.log(`✅ TCP port allocated for existing tunnel: ${agent.domain} -> port ${tcpPort}`);
+          }
+        } else {
+          // Port already allocated - restart TCP server for reconnection with new agentId
+          const existingAllocation = await tcpService.getPortAllocation(existingTunnel.id);
+          if (existingAllocation) {
+            // Update the allocation with new agent info in DB
+            await tcpService.updatePortAllocation(existingTunnel.id, agentId, agent.localPort, agent.localHost);
+            // Update the allocation object with new agent info for the server
+            existingAllocation.agentId = agentId;
+            existingAllocation.localPort = agent.localPort;
+            existingAllocation.localHost = agent.localHost;
+            // Restart TCP server to use new agentId
+            tcpService.restartTcpServer(existingAllocation);
+            console.log(`✅ TCP server restarted for existing tunnel: ${agent.domain} -> port ${tcpPort}`);
+          } else {
+            // Allocation missing from DB - reallocate
+            const allocation = await tcpService.allocatePort(
+              existingTunnel.id,
+              agentId,
+              agent.localPort,
+              agent.localHost,
+              organizationId
+            );
+            if (allocation) {
+              tcpPort = allocation.port;
+              tcpService.startTcpServer(allocation);
+              console.log(`✅ TCP port re-allocated for tunnel: ${agent.domain} -> port ${tcpPort}`);
+            }
+          }
         }
       } else if (newProtocol === 'http' && existingTunnel.protocol === 'tcp' && existingTunnel.tcpPort) {
         // Switching from TCP to HTTP - deallocate the port

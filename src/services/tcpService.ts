@@ -255,6 +255,22 @@ export async function getPortAllocation(tunnelId: string): Promise<TcpPortAlloca
 }
 
 /**
+ * Update port allocation with new agent info (for reconnections)
+ */
+export async function updatePortAllocation(
+  tunnelId: string,
+  agentId: string,
+  localPort: number,
+  localHost: string
+): Promise<void> {
+  const collections = getCollections();
+  await collections.tcpPortAllocations.updateOne(
+    { tunnelId, active: true },
+    { $set: { agentId, localPort, localHost, updatedAt: new Date() } }
+  );
+}
+
+/**
  * Get port allocation by port number
  */
 export async function getPortAllocationByPort(port: number): Promise<TcpPortAllocation | null> {
@@ -433,6 +449,16 @@ export function stopTcpServer(port: number): void {
     tcpServers.delete(port);
     console.log(`🛑 TCP server stopped on port ${port}`);
   }
+}
+
+/**
+ * Restart TCP server with new allocation (for agent reconnections)
+ */
+export function restartTcpServer(allocation: TcpPortAllocation, planTier?: string): boolean {
+  // Stop existing server if running
+  stopTcpServer(allocation.port);
+  // Start new server with updated allocation (includes new agentId)
+  return startTcpServer(allocation, planTier);
 }
 
 // =============================================================================
