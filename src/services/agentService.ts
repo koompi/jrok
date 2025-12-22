@@ -237,8 +237,36 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
   try {
     const collections = getCollections();
     const existingTunnel = await getTunnelByDomain(agent.domain);
+    const newProtocol = agent.protocol || 'http';
     
     if (existingTunnel) {
+      // Check if protocol changed from http to tcp or vice versa
+      const protocolChanged = existingTunnel.protocol !== newProtocol;
+      
+      // If switching to TCP, we need to allocate a port
+      let tcpPort = existingTunnel.tcpPort;
+      if (newProtocol === 'tcp' && (!existingTunnel.tcpPort || protocolChanged)) {
+        const tcpService = await import("./tcpService");
+        const allocation = await tcpService.allocatePort(
+          existingTunnel.id,
+          agentId,
+          agent.localPort,
+          agent.localHost,
+          organizationId
+        );
+        if (allocation) {
+          tcpPort = allocation.port;
+          tcpService.startTcpServer(allocation);
+          console.log(`✅ TCP port allocated for existing tunnel: ${agent.domain} -> port ${tcpPort}`);
+        }
+      } else if (newProtocol === 'http' && existingTunnel.protocol === 'tcp' && existingTunnel.tcpPort) {
+        // Switching from TCP to HTTP - deallocate the port
+        const tcpService = await import("./tcpService");
+        await tcpService.deallocatePort(existingTunnel.id);
+        tcpPort = undefined;
+        console.log(`✅ TCP port deallocated for tunnel: ${agent.domain}`);
+      }
+      
       agent.tunnelId = existingTunnel.id;
       
       await collections.tunnels.updateOne(
@@ -251,6 +279,8 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
           updatedAt: Date.now(),
           serverId: SERVER_ID,
           serverHost: SERVER_HOST,
+          protocol: newProtocol,
+          tcpPort: tcpPort,
         }}
       );
       
@@ -261,7 +291,7 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
       );
       
       invalidateTunnelCache(agent.domain);
-      console.log(`✅ Tunnel updated: ${agent.domain} (server: ${SERVER_ID})`);
+      console.log(`✅ Tunnel updated: ${agent.domain} (protocol: ${newProtocol}, server: ${SERVER_ID})`);
     } else {
       const newTunnel = await tunnelService.createTunnel(
         {

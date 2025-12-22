@@ -144,8 +144,8 @@ async function syncConfigToAllVps(domain: string, localPort: number, localHost: 
 }
 
 export async function createTunnel(request: CreateTunnelRequest, agentId: string, organizationId?: string): Promise<Tunnel> {
-  // Verify agent is connected
-  const agent = agentService.getAgent(agentId);
+  // Verify agent is connected - use async version for MongoDB-based state
+  const agent = await agentService.getAgentAsync(agentId);
   if (!agent || !agent.active) {
     throw new Error("Agent not connected");
   }
