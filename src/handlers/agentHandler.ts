@@ -135,8 +135,8 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   return undefined as any;
 }
 
-export function handleListAgents(): Response {
-  const agents = agentService.getAllAgents();
+export async function handleListAgents(): Promise<Response> {
+  const agents = await agentService.getAllAgentsAsync();
 
   return new Response(
     JSON.stringify({

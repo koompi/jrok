@@ -1585,7 +1585,7 @@ async function startServer() {
     }
 
     if (path === "/agents" && method === "GET") {
-      return agentHandler.handleListAgents();
+      return await agentHandler.handleListAgents();
     }
 
     // Domain routes
