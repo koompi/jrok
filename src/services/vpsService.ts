@@ -13,6 +13,9 @@ export interface VpsServer {
   lastHealthCheck: number;
   createdAt: number;
   region?: string; // e.g., "us-east", "eu-west"
+  // TCP port range for distributed port allocation
+  tcpPortMin?: number; // Start of TCP port range
+  tcpPortMax?: number; // End of TCP port range
 }
 
 export async function registerVpsServer(server: Omit<VpsServer, "_id">): Promise<VpsServer> {

@@ -3,6 +3,8 @@ import * as domainService from "../services/domainService";
 import * as database from "../utils/database";
 import { checkGlobalRateLimit, checkDomainRateLimit, getClientIp } from "../utils/rateLimiter";
 import * as notificationService from "../services/notificationService";
+import * as planLimitService from "../services/planLimitService";
+import * as authService from "../services/authService";
 
 export interface DomainResponse {
   success: boolean;
@@ -84,6 +86,24 @@ export async function handleRegisterDomain(req: Request): Promise<Response> {
           },
         }
       );
+    }
+
+    // ====== PLAN LIMIT CHECK: Domain Count ======
+    // Get organization from auth context
+    const authContext = await authService.authenticateRequest(req);
+    if (authContext?.organization?.id) {
+      const domainLimitCheck = await planLimitService.checkDomainLimit(authContext.organization.id);
+      if (!domainLimitCheck.allowed) {
+        return new Response(
+          JSON.stringify({
+            success: false,
+            message: domainLimitCheck.reason,
+            current: domainLimitCheck.current,
+            limit: domainLimitCheck.limit,
+          } as DomainResponse),
+          { status: 402, headers: { "Content-Type": "application/json" } }
+        );
+      }
     }
 
     const domain = await domainService.registerCustomDomain(body);

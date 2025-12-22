@@ -146,7 +146,7 @@ export async function getDashboardStats(organizationId: string): Promise<Dashboa
   // Get tunnels
   const tunnelsCollection = db.collection("tunnels");
   const tunnels = await tunnelsCollection.find({ organizationId }).toArray();
-  const agents = agentService.getAllAgents();
+  const agents = await agentService.getAllAgentsAsync();
   
   const activeTunnelDomains = new Set(agents.filter(a => a.active).map(a => a.domain));
   const onlineTunnels = tunnels.filter(t => activeTunnelDomains.has(t.domain));
@@ -236,7 +236,8 @@ export async function getEnhancedTunnels(organizationId: string): Promise<Enhanc
   const tunnelsCollection = db.collection("tunnels");
   const tunnels = await tunnelsCollection.find({ organizationId }).toArray();
   
-  const agents = agentService.getAllAgents();
+  // Use async version to get agents from MongoDB
+  const agents = await agentService.getAllAgentsAsync();
   const agentMap = new Map(agents.map(a => [a.domain, a]));
   
   const bandwidth = await getBandwidthUsage(organizationId, "month");
@@ -263,7 +264,7 @@ export async function getEnhancedTunnels(organizationId: string): Promise<Enhanc
  * Get enhanced agent list with system info
  */
 export async function getEnhancedAgents(organizationId?: string): Promise<EnhancedAgent[]> {
-  const agents = agentService.getAllAgents();
+  const agents = await agentService.getAllAgentsAsync();
   
   // Get stored system info from database
   const db = await getDatabase();

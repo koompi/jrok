@@ -15,7 +15,10 @@ import * as statsService from "./services/statsService";
 import * as wsProxyService from "./services/wsProxyService";
 import * as tcpService from "./services/tcpService";
 import * as securityService from "./services/securityService";
-import { connectDatabase, closeDatabase } from "./utils/mongodb";
+import * as crossServerService from "./services/crossServerService";
+import * as certSyncService from "./services/certificateSyncService";
+import * as monitoringService from "./services/monitoringService";
+import { connectDatabase, closeDatabase, createDistributedStateIndexes } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { initTelegram } from "./services/notificationService";
 import { generateId } from "./utils/helpers";
@@ -29,6 +32,27 @@ const pendingRequests = new Map<string, {
   agent: Agent;
   tunnelId?: string;
 }>();
+
+// Memory safety: Limit pending requests to prevent memory exhaustion
+const MAX_PENDING_REQUESTS = 10000;
+
+function cleanupOldestPendingRequest() {
+  if (pendingRequests.size >= MAX_PENDING_REQUESTS) {
+    // Remove oldest entry
+    const firstKey = pendingRequests.keys().next().value;
+    if (firstKey) {
+      const entry = pendingRequests.get(firstKey);
+      if (entry) {
+        clearTimeout(entry.timeout);
+        entry.resolve(new Response(
+          JSON.stringify({ success: false, message: "Server overloaded" }),
+          { status: 503, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+      pendingRequests.delete(firstKey);
+    }
+  }
+}
 
 // Handle WebSocket tunnel (client WebSocket -> agent -> local service WebSocket)
 async function handleWebSocketTunnel(
@@ -99,6 +123,9 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
       const bytesIn = new TextEncoder().encode(body).length + 
                       new TextEncoder().encode(JSON.stringify(headers)).length;
       
+      // Memory safety: Cleanup oldest request if map is full
+      cleanupOldestPendingRequest();
+      
       // Store pending request with bandwidth tracking info
       pendingRequests.set(requestId, { resolve, timeout, bytesIn, agent, tunnelId });
       
@@ -130,6 +157,39 @@ const config: TunnelConfig = {
   apiKey: process.env.API_KEY || "your-secret-key-change-this",
 };
 
+// Production environment validation
+if (process.env.NODE_ENV === "production") {
+  const requiredEnvVars = [
+    'MONGODB_URI',
+    'JWT_SECRET',
+    'BASE_DOMAIN',
+    'KOOMPI_CLIENT_ID',
+    'KOOMPI_CLIENT_SECRET',
+  ];
+  
+  const missing = requiredEnvVars.filter(key => !process.env[key]);
+  
+  if (missing.length > 0) {
+    console.error("❌ CRITICAL: Missing required environment variables in production:");
+    missing.forEach(key => console.error(`   - ${key}`));
+    console.error("\nPlease set all required environment variables before starting in production.");
+    process.exit(1);
+  }
+  
+  // Check for default/weak credentials
+  if (config.apiKey === "your-secret-key-change-this") {
+    console.error("❌ CRITICAL: Default API_KEY detected in production!");
+    console.error("   Please set a secure API_KEY environment variable.");
+    process.exit(1);
+  }
+  
+  if ((process.env.JWT_SECRET || "").length < 32) {
+    console.error("❌ CRITICAL: JWT_SECRET must be at least 32 characters in production!");
+    console.error("   Generate a secure secret: openssl rand -base64 64");
+    process.exit(1);
+  }
+}
+
 // Initialize tunnel service with config
 setConfig(config);
 
@@ -139,12 +199,37 @@ initTelegram();
 // Cache for organization plan tiers (avoid DB lookup on every request)
 const orgPlanCache = new Map<string, { tier: string; timestamp: number }>();
 const PLAN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const MAX_PLAN_CACHE_SIZE = 10000; // Prevent unbounded growth
+
+// Periodic cleanup of expired plan cache entries
+setInterval(() => {
+  const now = Date.now();
+  let cleanedCount = 0;
+  for (const [key, value] of orgPlanCache.entries()) {
+    if (now - value.timestamp > PLAN_CACHE_TTL) {
+      orgPlanCache.delete(key);
+      cleanedCount++;
+    }
+  }
+  if (cleanedCount > 0) {
+    console.log(`🧹 Plan cache cleanup: ${cleanedCount} expired entries removed`);
+  }
+}, 10 * 60 * 1000); // Run every 10 minutes
 
 async function getPlanTierForOrg(organizationId: string): Promise<string> {
   // Check cache first
   const cached = orgPlanCache.get(organizationId);
   if (cached && Date.now() - cached.timestamp < PLAN_CACHE_TTL) {
     return cached.tier;
+  }
+  
+  // Memory safety: Prevent unbounded cache growth
+  if (orgPlanCache.size >= MAX_PLAN_CACHE_SIZE) {
+    // Remove oldest entry
+    const firstKey = orgPlanCache.keys().next().value;
+    if (firstKey) {
+      orgPlanCache.delete(firstKey);
+    }
   }
   
   try {
@@ -238,9 +323,32 @@ async function startServer() {
     await connectDatabase();
     console.log("✅ Database connected");
 
+    // Create distributed state indexes
+    await createDistributedStateIndexes();
+    console.log("✅ Distributed state indexes created");
+
     // Initialize security service
     securityService.initSecurityService();
     console.log("✅ Security service initialized");
+
+    // Load IP security settings from DB
+    await securityService.loadIpSecurityFromDb();
+    console.log("✅ IP security settings loaded");
+
+    // Initialize cross-server routing
+    crossServerService.initCrossServerRouting();
+    console.log("✅ Cross-server routing initialized");
+
+    // Initialize certificate sync infrastructure (MongoDB collections + indexes)
+    await certSyncService.initializeCertificateSync();
+    console.log("✅ Certificate sync infrastructure initialized");
+
+    // Restore TCP servers on startup (reconnect to allocated ports)
+    await tcpService.restoreTcpServersOnStartup();
+    console.log("✅ TCP tunnels restored");
+
+    // Initialize monitoring service with map references for size tracking
+    monitoringService.initMonitoringService(pendingRequests, orgPlanCache);
 
     // Register current VPS server if running on a VPS with SSH
     await registerLocalVpsServer();
@@ -276,6 +384,7 @@ async function startServer() {
           const apiKeyId = ws.data?.apiKeyId;
           const protocol: TunnelProtocol = ws.data?.protocol || 'http';
           const forceNew = ws.data?.forceNew || false;
+          const ipSecurity = ws.data?.ipSecurity;
 
           if (!domain || !localPort) return;
 
@@ -290,34 +399,57 @@ async function startServer() {
             apiKeyId,
             protocol,
             forceNew,
-          }).then(({ agent, finalDomain, wasModified }) => {
+          }).then(async ({ agent, finalDomain, wasModified }) => {
             console.log(
               `✅ Agent connected: ${finalDomain} (${localHost}:${localPort}) [${agent.id}] protocol: ${protocol}${wasModified ? ` (requested: ${domain})` : ''}`
             );
+
+            // Apply IP security settings if provided from CLI
+            if (ipSecurity && ipSecurity.mode) {
+              try {
+                await securityService.setTunnelIpSecurity(agent.tunnelId || finalDomain, {
+                  mode: ipSecurity.mode,
+                  allowedIps: ipSecurity.allowedIps || [],
+                  blockedIps: ipSecurity.blockedIps || [],
+                });
+                console.log(`🔐 IP Security applied for ${finalDomain}: mode=${ipSecurity.mode}`);
+              } catch (err) {
+                console.error(`⚠️ Failed to apply IP security for ${finalDomain}:`, err);
+              }
+            }
 
             // Register agent for TCP forwarding if it's a TCP tunnel
             if (protocol === 'tcp') {
               tcpService.registerAgentConnection(agent.id, ws);
             }
 
-            // Send welcome message with final domain info
-            ws.send(
-              JSON.stringify({
-                type: "welcome",
-                agentId: agent.id,
-                message: "Connected to jrok",
-                protocol,
-                domain: finalDomain,
-                requestedDomain: wasModified ? domain : undefined,
-                domainModified: wasModified,
-              })
-            );
+            // Prepare welcome message
+            const welcomeMessage: any = {
+              type: "welcome",
+              agentId: agent.id,
+              message: "Connected to jrok",
+              protocol,
+              domain: finalDomain,
+              requestedDomain: wasModified ? domain : undefined,
+              domainModified: wasModified,
+            };
+            
+            // Include IP security status if enabled
+            if (ipSecurity && ipSecurity.mode && ipSecurity.mode !== 'allow-all') {
+              welcomeMessage.ipSecurity = {
+                mode: ipSecurity.mode,
+                allowedIps: ipSecurity.allowedIps?.length || 0,
+                blockedIps: ipSecurity.blockedIps?.length || 0,
+              };
+            }
+            
+            ws.send(JSON.stringify(welcomeMessage));
 
             // For TCP tunnels, send the allocated port after tunnel is created
             if (protocol === 'tcp') {
               // Wait for tunnel creation and then send TCP port info
               setTimeout(async () => {
-                const allocation = tcpService.getPortAllocation(agent.tunnelId || '');
+                const allocation = await tcpService.getPortAllocation(agent.tunnelId || '');
                 if (allocation) {
                   ws.send(JSON.stringify({
                     type: "welcome",
@@ -478,10 +610,14 @@ async function startServer() {
 
           // Handle agent WebSocket close
           const agentId = agentService.getAgentIdBySocket(ws);
+          const clientIp = ws.data?.clientIp || "unknown";
 
           if (agentId) {
             const agent = agentService.getAgent(agentId);
             console.log(`🔌 Agent disconnected: ${agent?.domain} [${agentId}]`);
+            
+            // Unregister from monitoring service
+            monitoringService.unregisterAgentConnection(clientIp);
             
             // Close all client WebSocket connections for this agent
             wsProxyService.closeConnectionsByAgent(agentId);
@@ -574,7 +710,20 @@ async function startServer() {
         // Health check
         if (path === "/health" && method === "GET") {
           return addCors(new Response(
-            JSON.stringify({ success: true, message: "Server is running" }),
+            JSON.stringify({ 
+              success: true, 
+              message: "Server is running",
+              serverId: crossServerService.currentServerId,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Cluster stats (for monitoring multi-server deployment)
+        if (path === "/cluster/stats" && method === "GET") {
+          const clusterStats = await crossServerService.getClusterStats();
+          return addCors(new Response(
+            JSON.stringify({ success: true, ...clusterStats }),
             { status: 200, headers: { "Content-Type": "application/json" } }
           ));
         }
@@ -760,6 +909,96 @@ async function startServer() {
           return addCors(await adminHandler.handleCleanupTunnels(req));
         }
 
+        // ============ Monitoring API Routes (Super Admin Only) ============
+
+        // Get full monitoring dashboard data
+        if (path === "/admin/monitoring" && method === "GET") {
+          return addCors(new Response(
+            JSON.stringify({ success: true, data: monitoringService.getDashboardData() }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get system health status
+        if (path === "/admin/monitoring/health" && method === "GET") {
+          return addCors(new Response(
+            JSON.stringify({ success: true, health: monitoringService.getSystemHealth() }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get metrics history for graphs
+        if (path === "/admin/monitoring/metrics" && method === "GET") {
+          const url = new URL(req.url);
+          const minutes = parseInt(url.searchParams.get("minutes") || "60");
+          return addCors(new Response(
+            JSON.stringify({ success: true, history: monitoringService.getMetricsHistory(minutes) }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get recent logs
+        if (path === "/admin/monitoring/logs" && method === "GET") {
+          const url = new URL(req.url);
+          const count = parseInt(url.searchParams.get("count") || "100");
+          const level = url.searchParams.get("level") as 'info' | 'warn' | 'error' | 'debug' | undefined;
+          const category = url.searchParams.get("category") || undefined;
+          return addCors(new Response(
+            JSON.stringify({ success: true, logs: monitoringService.getRecentLogs(count, level, category) }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get rate limit statistics
+        if (path === "/admin/monitoring/rate-limits" && method === "GET") {
+          return addCors(new Response(
+            JSON.stringify({ success: true, rateLimits: monitoringService.getRateLimitStats() }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get authentication metrics
+        if (path === "/admin/monitoring/auth" && method === "GET") {
+          return addCors(new Response(
+            JSON.stringify({ success: true, auth: monitoringService.getAuthMetrics() }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get certificate metrics
+        if (path === "/admin/monitoring/certificates" && method === "GET") {
+          return addCors(new Response(
+            JSON.stringify({ success: true, certificates: monitoringService.getCertMetrics() }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get system configuration
+        if (path === "/admin/monitoring/config" && method === "GET") {
+          const config = await monitoringService.getSystemConfig();
+          return addCors(new Response(
+            JSON.stringify({ success: true, config }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Update system configuration
+        if (path === "/admin/monitoring/config" && method === "PUT") {
+          try {
+            const body = await req.json() as Partial<monitoringService.SystemConfig>;
+            const config = await monitoringService.updateSystemConfig(body);
+            return addCors(new Response(
+              JSON.stringify({ success: true, config }),
+              { status: 200, headers: { "Content-Type": "application/json" } }
+            ));
+          } catch (error) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, error: String(error) }),
+              { status: 500, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+        }
+
         // ============ Dashboard Stats & Activity Routes ============
 
         // Activity routes (require organization context)
@@ -821,19 +1060,20 @@ async function startServer() {
 
         // TCP tunnel stats (public endpoint for monitoring)
         if (path === "/stats/tcp" && method === "GET") {
-          const stats = tcpService.getTcpStats();
-          const allocations = tcpService.getAllPortAllocations();
+          const stats = await tcpService.getTcpStatsGlobal();
+          const allocations = await tcpService.getAllPortAllocationsGlobal();
           return addCors(new Response(
             JSON.stringify({
               success: true,
               stats,
-              allocations: allocations.map(a => ({
+              allocations: allocations.map((a: any) => ({
                 port: a.port,
                 tunnelId: a.tunnelId,
                 localPort: a.localPort,
                 localHost: a.localHost,
                 createdAt: a.createdAt,
                 active: a.active,
+                serverId: a.serverId,
               })),
             }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -943,7 +1183,7 @@ async function startServer() {
           ));
         }
 
-        // Set IP allowlist for a tunnel
+        // Set IP allowlist for a tunnel (legacy - kept for backward compatibility)
         if (path.startsWith("/security/allowlist/") && method === "POST") {
           const tunnelId = path.split("/")[3];
           if (!tunnelId) {
@@ -966,9 +1206,129 @@ async function startServer() {
               { status: 400, headers: { "Content-Type": "application/json" } }
             ));
           }
-          securityService.setIpAllowlist(tunnelId, body.ips);
+          // Use new persistent security system
+          await securityService.setTunnelAllowlist(tunnelId, body.ips, authContext.user?.id);
           return addCors(new Response(
             JSON.stringify({ success: true, message: `Allowlist updated for tunnel ${tunnelId}` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // ============ New IP Security Endpoints ============
+
+        // GET /security/ip/:tunnelId - Get comprehensive IP security settings
+        if (path.startsWith("/security/ip/") && method === "GET") {
+          const tunnelId = path.split("/")[3];
+          if (!tunnelId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing tunnel ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const ipSecurity = securityService.getTunnelIpSecurity(tunnelId);
+          return addCors(new Response(
+            JSON.stringify({ success: true, tunnelId, ipSecurity }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // POST /security/ip/:tunnelId - Set IP security settings
+        if (path.startsWith("/security/ip/") && method === "POST") {
+          const tunnelId = path.split("/")[3];
+          if (!tunnelId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing tunnel ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          
+          const body = await req.json() as { 
+            mode: 'allow-all' | 'allowlist' | 'blocklist';
+            allowedIps?: string[];
+            blockedIps?: string[];
+          };
+          
+          if (!body.mode || !['allow-all', 'allowlist', 'blocklist'].includes(body.mode)) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Invalid mode. Use: 'allow-all', 'allowlist', or 'blocklist'" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          
+          await securityService.setTunnelIpSecurity(tunnelId, {
+            mode: body.mode,
+            allowedIps: body.allowedIps || [],
+            blockedIps: body.blockedIps || [],
+          }, authContext.user?.id);
+          
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP security updated for tunnel ${tunnelId}`, mode: body.mode }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // POST /security/ip/:tunnelId/add - Add IP to allowlist or blocklist
+        if (path.match(/^\/security\/ip\/[^\/]+\/add$/) && method === "POST") {
+          const tunnelId = path.split("/")[3];
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          
+          const body = await req.json() as { ip: string; listType: 'allow' | 'block' };
+          if (!body.ip || !body.listType) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing ip or listType ('allow' or 'block')" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          
+          await securityService.addIpToTunnelSecurity(tunnelId, body.ip, body.listType, authContext.user?.id);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP ${body.ip} added to ${body.listType} list` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // POST /security/ip/:tunnelId/remove - Remove IP from lists
+        if (path.match(/^\/security\/ip\/[^\/]+\/remove$/) && method === "POST") {
+          const tunnelId = path.split("/")[3];
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          
+          const body = await req.json() as { ip: string };
+          if (!body.ip) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing ip" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          
+          await securityService.removeIpFromTunnelSecurity(tunnelId, body.ip, authContext.user?.id);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP ${body.ip} removed from security lists` }),
             { status: 200, headers: { "Content-Type": "application/json" } }
           ));
         }
@@ -1065,8 +1425,20 @@ async function startServer() {
           // Extract subdomain (e.g., "demo" from "demo.tunnel.koompi.cloud")
           const subdomain = hostname.replace(`.${baseDomain}`, '');
           
-          // Look up agent for this domain
-          const agent = agentService.getAgentByDomain(subdomain);
+          // Check if agent is on this server or needs cross-server routing
+          const routeResult = await crossServerService.findServerForDomain(subdomain);
+          
+          // If agent is on another server, proxy the request
+          if (!routeResult.isLocal && routeResult.targetServer) {
+            return crossServerService.forwardRequest(
+              routeResult.targetServer,
+              req,
+              url.pathname + url.search
+            );
+          }
+          
+          // Look up agent locally (async for distributed state)
+          const agent = await agentService.getAgentByDomainAsync(subdomain);
           
           if (!agent || !agent.active) {
             return addCors(new Response(
@@ -1078,7 +1450,7 @@ async function startServer() {
             ));
           }
 
-          // Get agent's WebSocket
+          // Get agent's WebSocket (local connections only)
           const agentWs = agentService.getAgentSocket(agent.id);
           if (!agentWs || agentWs.readyState !== 1) {  // 1 = WebSocket.OPEN
             return addCors(new Response(
@@ -1109,7 +1481,7 @@ async function startServer() {
           // Get plan tier for rate limit calculation (defaults to 'free')
           const planTier = agent.organizationId ? await getPlanTierForOrg(agent.organizationId) : 'free';
           
-          // Check security limits
+          // Check security limits (rate limits)
           const securityCheck = await securityService.checkHttpRequest(
             tunnelId || subdomain,
             agent.organizationId,
@@ -1131,6 +1503,25 @@ async function startServer() {
               }),
               { status: 429, headers }
             ));
+          }
+
+          // ============ Bandwidth Limit Check ============
+          // Block requests if organization has exceeded monthly bandwidth
+          if (agent.organizationId) {
+            const bandwidthCheck = securityService.checkMonthlyBandwidth(agent.organizationId, planTier);
+            if (!bandwidthCheck.allowed) {
+              console.warn(`🚫 Bandwidth limit exceeded for org ${agent.organizationId}: ${(bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2)}GB / ${(bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2)}GB`);
+              return addCors(new Response(
+                JSON.stringify({
+                  success: false,
+                  message: "Monthly bandwidth limit exceeded. Please upgrade your plan.",
+                  usedGb: (bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2),
+                  limitGb: (bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2),
+                  percentUsed: bandwidthCheck.percentUsed.toFixed(1),
+                }),
+                { status: 402, headers: { "Content-Type": "application/json" } }
+              ));
+            }
           }
 
           // Track HTTP connection
@@ -1194,7 +1585,7 @@ async function startServer() {
     }
 
     if (path === "/agents" && method === "GET") {
-      return agentHandler.handleListAgents();
+      return await agentHandler.handleListAgents();
     }
 
     // Domain routes
@@ -1265,6 +1656,138 @@ async function startServer() {
       return await domainHandler.handleDeleteDomain(decodeURIComponent(domain));
     }
 
+    // ============ Certificate Sync API (for multi-server cert distribution) ============
+    
+    // Download certificate from MongoDB (VPS servers call this)
+    if (path.startsWith("/certificates/download/") && method === "GET") {
+      const domain = path.split("/")[3];
+      if (!domain) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: "Domain is required" }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+      
+      try {
+        const cert = await certSyncService.downloadCertificateFromMongoDB(decodeURIComponent(domain));
+        if (!cert) {
+          return addCors(new Response(
+            JSON.stringify({ success: false, error: "Certificate not found" }),
+            { status: 404, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+        
+        return addCors(new Response(
+          JSON.stringify({
+            success: true,
+            domain: cert.domain,
+            cert: cert.cert,
+            chain: cert.chain,
+            fullchain: cert.fullchain,
+            privkey: cert.privkey,
+            expiry: cert.expiry,
+            version: cert.version,
+            uploadedAt: cert.uploadedAt
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ));
+      } catch (error) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: String(error) }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+    }
+
+    // List all certificates
+    if (path === "/certificates/list" && method === "GET") {
+      try {
+        const certs = await certSyncService.listCertificates();
+        return addCors(new Response(
+          JSON.stringify({ success: true, certificates: certs }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ));
+      } catch (error) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: String(error) }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+    }
+
+    // Get certificate status
+    if (path.startsWith("/certificates/status/") && method === "GET") {
+      const domain = path.split("/")[3];
+      if (!domain) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: "Domain is required" }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+      
+      try {
+        const status = await certSyncService.getCertificateStatus(decodeURIComponent(domain));
+        return addCors(new Response(
+          JSON.stringify({ success: true, ...status }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ));
+      } catch (error) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: String(error) }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+    }
+
+    // Check sync queue (for VPS servers to see pending syncs)
+    if (path === "/certificates/sync-queue" && method === "GET") {
+      try {
+        const { getClient } = await import("./utils/mongodb");
+        const queue = getClient()?.db("jrok").collection("cert_sync_queue");
+        const pending = await queue?.find({ processed: false }).toArray() || [];
+        
+        return addCors(new Response(
+          JSON.stringify({ success: true, pending }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ));
+      } catch (error) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: String(error) }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+    }
+
+    // Mark sync as processed (VPS server confirms it pulled the cert)
+    if (path.startsWith("/certificates/sync-queue/") && method === "POST") {
+      const syncId = path.split("/")[3];
+      if (!syncId) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: "Sync ID is required" }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+      
+      try {
+        const { getClient } = await import("./utils/mongodb");
+        const queue = getClient()?.db("jrok").collection("cert_sync_queue");
+        await queue?.updateOne(
+          { _id: decodeURIComponent(syncId) as any },
+          { $set: { processed: true, processedAt: new Date() } }
+        );
+        
+        return addCors(new Response(
+          JSON.stringify({ success: true, message: "Sync marked as processed" }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ));
+      } catch (error) {
+        return addCors(new Response(
+          JSON.stringify({ success: false, error: String(error) }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        ));
+      }
+    }
+
     // 404
     return addCors(new Response(
       JSON.stringify({
@@ -1315,9 +1838,58 @@ async function startServer() {
 
     console.log("✅ Auto-cleanup enabled (agents: 30s, tunnels: 5m, rate limits: 10m, stats: 1h)");
 
+    // Check certificate sync queue every 5 minutes (pull new certs to local storage)
+    setInterval(async () => {
+      try {
+        const { getClient } = await import("./utils/mongodb");
+        const queue = getClient()?.db("jrok").collection("cert_sync_queue");
+        if (!queue) return;
+
+        const serverId = process.env.VPS_ID || process.env.SERVER_ID || "server-1";
+        const pendingCerts = await queue.find({ processed: false }).toArray();
+        
+        for (const item of pendingCerts) {
+          try {
+            const cert = await certSyncService.downloadCertificateFromMongoDB(item.domain);
+            if (cert) {
+              // Write certificates to local filesystem
+              const certDir = `/etc/letsencrypt/live/${item.domain}`;
+              await Bun.spawn(["mkdir", "-p", certDir]).exited;
+              
+              // Decode base64 and write files
+              await Bun.write(`${certDir}/cert.pem`, Buffer.from(cert.cert, 'base64'));
+              await Bun.write(`${certDir}/chain.pem`, Buffer.from(cert.chain, 'base64'));
+              await Bun.write(`${certDir}/fullchain.pem`, Buffer.from(cert.fullchain, 'base64'));
+              await Bun.write(`${certDir}/privkey.pem`, Buffer.from(cert.privkey, 'base64'));
+              
+              // Set proper permissions
+              await Bun.spawn(["chmod", "600", `${certDir}/privkey.pem`]).exited;
+              
+              console.log(`🔐 Synced certificate for ${item.domain} (v${cert.version})`);
+            }
+          } catch (syncError) {
+            console.error(`Failed to sync certificate for ${item.domain}:`, syncError);
+          }
+        }
+      } catch (error) {
+        console.error("Certificate sync error:", error);
+      }
+    }, 5 * 60 * 1000);
+
+    console.log("✅ Certificate sync enabled (check every 5 minutes)");
+
     // Graceful shutdown
     process.on("SIGINT", async () => {
       console.log("\n🛑 Shutting down...");
+      
+      // Shutdown services
+      await crossServerService.shutdownCrossServerRouting();
+      securityService.shutdownSecurityService();
+      monitoringService.shutdownMonitoringService();
+      
+      // Cleanup TCP tunnels for this server
+      await tcpService.cleanupServerPorts();
+      
       await closeDatabase();
       process.exit(0);
     });

@@ -42,6 +42,12 @@ interface ClientConfig {
   serviceName?: string;
   protocol?: 'http' | 'tcp'; // 'http' for HTTP/HTTPS/WSS, 'tcp' for raw TCP (SSH, MongoDB, etc.)
   forceNew?: boolean; // Force creation of new subdomain even if same org owns it
+  // IP Security options
+  ipSecurity?: {
+    mode: 'allow-all' | 'allowlist' | 'blocklist';
+    allowedIps?: string[];
+    blockedIps?: string[];
+  };
 }
 
 interface ServiceInfo {
@@ -251,6 +257,26 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
   // Check if force-new is requested (always create new subdomain)
   const forceNew = args['force-new'] === 'true' || args['force-new'] === '' || args['new'] === 'true' || args['new'] === '';
 
+  // Parse IP security options
+  let ipSecurity: ClientConfig['ipSecurity'] | undefined;
+  
+  // --restrict flag: enable allowlist mode (only specified IPs can access)
+  if (args['restrict'] === 'true' || args['restrict'] === '') {
+    ipSecurity = { mode: 'allowlist', allowedIps: [] };
+  }
+  
+  // --allow-ip: specify IPs for allowlist (implies allowlist mode)
+  if (args['allow-ip']) {
+    const allowedIps = args['allow-ip'].split(',').map(ip => ip.trim()).filter(ip => ip);
+    ipSecurity = { mode: 'allowlist', allowedIps };
+  }
+  
+  // --block-ip: specify IPs for blocklist (implies blocklist mode)
+  if (args['block-ip']) {
+    const blockedIps = args['block-ip'].split(',').map(ip => ip.trim()).filter(ip => ip);
+    ipSecurity = { mode: 'blocklist', blockedIps };
+  }
+
   return {
     serverUrl: args["server"] || process.env.JROK_SERVER || storedConfig.serverUrl || DEFAULT_SERVER,
     domain: args["domain"] || process.env.JROK_DOMAIN,
@@ -263,6 +289,7 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
     serviceName: args["docker-service"] || args["k8s-service"] || process.env.JROK_SERVICE,
     protocol: isTcp ? 'tcp' : 'http',
     forceNew,
+    ipSecurity,
   };
 }
 
@@ -585,6 +612,17 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   if (config.forceNew) {
     wsUrl.searchParams.set("forceNew", "true");
   }
+  
+  // IP Security settings
+  if (config.ipSecurity) {
+    wsUrl.searchParams.set("ipSecurityMode", config.ipSecurity.mode);
+    if (config.ipSecurity.allowedIps && config.ipSecurity.allowedIps.length > 0) {
+      wsUrl.searchParams.set("allowedIps", config.ipSecurity.allowedIps.join(','));
+    }
+    if (config.ipSecurity.blockedIps && config.ipSecurity.blockedIps.length > 0) {
+      wsUrl.searchParams.set("blockedIps", config.ipSecurity.blockedIps.join(','));
+    }
+  }
 
   // Set target based on service type
   if (config.serviceType === 'port') {
@@ -649,6 +687,16 @@ async function connectAgent(config: ClientConfig): Promise<void> {
           const actualFullDomain = `${message.domain}.${baseDomain}`;
           if (protocol === 'http') {
             console.log(`🌐 Your service is available at: https://${actualFullDomain}`);
+          }
+        }
+        
+        // Display IP security status if enabled
+        if (message.ipSecurity) {
+          console.log(`\n🔐 IP Security: ${message.ipSecurity.mode}`);
+          if (message.ipSecurity.mode === 'allowlist') {
+            console.log(`   ✅ Only ${message.ipSecurity.allowedIps} allowed IPs can access`);
+          } else if (message.ipSecurity.mode === 'blocklist') {
+            console.log(`   🚫 ${message.ipSecurity.blockedIps} IPs are blocked`);
           }
         }
         
@@ -1338,6 +1386,20 @@ CONNECT EXAMPLES:
   # Kubernetes service
   jrok connect --domain app --k8s-service my-svc:8080
 
+IP SECURITY EXAMPLES:
+  # Restrict access to specific IPs only (internal tools)
+  jrok --port 3000 --allow-ip 192.168.1.0/24,10.0.0.5
+  
+  # Block specific IPs
+  jrok --port 8080 --block-ip 1.2.3.4,5.6.7.8
+  
+  # Enable restrict mode (no IPs allowed until you add them via dashboard)
+  jrok --port 3000 --restrict
+  
+  # Combine with TCP tunnels for secure internal services
+  jrok --tcp --port 22 --allow-ip 10.0.0.0/8 --domain ssh-internal
+  jrok --tcp --port 27017 --allow-ip 192.168.1.100 --domain mongodb-prod
+
 OPTIONS:
   --server           Server URL (default: ${DEFAULT_SERVER})
   --auth             API key (or use config/env)
@@ -1353,6 +1415,11 @@ OPTIONS:
   --email            Email for SSL certificate
   --subdomain        Custom subdomain for domain mapping
   --id               ID for apikey operations
+  
+  # IP Security Options
+  --allow-ip         Comma-separated list of allowed IPs/CIDRs (enables allowlist mode)
+  --block-ip         Comma-separated list of blocked IPs/CIDRs (enables blocklist mode)
+  --restrict         Enable allowlist mode with empty list (blocks all until IPs added)
 
 ENVIRONMENT VARIABLES:
   JROK_SERVER     Server URL (default: ${DEFAULT_SERVER})

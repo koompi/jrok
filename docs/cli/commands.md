@@ -7,12 +7,14 @@ Complete reference for all Jrok CLI commands.
 | Command | Description |
 |---------|-------------|
 | `jrok --port 3000` | Expose localhost:3000 (simplest usage) |
+| `jrok --port 5432 --tcp` | Expose TCP service (databases, SSH, etc.) |
 | `jrok connect` | Connect with full options |
 | `jrok list` | List active tunnels |
 | `jrok disconnect` | Disconnect a tunnel |
 | `jrok config` | Manage CLI configuration |
 | `jrok org` | Organization management |
 | `jrok apikey` | API key management |
+| `jrok domain` | Custom domain management |
 | `jrok whoami` | Show current user info |
 | `jrok version` | Show version |
 | `jrok help` | Show help |
@@ -57,6 +59,34 @@ jrok --port 3000 --domain myapp
 
 Access at: `https://myapp.tunnel.koompi.cloud`
 
+### TCP Tunnel (Databases, SSH, etc.)
+
+Expose raw TCP services like databases:
+
+```bash
+jrok --port 5432 --tcp
+```
+
+**Output:**
+```
+🔌 Creating TCP tunnel...
+📍 TCP Port Assigned: 54321
+🏠 Local Service: localhost:5432
+
+✅ TCP tunnel established!
+🌐 Connect via: tcp://tunnel.koompi.cloud:54321
+```
+
+### Force New Subdomain
+
+When you already own a subdomain but want a fresh tunnel:
+
+```bash
+jrok --port 3000 --domain myapp --force-new
+```
+
+This creates a new tunnel with a suffix (e.g., `myapp-a7b3`) instead of updating the existing one.
+
 ### Connect with All Options
 
 ```bash
@@ -65,7 +95,8 @@ jrok connect \
   --auth jrok_xxxx \
   --domain myapp \
   --port 3000 \
-  --host localhost
+  --host localhost \
+  --force-new          # Optional: force new subdomain
 ```
 
 ### Connect Docker Swarm Service
@@ -89,8 +120,18 @@ jrok connect --domain app --k8s-service my-service:8080
 | `--domain` | Subdomain name | Auto-generated |
 | `--port` | Local port | `3000` |
 | `--host` | Local host | `localhost` |
+| `--tcp` | Create TCP tunnel (for databases, SSH) | `false` |
+| `--force-new` | Force new subdomain even if you own existing | `false` |
 | `--docker-service` | Docker Swarm service name | - |
 | `--k8s-service` | Kubernetes service:port | - |
+
+### Subdomain Conflict Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Subdomain available | Assigned as requested |
+| Subdomain owned by you | Updates existing tunnel (or use `--force-new`) |
+| Subdomain owned by another org | Auto-generates suffix (e.g., `myapp-a7b3`) |
 
 ---
 
@@ -279,6 +320,129 @@ jrok apikey revoke --org org_abc123def456 --id key_abc123def456
 
 ---
 
+## Domain Commands
+
+Manage custom domains that point to your tunnels.
+
+### Register Custom Domain
+
+Register a custom domain with auto-generated subdomain target:
+
+```bash
+jrok domain register --domain mysite.com
+```
+
+**Output:**
+```
+✅ Custom domain registered: mysite.com
+
+📋 Next Steps:
+1. Add CNAME record to your DNS:
+   mysite.com → myapp-auto.tunnel.koompi.cloud
+
+2. Wait for DNS propagation (usually 1-10 minutes)
+
+3. Verify and issue SSL certificate:
+   jrok domain verify --domain mysite.com
+```
+
+### Register with Specific Subdomain
+
+Target a specific subdomain:
+
+```bash
+jrok domain register --domain mysite.com --subdomain myapp
+```
+
+### Verify Domain (CNAME + SSL)
+
+After configuring DNS, verify and issue SSL:
+
+```bash
+jrok domain verify --domain mysite.com
+```
+
+**Output (success):**
+```
+✅ CNAME verified for mysite.com
+🔐 SSL certificate issued successfully!
+🌐 Your domain is now active: https://mysite.com
+```
+
+**Output (pending):**
+```
+⏳ CNAME not yet verified for mysite.com
+
+Expected CNAME target: myapp.tunnel.koompi.cloud
+Current resolution: (not found)
+
+💡 DNS propagation can take up to 48 hours.
+   Run this command again once DNS is configured.
+```
+
+### Check Domain Status
+
+Check verification status without attempting to issue SSL:
+
+```bash
+jrok domain status --domain mysite.com
+```
+
+**Output:**
+```
+📋 Domain Status: mysite.com
+
+CNAME Target:   myapp.tunnel.koompi.cloud
+CNAME Verified: ✅ Yes (verified 2 hours ago)
+SSL Status:     ✅ Issued
+Subdomain:      myapp
+Organization:   My Company
+```
+
+### List Custom Domains
+
+```bash
+jrok domain list
+```
+
+**Output:**
+```
+📋 Your Custom Domains:
+
+Domain                  Target Subdomain       CNAME Status    SSL Status
+────────────────────────────────────────────────────────────────────────────
+mysite.com              myapp                  ✅ Verified     ✅ Issued
+api.mycompany.com       api                    ⏳ Pending      ❌ None
+staging.example.org     staging-test           ✅ Verified     ✅ Issued
+```
+
+### Domain Options
+
+| Option | Description | Required |
+|--------|-------------|:--------:|
+| `--domain` | The custom domain (e.g., mysite.com) | ✅ |
+| `--subdomain` | Target subdomain (auto-generated if not specified) | ❌ |
+
+### Custom Domain Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  1. Register Domain                                          │
+│     jrok domain register --domain mysite.com                 │
+│                          ↓                                   │
+│  2. Configure DNS (at your registrar)                        │
+│     mysite.com CNAME → myapp.tunnel.koompi.cloud            │
+│                          ↓                                   │
+│  3. Verify CNAME & Issue SSL                                 │
+│     jrok domain verify --domain mysite.com                   │
+│                          ↓                                   │
+│  4. Domain Active! 🎉                                        │
+│     https://mysite.com → your tunnel                         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Utility Commands
 
 ### Whoami
@@ -309,7 +473,7 @@ jrok version
 
 **Output:**
 ```
-jrok v2.2.0
+jrok v2.3.0
 Node v20.10.0
 ```
 
@@ -332,6 +496,8 @@ All CLI options can be set via environment variables:
 | `JROK_DOMAIN` | Default subdomain | `myapp` |
 | `JROK_PORT` | Default port | `3000` |
 | `JROK_HOST` | Default host | `localhost` |
+| `JROK_TCP` | Enable TCP mode | `true` |
+| `JROK_FORCE_NEW` | Force new subdomain | `true` |
 
 ### Using Environment Variables
 
@@ -424,8 +590,35 @@ jrok --port 3000 --domain frontend
 # Terminal 2: Backend
 jrok --port 8080 --domain backend
 
-# Terminal 3: Database admin
+# Terminal 3: Database admin (HTTP)
 jrok --port 5432 --domain db-admin
+```
+
+### TCP Tunnels (Databases)
+
+```bash
+# PostgreSQL
+jrok --port 5432 --tcp
+
+# MySQL
+jrok --port 3306 --tcp
+
+# Redis
+jrok --port 6379 --tcp
+
+# SSH
+jrok --port 22 --tcp
+```
+
+### Custom Domains
+
+```bash
+# Register and verify a custom domain
+jrok domain register --domain api.mycompany.com --subdomain api
+# Configure DNS: api.mycompany.com CNAME → api.tunnel.koompi.cloud
+jrok domain verify --domain api.mycompany.com
+
+# Now api.mycompany.com routes to your api subdomain tunnel
 ```
 
 ---

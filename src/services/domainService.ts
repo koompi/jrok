@@ -4,6 +4,7 @@ import * as vpsService from "./vpsService";
 import * as backupUtils from "../utils/backupUtils";
 import * as notificationService from "./notificationService";
 import * as certSyncService from "./certificateSyncService";
+import * as monitoringService from "./monitoringService";
 import { generateId, sanitizeDomainToSubdomain, generateShortSuffix } from "../utils/helpers";
 import { getTunnelByDomain } from "../utils/database";
 import dns from "dns/promises";
@@ -188,8 +189,13 @@ export async function verifyAndIssueCertificate(domainName: string): Promise<Cus
 
     return updatedDomain;
   } catch (error) {
+    // Track certificate failure
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    monitoringService.trackCertRenewal(false, errorMsg);
+    monitoringService.addLog('error', 'certificates', `Certificate issuance failed for ${domainName}`, { error: errorMsg });
+    
     // Don't delete domain on cert failure - user can retry
-    throw new Error(`Certificate issuance failed: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Certificate issuance failed: ${errorMsg}`);
   }
 }
 
@@ -292,30 +298,43 @@ async function issueCertificate(
     const credentialsPath = `/etc/letsencrypt/secrets/cloudflare_${safeDomain}.ini`;
     const credentialsContent = `dns_cloudflare_api_token = ${safeToken}`;
     
-    // Create directory
+    // Create directory with secure permissions
     await Bun.spawn(["mkdir", "-p", "/etc/letsencrypt/secrets/"]).exited;
+    await Bun.spawn(["chmod", "700", "/etc/letsencrypt/secrets/"]).exited;
     
     // Write credentials file
     await Bun.write(credentialsPath, credentialsContent);
     
-    // Set permissions
+    // Set restrictive permissions
     await Bun.spawn(["chmod", "600", credentialsPath]).exited;
     
-    // Run certbot with separate arguments (no shell interpolation)
-    const certbotProcess = Bun.spawn([
-      "certbot", "certonly",
-      "--dns-cloudflare",
-      "--dns-cloudflare-credentials", credentialsPath,
-      "--email", safeEmail,
-      "--agree-tos",
-      "--non-interactive",
-      "-d", safeDomain,
-      "-d", `*.${safeDomain}`
-    ]);
-    
-    const exitCode = await certbotProcess.exited;
-    if (exitCode !== 0) {
-      throw new Error(`Certbot failed with exit code ${exitCode}`);
+    try {
+      // Run certbot with separate arguments (no shell interpolation)
+      const certbotProcess = Bun.spawn([
+        "certbot", "certonly",
+        "--dns-cloudflare",
+        "--dns-cloudflare-credentials", credentialsPath,
+        "--email", safeEmail,
+        "--agree-tos",
+        "--non-interactive",
+        "-d", safeDomain,
+        "-d", `*.${safeDomain}`
+      ]);
+      
+      const exitCode = await certbotProcess.exited;
+      if (exitCode !== 0) {
+        throw new Error(`Certbot failed with exit code ${exitCode}`);
+      }
+    } finally {
+      // Security: Always cleanup credentials file after use
+      try {
+        // Overwrite with zeros before deletion (secure delete)
+        await Bun.write(credentialsPath, "0".repeat(credentialsContent.length));
+        await Bun.spawn(["rm", "-f", credentialsPath]).exited;
+        console.log(`🔒 Cleaned up credentials file: ${credentialsPath}`);
+      } catch (cleanupError) {
+        console.warn(`⚠️  Could not cleanup credentials file: ${cleanupError}`);
+      }
     }
   } else {
     // Fallback: Use HTTP challenge (requires domain to resolve to VPS)
@@ -336,6 +355,11 @@ async function issueCertificate(
   }
 
   console.log(`✅ Certificate issued for ${safeDomain}`);
+  
+  // Track successful certificate issuance
+  monitoringService.trackCertRenewal(true);
+  monitoringService.addLog('info', 'certificates', `Certificate issued for ${safeDomain}`);
+  
   return certPath;
 }
 

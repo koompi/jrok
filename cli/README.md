@@ -1,12 +1,15 @@
-# Jrok CLI v2.0
+# Jrok CLI v2.3
 
 **Expose local services (ports, Docker, Kubernetes) to the internet via secure reverse proxy**
 
 ## Features
 
-- ✅ **TCP Port Forwarding** - Expose any local port
+- ✅ **HTTP/HTTPS Tunnels** - Expose any local HTTP service
+- ✅ **TCP Tunnels** - Raw TCP support for databases, SSH, etc.
 - ✅ **Docker Swarm Support** - Load-balanced container services  
 - ✅ **Kubernetes Support** - Native K8s service integration
+- ✅ **Custom Domains** - CNAME-verified custom domain support
+- ✅ **Smart Subdomain Handling** - Auto-suffix on conflicts
 - ✅ **Organization Management** - Manage orgs from CLI
 - ✅ **API Key Management** - Create and revoke API keys
 - ✅ **Config Persistence** - Save credentials locally
@@ -69,6 +72,15 @@ npm run dev  # Running on http://localhost:3000
 jrok connect --domain myapp.example.com --port 3000
 
 # Now accessible at https://myapp.example.com
+```
+
+### 2b. Expose TCP Service (Database, SSH, etc.)
+
+```bash
+# Expose PostgreSQL database
+jrok connect --port 5432 --tcp
+
+# Now accessible at tcp://tunnel.example.com:54321
 ```
 
 ### 3. Expose Docker Swarm Service
@@ -177,13 +189,23 @@ jrok connect [options]
 
 Options:
   --server <url>          Server URL (or use config/env)
-  --domain <domain>       Public domain name (required)
+  --domain <domain>       Public domain/subdomain name
   --port <port>           Local port for TCP forwarding
   --host <host>           Local host (default: localhost)
+  --tcp                   Create TCP tunnel (for databases, SSH)
+  --force-new             Force new subdomain even if you own existing
   --docker-service <name> Docker Swarm service name
   --k8s-service <name>    Kubernetes service:port
   --auth <token>          API key (or use config/env)
 ```
+
+### Subdomain Conflict Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| Subdomain available | Assigned as requested |
+| You own the subdomain | Updates existing (or use `--force-new`) |
+| Another org owns it | Auto-generates suffix (e.g., `myapp-a7b3`) |
 
 ### list
 
@@ -199,6 +221,18 @@ Disconnect a service:
 
 ```bash
 jrok disconnect --domain myapp.example.com
+```
+
+### domain
+
+Manage custom domains:
+
+```bash
+jrok domain register --domain mysite.com              # Register with auto subdomain
+jrok domain register --domain mysite.com --subdomain api  # Register with specific subdomain
+jrok domain verify --domain mysite.com                # Verify CNAME and issue SSL
+jrok domain status --domain mysite.com                # Check verification status
+jrok domain list                                      # List all custom domains
 ```
 
 ### config
@@ -382,10 +416,11 @@ sudo journalctl -u jrok -f
 ### Domain Already in Use
 
 ```bash
-❌ Domain already in use by another agent
+ℹ️ Subdomain 'myapp' is taken by another organization
+🔄 Assigned new subdomain: myapp-a7b3
 ```
 
-**Solution:** Disconnect the existing agent or use a different domain.
+This is expected behavior. Jrok auto-generates a unique suffix when your requested subdomain is taken by another organization. If you own the subdomain, use `--force-new` to create a new one instead of updating.
 
 ### Agent Disconnecting
 

@@ -306,6 +306,47 @@ class ApiClient {
     });
   }
 
+  // ============ New IP Security API ============
+
+  async getTunnelIpSecurity(tunnelId: string): Promise<{ 
+    success: boolean; 
+    tunnelId: string; 
+    ipSecurity: TunnelIpSecurity 
+  }> {
+    return this.request(`/security/ip/${tunnelId}`);
+  }
+
+  async setTunnelIpSecurity(
+    tunnelId: string, 
+    ipSecurity: TunnelIpSecurity
+  ): Promise<{ success: boolean; message: string; mode: string }> {
+    return this.request(`/security/ip/${tunnelId}`, {
+      method: 'POST',
+      body: JSON.stringify(ipSecurity),
+    });
+  }
+
+  async addIpToTunnelSecurity(
+    tunnelId: string, 
+    ip: string, 
+    listType: 'allow' | 'block'
+  ): Promise<{ success: boolean; message: string }> {
+    return this.request(`/security/ip/${tunnelId}/add`, {
+      method: 'POST',
+      body: JSON.stringify({ ip, listType }),
+    });
+  }
+
+  async removeIpFromTunnelSecurity(
+    tunnelId: string, 
+    ip: string
+  ): Promise<{ success: boolean; message: string }> {
+    return this.request(`/security/ip/${tunnelId}/remove`, {
+      method: 'POST',
+      body: JSON.stringify({ ip }),
+    });
+  }
+
   async getTunnelConnectionLogs(tunnelId: string, limit?: number, offset?: number): Promise<{ 
     success: boolean; 
     tunnelId: string; 
@@ -323,6 +364,56 @@ class ApiClient {
     organizationId: string 
   } & BandwidthLimit> {
     return this.request(`/security/bandwidth/${organizationId}`);
+  }
+
+  // ============ Monitoring API (Super Admin Only) ============
+
+  async getMonitoringDashboard(): Promise<{ success: boolean; data: MonitoringDashboardData }> {
+    return this.request('/admin/monitoring');
+  }
+
+  async getSystemHealth(): Promise<{ success: boolean; health: SystemHealth }> {
+    return this.request('/admin/monitoring/health');
+  }
+
+  async getMetricsHistory(minutes: number = 60): Promise<{ success: boolean; history: SystemMetricsSnapshot[] }> {
+    return this.request(`/admin/monitoring/metrics?minutes=${minutes}`);
+  }
+
+  async getMonitoringLogs(
+    count?: number, 
+    level?: 'info' | 'warn' | 'error' | 'debug',
+    category?: string
+  ): Promise<{ success: boolean; logs: SystemLog[] }> {
+    const params = new URLSearchParams();
+    if (count) params.append('count', count.toString());
+    if (level) params.append('level', level);
+    if (category) params.append('category', category);
+    const query = params.toString();
+    return this.request(`/admin/monitoring/logs${query ? `?${query}` : ''}`);
+  }
+
+  async getRateLimitStats(): Promise<{ success: boolean; rateLimits: RateLimitStats[] }> {
+    return this.request('/admin/monitoring/rate-limits');
+  }
+
+  async getAuthMetrics(): Promise<{ success: boolean; auth: AuthMetrics }> {
+    return this.request('/admin/monitoring/auth');
+  }
+
+  async getCertMetrics(): Promise<{ success: boolean; certificates: CertMetrics }> {
+    return this.request('/admin/monitoring/certificates');
+  }
+
+  async getSystemConfig(): Promise<{ success: boolean; config: SystemConfig }> {
+    return this.request('/admin/monitoring/config');
+  }
+
+  async updateSystemConfig(config: Partial<SystemConfig>): Promise<{ success: boolean; config: SystemConfig }> {
+    return this.request('/admin/monitoring/config', {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    });
   }
 }
 
@@ -573,6 +664,14 @@ export interface SecurityStats {
   logsBuffered: number;
 }
 
+export interface TunnelIpSecurity {
+  mode: 'allow-all' | 'allowlist' | 'blocklist';
+  allowedIps?: string[];
+  blockedIps?: string[];
+  updatedAt?: number;
+  updatedBy?: string;
+}
+
 export interface BlockedIp {
   ip: string;
   reason: string;
@@ -599,6 +698,122 @@ export interface BandwidthLimit {
   usedBytes: number;
   limitBytes: number;
   percentUsed: number;
+}
+
+// Monitoring Types
+export interface SystemHealth {
+  status: 'healthy' | 'degraded' | 'critical';
+  uptime: number;
+  memory: {
+    used: number;
+    total: number;
+    percentage: number;
+    heapUsed: number;
+    heapTotal: number;
+  };
+  cpu: {
+    loadAverage: number[];
+    cores: number;
+  };
+  connections: {
+    agents: number;
+    clients: number;
+    perIpCount: number;
+    maxAgents: number;
+    maxClients: number;
+  };
+  mapSizes: {
+    pendingRequests: number;
+    orgPlanCache: number;
+    rateLimitStats: number;
+    connectionsPerIp: number;
+  };
+}
+
+export interface RateLimitStats {
+  endpoint: string;
+  hits: number;
+  blocked: number;
+  lastHit: number;
+}
+
+export interface AuthMetrics {
+  successCount: number;
+  failureCount: number;
+  failureRate: number;
+  topFailedIdentifiers: Array<{ identifier: string; count: number; lastAttempt: number }>;
+}
+
+export interface CertMetrics {
+  renewalAttempts: number;
+  renewalSuccesses: number;
+  renewalFailures: number;
+  lastRenewal: number | null;
+  lastError: string | null;
+}
+
+export interface SystemLog {
+  timestamp: number;
+  level: 'info' | 'warn' | 'error' | 'debug';
+  category: string;
+  message: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SystemMetricsSnapshot {
+  timestamp: number;
+  memory: {
+    heapUsed: number;
+    heapTotal: number;
+    rss: number;
+    external: number;
+  };
+  cpu: {
+    user: number;
+    system: number;
+  };
+  connections: {
+    agents: number;
+    clients: number;
+  };
+  mapSizes: {
+    pendingRequests: number;
+    orgPlanCache: number;
+  };
+}
+
+export interface MonitoringConfig {
+  maxAgentConnections: number;
+  maxClientConnections: number;
+  maxConnectionsPerIp: number;
+  metricsRetentionDays: number;
+}
+
+export interface MonitoringDashboardData {
+  health: SystemHealth;
+  rateLimits: RateLimitStats[];
+  auth: AuthMetrics;
+  certificates: CertMetrics;
+  logs: SystemLog[];
+  history: SystemMetricsSnapshot[];
+  config: MonitoringConfig;
+}
+
+export interface SystemConfig {
+  maxAgentConnections: number;
+  maxClientConnections: number;
+  maxConnectionsPerIp: number;
+  rateLimits: {
+    auth: { requests: number; windowMinutes: number };
+    domain: { requests: number; windowHours: number };
+    certificate: { requests: number; windowHours: number };
+    http: { requests: number; windowMinutes: number };
+  };
+  features: {
+    waitingListEnabled: boolean;
+    autoCleanupEnabled: boolean;
+    crossServerRoutingEnabled: boolean;
+  };
 }
 
 export const api = new ApiClient();

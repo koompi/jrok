@@ -11,6 +11,9 @@ export interface Agent {
   apiKeyId?: string;
   tunnelId?: string; // Cached for performance - avoids MongoDB lookup per request
   protocol?: TunnelProtocol; // 'http' or 'tcp'
+  // Multi-server support: which server owns this agent connection
+  serverId?: string; // VPS_ID of the server handling this agent
+  serverHost?: string; // Public host of the server (for routing)
 }
 
 // ============ TCP Tunnel Types ============
@@ -71,6 +74,21 @@ export interface Tunnel {
   // TCP tunnel fields
   protocol?: TunnelProtocol; // 'http' (default) or 'tcp'
   tcpPort?: number; // allocated public TCP port (e.g., 10001)
+  // Multi-server support
+  serverId?: string; // VPS_ID of server owning the agent connection
+  serverHost?: string; // Public host for direct routing
+  updatedAt?: number; // Last update timestamp
+  // IP Access Control
+  ipSecurity?: TunnelIpSecurity;
+}
+
+// IP Security settings for a tunnel
+export interface TunnelIpSecurity {
+  mode: 'allow-all' | 'allowlist' | 'blocklist'; // default: 'allow-all'
+  allowedIps?: string[]; // IPs/CIDRs allowed when mode='allowlist'
+  blockedIps?: string[]; // IPs/CIDRs blocked when mode='blocklist'
+  updatedAt?: number;
+  updatedBy?: string; // userId who last updated
 }
 
 export interface TunnelConfig {

@@ -3,11 +3,12 @@ import { api, User, Organization, SystemSettings } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { useToast } from '@/components/ui/use-toast';
-import { Loader2, Check, X, Shield, Users, Building } from 'lucide-react';
+import { Loader2, Check, X, Shield, Users, Building, Activity } from 'lucide-react';
 import AdminOrgsPage from './dashboard/AdminOrgsPage';
+import MonitoringPage from './dashboard/MonitoringPage';
 
 export default function AdminDashboard() {
-  const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'orgs'>('settings');
+  const [activeTab, setActiveTab] = useState<'settings' | 'users' | 'orgs' | 'monitoring'>('settings');
   const { toast } = useToast();
 
   return (
@@ -35,11 +36,19 @@ export default function AdminDashboard() {
         >
           Organizations
         </button>
+        <button
+          className={`pb-2 px-4 flex items-center gap-1 ${activeTab === 'monitoring' ? 'border-b-2 border-primary font-bold' : ''}`}
+          onClick={() => setActiveTab('monitoring')}
+        >
+          <Activity className="h-4 w-4" />
+          Monitoring
+        </button>
       </div>
 
       {activeTab === 'settings' && <SystemSettingsTab />}
       {activeTab === 'users' && <UsersTab />}
       {activeTab === 'orgs' && <AdminOrgsPage />}
+      {activeTab === 'monitoring' && <MonitoringPage />}
     </div>
   );
 }

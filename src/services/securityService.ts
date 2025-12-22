@@ -6,7 +6,7 @@
  */
 
 import { getCollections } from "../utils/mongodb";
-import type { Organization, Plan, Tunnel } from "../types/index";
+import type { Organization, Plan, Tunnel, TunnelIpSecurity } from "../types/index";
 
 // ============ Configuration ============
 
@@ -57,7 +57,10 @@ const tcpBytesPerHour = new Map<string, RateLimitEntry>();
 // Bandwidth tracking (monthly)
 const monthlyBandwidth = new Map<string, { bytes: number; month: string }>();
 
-// IP Allowlist (tunnelId -> Set of allowed IPs/CIDRs)
+// IP Security Cache (tunnelId -> TunnelIpSecurity) - synced with MongoDB
+const ipSecurityCache = new Map<string, TunnelIpSecurity>();
+
+// IP Allowlist (tunnelId -> Set of allowed IPs/CIDRs) - legacy, kept for backward compat
 const ipAllowlists = new Map<string, Set<string>>();
 
 // Connection logs (stored in memory, periodically flushed to DB)
@@ -124,6 +127,66 @@ function ipMatchesAllowlist(ip: string, allowlist: Set<string>): boolean {
 }
 
 /**
+ * Check if IP matches a list (supports CIDR notation)
+ */
+function ipMatchesList(ip: string, ipList: string[]): boolean {
+  if (!ipList || ipList.length === 0) return false;
+  
+  // Direct match
+  if (ipList.includes(ip)) return true;
+  
+  // CIDR match
+  for (const entry of ipList) {
+    if (entry.includes('/') && ipInCidr(ip, entry)) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Check IP against tunnel's IP security settings
+ * Returns { allowed: true } if IP should be allowed
+ * Returns { allowed: false, reason: string } if IP should be blocked
+ */
+export function checkIpSecurity(tunnelId: string, remoteIp: string): { allowed: boolean; reason?: string } {
+  const security = ipSecurityCache.get(tunnelId);
+  
+  // Default: allow-all mode
+  if (!security || security.mode === 'allow-all') {
+    // Check legacy allowlist for backward compatibility
+    const legacyAllowlist = ipAllowlists.get(tunnelId);
+    if (legacyAllowlist && legacyAllowlist.size > 0 && !ipMatchesAllowlist(remoteIp, legacyAllowlist)) {
+      return { allowed: false, reason: 'IP not in allowlist' };
+    }
+    return { allowed: true };
+  }
+  
+  // Allowlist mode: only listed IPs can access
+  if (security.mode === 'allowlist') {
+    if (!security.allowedIps || security.allowedIps.length === 0) {
+      // Empty allowlist = block all (user hasn't set any IPs yet)
+      return { allowed: false, reason: 'No IPs in allowlist. Add IPs or switch to allow-all mode.' };
+    }
+    if (ipMatchesList(remoteIp, security.allowedIps)) {
+      return { allowed: true };
+    }
+    return { allowed: false, reason: 'IP not in allowlist' };
+  }
+  
+  // Blocklist mode: listed IPs are blocked, all others allowed
+  if (security.mode === 'blocklist') {
+    if (security.blockedIps && ipMatchesList(remoteIp, security.blockedIps)) {
+      return { allowed: false, reason: 'IP is blocklisted' };
+    }
+    return { allowed: true };
+  }
+  
+  return { allowed: true };
+}
+
+/**
  * Check if IP is in CIDR range (simplified IPv4 only)
  */
 function ipInCidr(ip: string, cidr: string): boolean {
@@ -164,7 +227,7 @@ export async function checkHttpRequest(
   const now = Date.now();
   const multiplier = getMultiplier(planTier);
   
-  // Check blocked IPs
+  // Check global blocked IPs first
   const blocked = blockedIps.get(remoteIp);
   if (blocked && blocked.expiresAt > now) {
     logConnection({
@@ -178,18 +241,18 @@ export async function checkHttpRequest(
     return { allowed: false, reason: `IP blocked: ${blocked.reason}`, retryAfter: Math.ceil((blocked.expiresAt - now) / 1000) };
   }
   
-  // Check IP allowlist if configured
-  const allowlist = ipAllowlists.get(tunnelId);
-  if (allowlist && allowlist.size > 0 && !ipMatchesAllowlist(remoteIp, allowlist)) {
+  // Check tunnel IP security (allowlist/blocklist)
+  const ipSecurityCheck = checkIpSecurity(tunnelId, remoteIp);
+  if (!ipSecurityCheck.allowed) {
     logConnection({
       tunnelId,
       organizationId,
       type: 'http',
       remoteIp,
       status: 'blocked',
-      reason: 'IP not in allowlist',
+      reason: ipSecurityCheck.reason || 'IP security check failed',
     });
-    return { allowed: false, reason: 'IP not in allowlist' };
+    return { allowed: false, reason: ipSecurityCheck.reason };
   }
   
   // Check per-minute rate limit
@@ -285,7 +348,7 @@ export async function checkTcpConnection(
   const now = Date.now();
   const multiplier = getMultiplier(planTier);
   
-  // Check blocked IPs
+  // Check global blocked IPs first
   const blocked = blockedIps.get(remoteIp);
   if (blocked && blocked.expiresAt > now) {
     logConnection({
@@ -299,18 +362,18 @@ export async function checkTcpConnection(
     return { allowed: false, reason: `IP blocked: ${blocked.reason}` };
   }
   
-  // Check IP allowlist if configured
-  const allowlist = ipAllowlists.get(tunnelId);
-  if (allowlist && allowlist.size > 0 && !ipMatchesAllowlist(remoteIp, allowlist)) {
+  // Check tunnel IP security (allowlist/blocklist)
+  const ipSecurityCheck = checkIpSecurity(tunnelId, remoteIp);
+  if (!ipSecurityCheck.allowed) {
     logConnection({
       tunnelId,
       organizationId,
       type: 'tcp',
       remoteIp,
       status: 'blocked',
-      reason: 'IP not in allowlist',
+      reason: ipSecurityCheck.reason || 'IP security check failed',
     });
-    return { allowed: false, reason: 'IP not in allowlist' };
+    return { allowed: false, reason: ipSecurityCheck.reason };
   }
   
   // Check per-tunnel TCP connection limit
@@ -493,7 +556,7 @@ export function checkMonthlyBandwidth(
 // ============ IP Allowlist Management ============
 
 /**
- * Set IP allowlist for a tunnel
+ * Set IP allowlist for a tunnel (legacy - kept for backward compatibility)
  */
 export function setIpAllowlist(tunnelId: string, ips: string[]): void {
   if (ips.length === 0) {
@@ -504,7 +567,7 @@ export function setIpAllowlist(tunnelId: string, ips: string[]): void {
 }
 
 /**
- * Get IP allowlist for a tunnel
+ * Get IP allowlist for a tunnel (legacy)
  */
 export function getIpAllowlist(tunnelId: string): string[] {
   const allowlist = ipAllowlists.get(tunnelId);
@@ -512,7 +575,7 @@ export function getIpAllowlist(tunnelId: string): string[] {
 }
 
 /**
- * Add IP to allowlist
+ * Add IP to allowlist (legacy)
  */
 export function addIpToAllowlist(tunnelId: string, ip: string): void {
   let allowlist = ipAllowlists.get(tunnelId);
@@ -524,12 +587,183 @@ export function addIpToAllowlist(tunnelId: string, ip: string): void {
 }
 
 /**
- * Remove IP from allowlist
+ * Remove IP from allowlist (legacy)
  */
 export function removeIpFromAllowlist(tunnelId: string, ip: string): void {
   const allowlist = ipAllowlists.get(tunnelId);
   if (allowlist) {
     allowlist.delete(ip);
+  }
+}
+
+// ============ New IP Security Management (with persistence) ============
+
+/**
+ * Get IP security settings for a tunnel
+ */
+export function getTunnelIpSecurity(tunnelId: string): TunnelIpSecurity {
+  return ipSecurityCache.get(tunnelId) || { mode: 'allow-all' };
+}
+
+/**
+ * Set IP security settings for a tunnel and persist to MongoDB
+ */
+export async function setTunnelIpSecurity(
+  tunnelId: string, 
+  security: TunnelIpSecurity,
+  updatedBy?: string
+): Promise<void> {
+  const collections = getCollections();
+  
+  // Add metadata
+  security.updatedAt = Date.now();
+  if (updatedBy) security.updatedBy = updatedBy;
+  
+  // Update cache with provided key
+  ipSecurityCache.set(tunnelId, security);
+  
+  // Find the tunnel to get both ID and domain for caching
+  const tunnel = await collections.tunnels.findOne(
+    { $or: [{ id: tunnelId }, { domain: tunnelId }] }
+  );
+  
+  // Also cache by the alternate key (domain or ID) for lookups
+  if (tunnel) {
+    if (tunnel.id && tunnel.id !== tunnelId) {
+      ipSecurityCache.set(tunnel.id, security);
+    }
+    if (tunnel.domain && tunnel.domain !== tunnelId) {
+      ipSecurityCache.set(tunnel.domain, security);
+    }
+  }
+  
+  // Persist to MongoDB (update tunnel document)
+  await collections.tunnels.updateOne(
+    { $or: [{ id: tunnelId }, { domain: tunnelId }] },
+    { $set: { ipSecurity: security, updatedAt: Date.now() } }
+  );
+  
+  console.log(`🔐 Updated IP security for tunnel ${tunnelId}: mode=${security.mode}`);
+}
+
+/**
+ * Set allowlist mode with IPs
+ */
+export async function setTunnelAllowlist(
+  tunnelId: string, 
+  allowedIps: string[],
+  updatedBy?: string
+): Promise<void> {
+  await setTunnelIpSecurity(tunnelId, {
+    mode: 'allowlist',
+    allowedIps,
+    blockedIps: [],
+  }, updatedBy);
+}
+
+/**
+ * Set blocklist mode with IPs
+ */
+export async function setTunnelBlocklist(
+  tunnelId: string, 
+  blockedIps: string[],
+  updatedBy?: string
+): Promise<void> {
+  await setTunnelIpSecurity(tunnelId, {
+    mode: 'blocklist',
+    allowedIps: [],
+    blockedIps,
+  }, updatedBy);
+}
+
+/**
+ * Set allow-all mode (default, no restrictions)
+ */
+export async function setTunnelAllowAll(tunnelId: string, updatedBy?: string): Promise<void> {
+  await setTunnelIpSecurity(tunnelId, {
+    mode: 'allow-all',
+    allowedIps: [],
+    blockedIps: [],
+  }, updatedBy);
+}
+
+/**
+ * Add IP to tunnel's allowlist (if in allowlist mode) or blocklist (if in blocklist mode)
+ */
+export async function addIpToTunnelSecurity(
+  tunnelId: string, 
+  ip: string, 
+  listType: 'allow' | 'block',
+  updatedBy?: string
+): Promise<void> {
+  const current = getTunnelIpSecurity(tunnelId);
+  
+  if (listType === 'allow') {
+    const allowedIps = current.allowedIps || [];
+    if (!allowedIps.includes(ip)) {
+      allowedIps.push(ip);
+    }
+    await setTunnelIpSecurity(tunnelId, {
+      ...current,
+      mode: 'allowlist',
+      allowedIps,
+    }, updatedBy);
+  } else {
+    const blockedIps = current.blockedIps || [];
+    if (!blockedIps.includes(ip)) {
+      blockedIps.push(ip);
+    }
+    await setTunnelIpSecurity(tunnelId, {
+      ...current,
+      mode: 'blocklist',
+      blockedIps,
+    }, updatedBy);
+  }
+}
+
+/**
+ * Remove IP from tunnel's allowlist or blocklist
+ */
+export async function removeIpFromTunnelSecurity(
+  tunnelId: string, 
+  ip: string,
+  updatedBy?: string
+): Promise<void> {
+  const current = getTunnelIpSecurity(tunnelId);
+  
+  const allowedIps = (current.allowedIps || []).filter(i => i !== ip);
+  const blockedIps = (current.blockedIps || []).filter(i => i !== ip);
+  
+  await setTunnelIpSecurity(tunnelId, {
+    ...current,
+    allowedIps,
+    blockedIps,
+  }, updatedBy);
+}
+
+/**
+ * Load IP security settings from MongoDB on startup
+ */
+export async function loadIpSecurityFromDb(): Promise<void> {
+  try {
+    const collections = getCollections();
+    
+    // Load from tunnels collection
+    const tunnels = await collections.tunnels.find(
+      { ipSecurity: { $exists: true } },
+      { projection: { id: 1, domain: 1, ipSecurity: 1 } }
+    ).toArray();
+    
+    for (const tunnel of tunnels) {
+      if (tunnel.ipSecurity) {
+        const tunnelKey = tunnel.id || tunnel.domain;
+        ipSecurityCache.set(tunnelKey, tunnel.ipSecurity as TunnelIpSecurity);
+      }
+    }
+    
+    console.log(`📋 Loaded IP security settings for ${ipSecurityCache.size} tunnels from DB`);
+  } catch (error) {
+    console.error('⚠️ Failed to load IP security from DB:', error);
   }
 }
 

@@ -88,8 +88,16 @@
         limit_req_zone $binary_remote_addr zone=general:10m rate=10r/s;
         limit_req_zone $binary_remote_addr zone=strict:10m rate=5r/s;
         
+        # Extract subdomain for consistent hashing (session affinity)
+        map $host $subdomain {
+            ~^(?<sub>[^.]+)\.{{ domain_name | regex_escape }}$ $sub;
+            default "main";
+        }
+        
         # Upstream - load balancing across all app servers
+        # Using consistent hash on subdomain ensures same agent always routes to same server
         upstream jrok {
+          hash $subdomain consistent;
           {% for host in groups['jrok_servers'] %}
           server {{ hostvars[host]['ansible_host'] }}:3000 max_fails=3 fail_timeout=30s;
           {% endfor %}
