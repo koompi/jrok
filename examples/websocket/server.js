@@ -38,7 +38,7 @@ const server = http.createServer((req, res) => {
 <body>
     <div class="container">
         <h1>🔌 Jrok WebSocket Test</h1>
-        <p>This example demonstrates WebSocket support in Jrok v2.2.0.</p>
+        <p>This example demonstrates WebSocket support in Jrok v2.3.0.</p>
         
         <div id="status" class="disconnected">Disconnected</div>
         
