@@ -1597,22 +1597,7 @@ async function startServer() {
       return await domainHandler.handleListDomains();
     }
 
-    if (path.startsWith("/domains/") && method === "GET") {
-      const domain = path.split("/")[2];
-      return await domainHandler.handleGetDomain(decodeURIComponent(domain));
-    }
-
-    if (path.startsWith("/domains/") && method === "DELETE") {
-      const domain = path.split("/")[2];
-      return await domainHandler.handleDeleteDomain(decodeURIComponent(domain));
-    }
-
-    if (path.startsWith("/domains/") && path.endsWith("/resync") && method === "POST") {
-      const domain = path.split("/")[2];
-      return await domainHandler.handleResyncDomain(decodeURIComponent(domain));
-    }
-
-    // Check CNAME verification status
+    // Check CNAME verification status - must be BEFORE generic /domains/:domain GET
     if (path.startsWith("/domains/") && path.endsWith("/verify-status") && method === "GET") {
       const domain = path.split("/")[2];
       return await domainHandler.handleCheckCnameStatus(decodeURIComponent(domain));
@@ -1622,6 +1607,11 @@ async function startServer() {
     if (path.startsWith("/domains/") && path.endsWith("/verify") && method === "POST") {
       const domain = path.split("/")[2];
       return await domainHandler.handleVerifyAndIssueCertificate(decodeURIComponent(domain));
+    }
+
+    if (path.startsWith("/domains/") && path.endsWith("/resync") && method === "POST") {
+      const domain = path.split("/")[2];
+      return await domainHandler.handleResyncDomain(decodeURIComponent(domain));
     }
 
     if (path.startsWith("/domains/") && path.endsWith("/transfer") && method === "POST") {
@@ -1634,11 +1624,6 @@ async function startServer() {
       return await domainHandler.handleBackupDomain(decodeURIComponent(domain));
     }
 
-    if (path.startsWith("/domains/") && path.includes("/backup") && method === "GET") {
-      const domain = path.split("/")[2];
-      return await domainHandler.handleListBackups(decodeURIComponent(domain));
-    }
-
     if (path.startsWith("/domains/") && path.includes("/backups/") && method === "POST") {
       const parts = path.split("/");
       const domain = parts[2];
@@ -1646,6 +1631,12 @@ async function startServer() {
       return await domainHandler.handleRestoreDomain(decodeURIComponent(domain), backupId);
     }
 
+    if (path.startsWith("/domains/") && path.includes("/backup") && method === "GET") {
+      const domain = path.split("/")[2];
+      return await domainHandler.handleListBackups(decodeURIComponent(domain));
+    }
+
+    // Generic domain GET/DELETE - must be AFTER specific routes
     if (path.startsWith("/domains/") && method === "GET") {
       const domain = path.split("/")[2];
       return await domainHandler.handleGetDomain(decodeURIComponent(domain));
