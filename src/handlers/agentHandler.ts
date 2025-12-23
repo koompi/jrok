@@ -111,14 +111,29 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
       return new Response(`Custom domain '${domain}' is not verified. Use 'jrok domain verify' to issue SSL certificate.`, { status: 400 });
     }
     
-    // Check if the custom domain belongs to this organization
-    if (authResult.organizationId && customDomainRecord.organizationId && 
-        customDomainRecord.organizationId !== authResult.organizationId) {
+    // SECURITY: Verify the user has permission to use this custom domain
+    // The custom domain MUST have an organizationId (set when registered)
+    // AND the user's organization MUST match
+    if (!customDomainRecord.organizationId) {
+      // Domain was registered without an organization - this is a legacy domain
+      // For security, we should require ownership
+      console.warn(`⚠️ Custom domain ${domain} has no organizationId set - blocking access`);
+      return new Response(`Custom domain '${domain}' has no owner configured. Please contact support.`, { status: 403 });
+    }
+    
+    if (!authResult.organizationId) {
+      // User is not associated with any organization
+      return new Response(`You must be part of an organization to use custom domains.`, { status: 403 });
+    }
+    
+    if (customDomainRecord.organizationId !== authResult.organizationId) {
+      // Domain belongs to a different organization
+      console.warn(`🚫 User from org ${authResult.organizationId} tried to use domain ${domain} owned by org ${customDomainRecord.organizationId}`);
       return new Response(`Custom domain '${domain}' belongs to another organization.`, { status: 403 });
     }
     
     isCustomDomain = true;
-    console.log(`✅ Custom domain validated: ${domain}`);
+    console.log(`✅ Custom domain validated: ${domain} (org: ${authResult.organizationId})`);
   } else {
     // Simple subdomain - validate format
     const subdomainRegex = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
