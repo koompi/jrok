@@ -4,6 +4,7 @@ import { validateApiKeyForAgent } from "../services/authService";
 import * as monitoringService from "../services/monitoringService";
 import * as planLimitService from "../services/planLimitService";
 import * as securityService from "../services/securityService";
+import * as db from "../utils/database";
 
 export async function handleAgentUpgrade(req: Request, server: any): Promise<Response> {
   if (req.headers.get("upgrade") !== "websocket") {
@@ -93,10 +94,37 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
     }
   }
 
-  // Domain name validation to prevent injection
-  const domainRegex = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
-  if (!domainRegex.test(domain)) {
-    return new Response("Invalid domain format", { status: 400 });
+  // Check if this is a custom domain (contains dots) or a subdomain
+  let isCustomDomain = false;
+  let customDomainRecord = null;
+  
+  if (domain.includes('.')) {
+    // This looks like a custom domain (e.g., jrok.jersen.app)
+    // Validate it's a registered and active custom domain
+    customDomainRecord = await db.getCustomDomainByName(domain);
+    
+    if (!customDomainRecord) {
+      return new Response(`Custom domain '${domain}' is not registered. Use 'jrok domain register' first.`, { status: 400 });
+    }
+    
+    if (!customDomainRecord.active) {
+      return new Response(`Custom domain '${domain}' is not verified. Use 'jrok domain verify' to issue SSL certificate.`, { status: 400 });
+    }
+    
+    // Check if the custom domain belongs to this organization
+    if (authResult.organizationId && customDomainRecord.organizationId && 
+        customDomainRecord.organizationId !== authResult.organizationId) {
+      return new Response(`Custom domain '${domain}' belongs to another organization.`, { status: 403 });
+    }
+    
+    isCustomDomain = true;
+    console.log(`✅ Custom domain validated: ${domain}`);
+  } else {
+    // Simple subdomain - validate format
+    const subdomainRegex = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
+    if (!subdomainRegex.test(domain)) {
+      return new Response("Invalid subdomain format", { status: 400 });
+    }
   }
 
   // Port validation
@@ -116,6 +144,7 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
       apiKeyId: authResult.apiKeyId,
       protocol,
       forceNew,
+      isCustomDomain, // Flag to indicate this is a custom domain tunnel
       // IP Security settings from CLI
       ipSecurity: ipSecurityMode ? {
         mode: ipSecurityMode,

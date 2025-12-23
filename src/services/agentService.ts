@@ -53,6 +53,7 @@ export interface RegisterAgentOptions {
   apiKeyId?: string;
   protocol?: TunnelProtocol;
   forceNew?: boolean;
+  isCustomDomain?: boolean; // Flag for custom domain tunnels
 }
 
 export interface RegisterAgentResult {
@@ -148,20 +149,27 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     apiKeyId,
     protocol = 'http',
     forceNew = false,
+    isCustomDomain = false,
   } = options;
 
   const collections = getCollections();
   
-  // Check domain availability
-  const availability = await checkDomainAvailability(requestedDomain, organizationId, forceNew);
-  
+  // For custom domains, skip availability check - we already validated in agentHandler
+  // For subdomains, check availability and generate unique if needed
   let finalDomain = requestedDomain;
   let wasModified = false;
   
-  if (!availability.available) {
-    finalDomain = await generateUniqueDomain(requestedDomain);
-    wasModified = true;
-    console.log(`📛 Domain "${requestedDomain}" taken, using "${finalDomain}" instead`);
+  if (!isCustomDomain) {
+    // Check domain availability for subdomains only
+    const availability = await checkDomainAvailability(requestedDomain, organizationId, forceNew);
+    
+    if (!availability.available) {
+      finalDomain = await generateUniqueDomain(requestedDomain);
+      wasModified = true;
+      console.log(`📛 Domain "${requestedDomain}" taken, using "${finalDomain}" instead`);
+    }
+  } else {
+    console.log(`🌐 Using custom domain: ${requestedDomain}`);
   }
 
   const agentId = generateId();

@@ -385,6 +385,7 @@ async function startServer() {
           const protocol: TunnelProtocol = ws.data?.protocol || 'http';
           const forceNew = ws.data?.forceNew || false;
           const ipSecurity = ws.data?.ipSecurity;
+          const isCustomDomain = ws.data?.isCustomDomain || false;
 
           if (!domain || !localPort) return;
 
@@ -399,9 +400,10 @@ async function startServer() {
             apiKeyId,
             protocol,
             forceNew,
+            isCustomDomain,
           }).then(async ({ agent, finalDomain, wasModified }) => {
             console.log(
-              `✅ Agent connected: ${finalDomain} (${localHost}:${localPort}) [${agent.id}] protocol: ${protocol}${wasModified ? ` (requested: ${domain})` : ''}`
+              `✅ Agent connected: ${finalDomain} (${localHost}:${localPort}) [${agent.id}] protocol: ${protocol}${wasModified ? ` (requested: ${domain})` : ''}${isCustomDomain ? ' [CUSTOM DOMAIN]' : ''}`
             );
 
             // Apply IP security settings if provided from CLI
@@ -1418,12 +1420,32 @@ async function startServer() {
         }
 
         // ============ Tunnel Domain Routing ============
-        // Check if this is a tunnel domain request (extract subdomain)
+        // Check if this is a tunnel domain request (extract subdomain or custom domain)
         // MUST be before auth check to allow public tunnel access
         const baseDomain = config.baseDomain; // e.g., "tunnel.koompi.cloud"
-        if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
+        
+        // First, check if this is a registered custom domain
+        let tunnelDomain: string | null = null;
+        let isCustomDomainRequest = false;
+        
+        // Check for custom domain (not a subdomain of baseDomain and not the baseDomain itself)
+        if (!hostname.endsWith(baseDomain) && hostname !== baseDomain && hostname !== 'localhost') {
+          // This might be a custom domain - check if it's registered
+          const { getCustomDomainByName } = await import("./utils/database");
+          const customDomain = await getCustomDomainByName(hostname);
+          
+          if (customDomain && customDomain.active) {
+            // This is a valid custom domain - use the full hostname as the tunnel domain
+            tunnelDomain = hostname;
+            isCustomDomainRequest = true;
+          }
+        } else if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
           // Extract subdomain (e.g., "demo" from "demo.tunnel.koompi.cloud")
-          const subdomain = hostname.replace(`.${baseDomain}`, '');
+          tunnelDomain = hostname.replace(`.${baseDomain}`, '');
+        }
+        
+        if (tunnelDomain) {
+          const subdomain = tunnelDomain; // For backward compatibility with existing code
           
           // Check if agent is on this server or needs cross-server routing
           const routeResult = await crossServerService.findServerForDomain(subdomain);
@@ -1444,7 +1466,7 @@ async function startServer() {
             return addCors(new Response(
               JSON.stringify({
                 success: false,
-                message: `No active agent found for domain: ${subdomain}. Please ensure the agent is running: bun src/index.ts connect --domain ${subdomain}`,
+                message: `No active agent found for domain: ${subdomain}. Please ensure the agent is running${isCustomDomainRequest ? `: jrok --port <port> --domain ${subdomain}` : `: jrok --port <port> --domain ${subdomain}`}`,
               }),
               { status: 503, headers: { "Content-Type": "application/json" } }
             ));
