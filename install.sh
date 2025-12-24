@@ -37,7 +37,7 @@ echo -e "${YELLOW}→${NC} Downloading Jrok CLI..."
 
 # Clone the repository
 cd "$TEMP_DIR"
-git clone --depth 1 --branch v2.3.0 https://github.com/koompi/jrok.git
+git clone --depth 1 --branch v2.4.0 https://github.com/koompi/jrok.git
 cd jrok/cli
 
 echo -e "${YELLOW}→${NC} Installing dependencies..."

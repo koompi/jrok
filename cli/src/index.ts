@@ -13,7 +13,7 @@ import { createInterface } from 'readline';
 import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 
-const VERSION = "2.3.0"; // Updated for TCP tunnel support (SSH, MongoDB, etc.)
+const VERSION = "2.4.0"; // Updated for TCP tunnel support (SSH, MongoDB, etc.)
 const DEFAULT_SERVER = "https://tunnel.koompi.cloud";
 const GITHUB_API = "https://api.github.com/repos/koompi/jrok";
 const GITHUB_RAW = "https://raw.githubusercontent.com/koompi/jrok";
@@ -42,6 +42,9 @@ interface ClientConfig {
   serviceName?: string;
   protocol?: 'http' | 'tcp'; // 'http' for HTTP/HTTPS/WSS, 'tcp' for raw TCP (SSH, MongoDB, etc.)
   forceNew?: boolean; // Force creation of new subdomain even if same org owns it
+  // Multi-agent load balancing options
+  groupMode?: boolean; // Enable group mode for load-balanced multi-agent deployments
+  instanceId?: string; // Unique instance identifier for this agent in the group
   // IP Security options
   ipSecurity?: {
     mode: 'allow-all' | 'allowlist' | 'blocklist';
@@ -257,6 +260,10 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
   // Check if force-new is requested (always create new subdomain)
   const forceNew = args['force-new'] === 'true' || args['force-new'] === '' || args['new'] === 'true' || args['new'] === '';
 
+  // Check if group mode is requested (multi-agent load balancing)
+  const groupMode = args['group'] === 'true' || args['group'] === '' || process.env.JROK_GROUP_MODE === 'true';
+  const instanceId = args['instance-id'] || process.env.JROK_INSTANCE_ID;
+
   // Parse IP security options
   let ipSecurity: ClientConfig['ipSecurity'] | undefined;
   
@@ -289,6 +296,8 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
     serviceName: args["docker-service"] || args["k8s-service"] || process.env.JROK_SERVICE,
     protocol: isTcp ? 'tcp' : 'http',
     forceNew,
+    groupMode,
+    instanceId,
     ipSecurity,
   };
 }
@@ -613,6 +622,14 @@ async function connectAgent(config: ClientConfig): Promise<void> {
     wsUrl.searchParams.set("forceNew", "true");
   }
   
+  // Multi-agent group mode settings
+  if (config.groupMode) {
+    wsUrl.searchParams.set("groupMode", "true");
+    if (config.instanceId) {
+      wsUrl.searchParams.set("instanceId", config.instanceId);
+    }
+  }
+  
   // IP Security settings
   if (config.ipSecurity) {
     wsUrl.searchParams.set("ipSecurityMode", config.ipSecurity.mode);
@@ -644,6 +661,9 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   console.log(`📍 Domain: ${config.domain}`);
   console.log(`🏠 Local Service: ${serviceDesc}`);
   console.log(`📡 Protocol: ${protocol.toUpperCase()}`);
+  if (config.groupMode) {
+    console.log(`⚖️  Mode: Load-balanced Group${config.instanceId ? ` (instance: ${config.instanceId})` : ''}`);
+  }
   console.log(`\n${config.serverUrl}\n`);
 
   const ws = new WebSocket(wsUrl.toString());
@@ -688,6 +708,14 @@ async function connectAgent(config: ClientConfig): Promise<void> {
           if (protocol === 'http') {
             console.log(`🌐 Your service is available at: https://${actualFullDomain}`);
           }
+        }
+        
+        // Display group mode info
+        if (message.groupMode) {
+          console.log(`\n⚖️  Group Mode: Active`);
+          console.log(`   📦 Instance ID: ${message.instanceId}`);
+          console.log(`   👥 Group Members: ${message.groupMemberCount}`);
+          console.log(`   🔄 Load Balancing: Round-robin`);
         }
         
         // Display IP security status if enabled
@@ -1400,6 +1428,21 @@ IP SECURITY EXAMPLES:
   jrok --tcp --port 22 --allow-ip 10.0.0.0/8 --domain ssh-internal
   jrok --tcp --port 27017 --allow-ip 192.168.1.100 --domain mongodb-prod
 
+MULTI-AGENT LOAD BALANCING (for container deployments):
+  # Start multiple agents with the same domain - traffic is load-balanced
+  
+  # Instance 1 (container 1)
+  jrok --port 3000 --domain myapp --group --instance-id container-1
+  
+  # Instance 2 (container 2)
+  jrok --port 3000 --domain myapp --group --instance-id container-2
+  
+  # Instance 3 (container 3)
+  jrok --port 3000 --domain myapp --group --instance-id container-3
+  
+  # All instances share the same URL: https://myapp.tunnel.koompi.cloud
+  # Requests are automatically distributed across all running instances
+
 OPTIONS:
   --server           Server URL (default: ${DEFAULT_SERVER})
   --auth             API key (or use config/env)
@@ -1408,6 +1451,8 @@ OPTIONS:
   --host             Local host (default: localhost)
   --tcp              Enable TCP tunneling (for SSH, MongoDB, etc.)
   --force-new        Force new subdomain (add suffix even if you own the domain)
+  --group            Enable group mode for load-balanced multi-agent deployments
+  --instance-id      Unique instance identifier (auto-generated if not provided)
   --docker-service   Docker Swarm service name
   --k8s-service      Kubernetes service:port
   --org              Organization ID
@@ -1422,11 +1467,13 @@ OPTIONS:
   --restrict         Enable allowlist mode with empty list (blocks all until IPs added)
 
 ENVIRONMENT VARIABLES:
-  JROK_SERVER     Server URL (default: ${DEFAULT_SERVER})
-  JROK_AUTH       API key
-  JROK_DOMAIN     Subdomain
-  JROK_PORT       Local port
-  JROK_HOST       Local host
+  JROK_SERVER        Server URL (default: ${DEFAULT_SERVER})
+  JROK_AUTH          API key
+  JROK_DOMAIN        Subdomain
+  JROK_PORT          Local port
+  JROK_HOST          Local host
+  JROK_GROUP_MODE    Enable group mode (true/false)
+  JROK_INSTANCE_ID   Instance identifier for group mode
 
 CONFIG FILE:
   ~/.jrok/config.json

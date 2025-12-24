@@ -1,7 +1,7 @@
 {
   "name": "jrok-websocket-example",
   "version": "1.0.0",
-  "description": "WebSocket example to test jrok v2.3.0 websocket support",
+  "description": "WebSocket example to test jrok v2.4.0 websocket support",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

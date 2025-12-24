@@ -1,6 +1,6 @@
 # Jrok WebSocket Example
 
-This example demonstrates the WebSocket support introduced in Jrok v2.3.0. It creates a simple Node.js server that handles both HTTP requests and WebSocket connections on the same port.
+This example demonstrates the WebSocket support introduced in Jrok v2.4.0. It creates a simple Node.js server that handles both HTTP requests and WebSocket connections on the same port.
 
 ## Prerequisites
 

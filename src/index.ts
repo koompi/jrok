@@ -386,6 +386,8 @@ async function startServer() {
           const forceNew = ws.data?.forceNew || false;
           const ipSecurity = ws.data?.ipSecurity;
           const isCustomDomain = ws.data?.isCustomDomain || false;
+          const groupMode = ws.data?.groupMode || false;
+          const instanceId = ws.data?.instanceId;
 
           if (!domain || !localPort) return;
 
@@ -401,9 +403,12 @@ async function startServer() {
             protocol,
             forceNew,
             isCustomDomain,
-          }).then(async ({ agent, finalDomain, wasModified }) => {
+            groupMode,
+            instanceId,
+          }).then(async ({ agent, finalDomain, wasModified, groupId, groupMemberCount }) => {
+            const groupInfo = groupMode ? ` [GROUP: ${groupMemberCount} members]` : '';
             console.log(
-              `✅ Agent connected: ${finalDomain} (${localHost}:${localPort}) [${agent.id}] protocol: ${protocol}${wasModified ? ` (requested: ${domain})` : ''}${isCustomDomain ? ' [CUSTOM DOMAIN]' : ''}`
+              `✅ Agent connected: ${finalDomain} (${localHost}:${localPort}) [${agent.id}] protocol: ${protocol}${wasModified ? ` (requested: ${domain})` : ''}${isCustomDomain ? ' [CUSTOM DOMAIN]' : ''}${groupInfo}`
             );
 
             // Apply IP security settings if provided from CLI
@@ -435,6 +440,14 @@ async function startServer() {
               requestedDomain: wasModified ? domain : undefined,
               domainModified: wasModified,
             };
+            
+            // Include group info if in group mode
+            if (groupMode && groupId) {
+              welcomeMessage.groupMode = true;
+              welcomeMessage.groupId = groupId;
+              welcomeMessage.groupMemberCount = groupMemberCount;
+              welcomeMessage.instanceId = agent.instanceId;
+            }
             
             // Include IP security status if enabled
             if (ipSecurity && ipSecurity.mode && ipSecurity.mode !== 'allow-all') {
@@ -1459,8 +1472,21 @@ async function startServer() {
             );
           }
           
-          // Look up agent locally (async for distributed state)
-          const agent = await agentService.getAgentByDomainAsync(subdomain);
+          // Import agentGroupService for load-balanced agent selection
+          const agentGroupService = await import("./services/agentGroupService");
+          
+          // Check if this domain has a multi-agent group (load-balanced)
+          const isGroupDomain = await agentGroupService.isGroupedDomain(subdomain);
+          
+          // Look up agent - use load balancer for groups, direct lookup for single agents
+          let agent;
+          if (isGroupDomain) {
+            // Use load-balanced selection (round-robin, least-connections, etc.)
+            agent = await agentGroupService.selectAgent(subdomain);
+          } else {
+            // Single agent mode - direct lookup
+            agent = await agentService.getAgentByDomainAsync(subdomain);
+          }
           
           if (!agent || !agent.active) {
             return addCors(new Response(
@@ -1475,14 +1501,36 @@ async function startServer() {
           // Get agent's WebSocket (local connections only)
           const agentWs = agentService.getAgentSocket(agent.id);
           if (!agentWs || agentWs.readyState !== 1) {  // 1 = WebSocket.OPEN
-            return addCors(new Response(
-              JSON.stringify({
-                success: false,
-                message: `Agent for ${subdomain} is not connected (readyState: ${agentWs?.readyState || 'null'}). Attempting reconnection...`,
-              }),
-              { status: 503, headers: { "Content-Type": "application/json" } }
-            ));
+            // For group mode, try to get another agent if this one is disconnected
+            if (isGroupDomain) {
+              // Mark this agent as unhealthy
+              await agentGroupService.updateMemberHealth(agent.id, false);
+              // Try to get another agent
+              const fallbackAgent = await agentGroupService.selectAgent(subdomain);
+              if (fallbackAgent && fallbackAgent.id !== agent.id) {
+                const fallbackWs = agentService.getAgentSocket(fallbackAgent.id);
+                if (fallbackWs && fallbackWs.readyState === 1) {
+                  // Use fallback agent
+                  agent = fallbackAgent;
+                }
+              }
+            }
+            
+            // Re-check after potential fallback
+            const finalWs = agentService.getAgentSocket(agent.id);
+            if (!finalWs || finalWs.readyState !== 1) {
+              return addCors(new Response(
+                JSON.stringify({
+                  success: false,
+                  message: `Agent for ${subdomain} is not connected (readyState: ${finalWs?.readyState || 'null'}). ${isGroupDomain ? 'All agents in the group are unavailable.' : 'Attempting reconnection...'}`,
+                }),
+                { status: 503, headers: { "Content-Type": "application/json" } }
+              ));
+            }
           }
+          
+          // Get the final WebSocket reference
+          const finalAgentWs = agentService.getAgentSocket(agent.id)!;
 
           // Use cached tunnelId from agent (set when agent connects)
           // This avoids MongoDB query on EVERY request - massive performance improvement!
@@ -1552,19 +1600,28 @@ async function startServer() {
           // Check if this is a WebSocket upgrade request
           if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
             // Handle WebSocket tunneling
-            const response = await handleWebSocketTunnel(req, server, agentWs, agent, subdomain);
+            const response = await handleWebSocketTunnel(req, server, finalAgentWs, agent, subdomain);
             if (response) {
               securityService.trackHttpConnection(tunnelId || subdomain, false);
+              // Decrement connection count for load balancing
+              if (isGroupDomain) {
+                await agentGroupService.decrementMemberConnections(agent.id);
+              }
               return response;
             }
             return undefined; // Handled by upgrade
           }
 
           // Forward regular HTTP request to agent via WebSocket (with bandwidth tracking)
-          const response = await forwardRequestToAgent(req, agentWs, agent, tunnelId);
+          const response = await forwardRequestToAgent(req, finalAgentWs, agent, tunnelId);
           
           // Track connection close and bandwidth
           securityService.trackHttpConnection(tunnelId || subdomain, false);
+          
+          // Decrement connection count for load balancing
+          if (isGroupDomain) {
+            await agentGroupService.decrementMemberConnections(agent.id);
+          }
           
           // Track bandwidth usage
           const responseSize = parseInt(response.headers.get("content-length") || "0");

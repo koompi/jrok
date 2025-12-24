@@ -41,6 +41,10 @@ interface AgentConnection {
   lastHeartbeat: Date;
   active: boolean;
   tunnelId?: string;
+  // Multi-agent group fields
+  groupId?: string;
+  instanceId?: string;
+  groupMode?: boolean;
 }
 
 export interface RegisterAgentOptions {
@@ -54,12 +58,17 @@ export interface RegisterAgentOptions {
   protocol?: TunnelProtocol;
   forceNew?: boolean;
   isCustomDomain?: boolean; // Flag for custom domain tunnels
+  // Multi-agent group options
+  groupMode?: boolean; // If true, join existing agents instead of taking over
+  instanceId?: string; // Unique identifier for this agent instance in a group
 }
 
 export interface RegisterAgentResult {
   agent: Agent;
   finalDomain: string;
   wasModified: boolean;
+  groupId?: string; // If agent joined a group
+  groupMemberCount?: number; // Number of agents in the group
 }
 
 // =============================================================================
@@ -150,23 +159,96 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     protocol = 'http',
     forceNew = false,
     isCustomDomain = false,
+    groupMode = false,
+    instanceId,
   } = options;
 
   const collections = getCollections();
+  
+  // Import group service for multi-agent support
+  const agentGroupService = await import("./agentGroupService");
   
   // For custom domains, skip availability check - we already validated in agentHandler
   // For subdomains, check availability and generate unique if needed
   let finalDomain = requestedDomain;
   let wasModified = false;
+  let groupId: string | undefined;
+  let groupMemberCount: number | undefined;
   
   if (!isCustomDomain) {
-    // Check domain availability for subdomains only
-    const availability = await checkDomainAvailability(requestedDomain, organizationId, forceNew);
-    
-    if (!availability.available) {
-      finalDomain = await generateUniqueDomain(requestedDomain);
-      wasModified = true;
-      console.log(`📛 Domain "${requestedDomain}" taken, using "${finalDomain}" instead`);
+    if (groupMode) {
+      // GROUP MODE: Join existing agents instead of taking over or creating unique domain
+      // First check if there's an existing group for this domain
+      const existingGroup = await agentGroupService.getGroupByDomain(requestedDomain);
+      
+      if (existingGroup) {
+        // Verify organization ownership
+        if (organizationId && existingGroup.organizationId && 
+            existingGroup.organizationId !== organizationId) {
+          throw new Error(`Domain "${requestedDomain}" belongs to a different organization`);
+        }
+        groupId = existingGroup.id;
+        console.log(`🔗 Joining existing agent group for domain: ${requestedDomain}`);
+      } else {
+        // Check if there's a single agent already on this domain
+        const existingConnection = await collections.agentConnections.findOne({ 
+          domain: requestedDomain, 
+          active: true 
+        });
+        
+        if (existingConnection) {
+          // Convert to group mode - create a group and add existing agent
+          if (organizationId && existingConnection.organizationId && 
+              existingConnection.organizationId !== organizationId) {
+            throw new Error(`Domain "${requestedDomain}" belongs to a different organization`);
+          }
+          
+          // Create new group
+          const newGroup = await agentGroupService.getOrCreateGroup(
+            requestedDomain, 
+            organizationId || existingConnection.organizationId
+          );
+          groupId = newGroup.id;
+          
+          // Add existing agent to the group if it's not already in one
+          if (!existingConnection.groupId) {
+            await agentGroupService.addAgentToGroup(
+              groupId,
+              existingConnection.agentId,
+              existingConnection.instanceId || existingConnection.agentId.substring(0, 8),
+              1
+            );
+            // Update existing connection with group info
+            await collections.agentConnections.updateOne(
+              { agentId: existingConnection.agentId },
+              { $set: { groupId, groupMode: true } }
+            );
+          }
+          
+          console.log(`🔄 Converted domain "${requestedDomain}" to group mode`);
+        } else {
+          // Check tunnel ownership for inactive tunnels
+          const existingTunnel = await getTunnelByDomain(requestedDomain);
+          if (existingTunnel && existingTunnel.organizationId && 
+              organizationId && existingTunnel.organizationId !== organizationId) {
+            throw new Error(`Domain "${requestedDomain}" belongs to a different organization`);
+          }
+          
+          // No existing agents - create new group
+          const newGroup = await agentGroupService.getOrCreateGroup(requestedDomain, organizationId);
+          groupId = newGroup.id;
+          console.log(`✨ Created new agent group for domain: ${requestedDomain}`);
+        }
+      }
+    } else {
+      // SINGLE AGENT MODE (existing behavior)
+      const availability = await checkDomainAvailability(requestedDomain, organizationId, forceNew);
+      
+      if (!availability.available) {
+        finalDomain = await generateUniqueDomain(requestedDomain);
+        wasModified = true;
+        console.log(`📛 Domain "${requestedDomain}" taken, using "${finalDomain}" instead`);
+      }
     }
   } else {
     console.log(`🌐 Using custom domain: ${requestedDomain}`);
@@ -174,6 +256,11 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
 
   const agentId = generateId();
   const now = new Date();
+  // For single agent mode, use full agentId as instanceId to ensure uniqueness
+  // For group mode, use provided instanceId or generate a short one
+  const effectiveInstanceId = groupMode 
+    ? (instanceId || `instance-${agentId.substring(0, 8)}`)
+    : `single-${agentId}`;
 
   // Create agent connection record in MongoDB (distributed state)
   const connectionRecord: AgentConnection = {
@@ -192,14 +279,29 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     connectedAt: now,
     lastHeartbeat: now,
     active: true,
+    groupId,
+    instanceId: effectiveInstanceId,
+    groupMode,
   };
 
-  // Use upsert to handle reconnections to same domain
-  await collections.agentConnections.updateOne(
-    { domain: finalDomain },
-    { $set: connectionRecord },
-    { upsert: true }
-  );
+  if (groupMode && groupId) {
+    // GROUP MODE: Insert new connection (don't upsert by domain since multiple agents share domain)
+    await collections.agentConnections.insertOne(connectionRecord);
+    
+    // Add this agent to the group
+    await agentGroupService.addAgentToGroup(groupId, agentId, effectiveInstanceId, 1);
+    
+    // Get member count for response
+    const members = await agentGroupService.getGroupMembers(groupId);
+    groupMemberCount = members.length;
+  } else {
+    // SINGLE AGENT MODE: Use upsert to handle reconnections to same domain
+    await collections.agentConnections.updateOne(
+      { domain: finalDomain },
+      { $set: connectionRecord },
+      { upsert: true }
+    );
+  }
 
   // Store local WebSocket reference
   localSockets.set(agentId, socket);
@@ -219,6 +321,9 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     protocol,
     serverId: SERVER_ID,
     serverHost: SERVER_HOST,
+    groupId,
+    instanceId: effectiveInstanceId,
+    groupMode,
   };
 
   // Create or update tunnel
@@ -228,13 +333,20 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
 
   // Log activity
   if (organizationId) {
-    activityService.logAgentConnected(organizationId, agentId, finalDomain, clientIp).catch((err) => {
+    const activityMsg = groupMode 
+      ? `${finalDomain} (instance: ${effectiveInstanceId}, group members: ${groupMemberCount})`
+      : finalDomain;
+    activityService.logAgentConnected(organizationId, agentId, activityMsg, clientIp).catch((err) => {
       console.error("Failed to log agent connected activity:", err);
     });
   }
 
-  console.log(`✅ Agent registered: ${finalDomain} on server ${SERVER_ID}`);
-  return { agent, finalDomain, wasModified };
+  const logMsg = groupMode 
+    ? `✅ Agent registered: ${finalDomain} (instance: ${effectiveInstanceId}, group: ${groupId}, members: ${groupMemberCount})`
+    : `✅ Agent registered: ${finalDomain} on server ${SERVER_ID}`;
+  console.log(logMsg);
+  
+  return { agent, finalDomain, wasModified, groupId, groupMemberCount };
 }
 
 // =============================================================================
@@ -375,30 +487,56 @@ export async function unregisterAgent(id: string): Promise<void> {
     // Remove from MongoDB
     await collections.agentConnections.deleteOne({ agentId: id });
     
-    // Mark tunnel as inactive
-    try {
-      await collections.tunnels.updateOne(
-        { domain: connection.domain },
-        { $set: { active: false, updatedAt: Date.now() } }
-      );
-      invalidateTunnelCache(connection.domain);
-    } catch (error) {
-      console.error(`Failed to mark tunnel inactive for ${connection.domain}:`, error);
+    // Handle group membership cleanup
+    if (connection.groupMode && connection.groupId) {
+      const agentGroupService = await import("./agentGroupService");
+      await agentGroupService.removeAgentFromGroup(id);
+      
+      // Check if group still has members
+      const remainingMembers = await agentGroupService.getGroupMembers(connection.groupId);
+      if (remainingMembers.length === 0) {
+        // No more agents in group - mark tunnel as inactive
+        try {
+          await collections.tunnels.updateOne(
+            { domain: connection.domain },
+            { $set: { active: false, updatedAt: Date.now() } }
+          );
+          invalidateTunnelCache(connection.domain);
+        } catch (error) {
+          console.error(`Failed to mark tunnel inactive for ${connection.domain}:`, error);
+        }
+      }
+      // If there are still members, tunnel stays active
+    } else {
+      // Single agent mode - mark tunnel as inactive
+      try {
+        await collections.tunnels.updateOne(
+          { domain: connection.domain },
+          { $set: { active: false, updatedAt: Date.now() } }
+        );
+        invalidateTunnelCache(connection.domain);
+      } catch (error) {
+        console.error(`Failed to mark tunnel inactive for ${connection.domain}:`, error);
+      }
     }
 
     // Log activity
     if (connection.organizationId) {
+      const instanceInfo = connection.groupMode ? ` (instance: ${connection.instanceId})` : '';
       activityService.logAgentDisconnected(
         connection.organizationId, 
         id, 
-        connection.domain, 
+        `${connection.domain}${instanceInfo}`, 
         connection.clientIp
       ).catch((err) => {
         console.error("Failed to log agent disconnected activity:", err);
       });
     }
     
-    console.log(`🔌 Agent unregistered: ${connection.domain}`);
+    const logMsg = connection.groupMode 
+      ? `🔌 Agent unregistered: ${connection.domain} (instance: ${connection.instanceId})`
+      : `🔌 Agent unregistered: ${connection.domain}`;
+    console.log(logMsg);
   }
   
   // Remove local socket reference
@@ -673,6 +811,10 @@ function connectionToAgent(conn: any): Agent {
     protocol: conn.protocol,
     serverId: conn.serverId,
     serverHost: conn.serverHost,
+    // Multi-agent group fields
+    groupId: conn.groupId,
+    instanceId: conn.instanceId,
+    groupMode: conn.groupMode,
   };
 }
 

@@ -7,7 +7,7 @@ import {
 export function TerminalDemo() {
   return (
     <Terminal>
-      <TypingAnimation delay={500}>&gt; curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.3.0/install.sh | bash</TypingAnimation>
+      <TypingAnimation delay={500}>&gt; curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.4.0/install.sh | bash</TypingAnimation>
       
       <AnimatedSpan delay={2500} className="text-green-500">
         <span>✔ Installed @jrok/cli</span>

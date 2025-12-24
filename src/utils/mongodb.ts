@@ -28,6 +28,9 @@ export interface Collections {
   rateLimits: Collection; // Distributed rate limiting
   bandwidthUsage: Collection; // Distributed bandwidth tracking
   serverHeartbeats: Collection; // Server health tracking
+  // Multi-agent load balancing collections
+  agentGroups: Collection; // Agent groups for load balancing
+  agentGroupMembers: Collection; // Individual agent memberships in groups
 }
 
 let collections: Collections;
@@ -67,6 +70,9 @@ export async function connectDatabase(): Promise<void> {
       rateLimits: db.collection("rateLimits"),
       bandwidthUsage: db.collection("bandwidthUsage"),
       serverHeartbeats: db.collection("serverHeartbeats"),
+      // Multi-agent load balancing collections
+      agentGroups: db.collection("agentGroups"),
+      agentGroupMembers: db.collection("agentGroupMembers"),
     };
 
     // Create indexes
@@ -209,7 +215,20 @@ async function safeCreateIndex(
 export async function createDistributedStateIndexes(): Promise<void> {
   // Agent connections - distributed WebSocket registry
   await safeCreateIndex(collections.agentConnections, { agentId: 1 }, { unique: true });
-  await safeCreateIndex(collections.agentConnections, { domain: 1 }, { unique: true });
+  
+  // MIGRATION: Drop old domain-only unique index if it exists (was blocking multi-agent mode)
+  try {
+    await collections.agentConnections.dropIndex("domain_1");
+    console.log("🔄 Dropped old domain_1 index for multi-agent support");
+  } catch {
+    // Index doesn't exist, that's fine
+  }
+  
+  // NOTE: We use domain + instanceId as unique key to support multi-agent groups
+  // Single agents use their agentId as instanceId, group agents use provided instanceId
+  await safeCreateIndex(collections.agentConnections, { domain: 1, instanceId: 1 }, { unique: true });
+  // Non-unique domain index for fast lookups
+  await safeCreateIndex(collections.agentConnections, { domain: 1 });
   await safeCreateIndex(collections.agentConnections, { serverId: 1 });
   await safeCreateIndex(collections.agentConnections, { organizationId: 1 });
   // Auto-expire stale connections after 2 minutes of no heartbeat
@@ -235,6 +254,24 @@ export async function createDistributedStateIndexes(): Promise<void> {
   await safeCreateIndex(collections.serverHeartbeats, { serverId: 1 }, { unique: true });
   // Auto-expire dead servers after 1 minute
   await safeCreateIndex(collections.serverHeartbeats, { lastHeartbeat: 1 }, { expireAfterSeconds: 60 });
+
+  // Agent groups for multi-agent load balancing
+  await safeCreateIndex(collections.agentGroups, { id: 1 }, { unique: true });
+  await safeCreateIndex(collections.agentGroups, { domain: 1 }, { unique: true });
+  await safeCreateIndex(collections.agentGroups, { organizationId: 1 });
+
+  // Agent group members - track individual agents in groups
+  // MIGRATION: Drop old agentId-only unique index
+  try {
+    await collections.agentGroupMembers.dropIndex("agentId_1");
+    console.log("🔄 Dropped old agentId_1 index for agentGroupMembers");
+  } catch {
+    // Index doesn't exist, that's fine
+  }
+  // Unique by groupId + instanceId (instanceId stays consistent across reconnections)
+  await safeCreateIndex(collections.agentGroupMembers, { groupId: 1, instanceId: 1 }, { unique: true });
+  await safeCreateIndex(collections.agentGroupMembers, { agentId: 1 });
+  await safeCreateIndex(collections.agentGroupMembers, { groupId: 1, healthy: 1 });
 
   console.log("✅ Distributed state indexes created");
 }

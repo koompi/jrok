@@ -14,6 +14,43 @@ export interface Agent {
   // Multi-server support: which server owns this agent connection
   serverId?: string; // VPS_ID of the server handling this agent
   serverHost?: string; // Public host of the server (for routing)
+  // Multi-agent group support
+  groupId?: string; // ID of the agent group this agent belongs to
+  instanceId?: string; // Unique identifier for this agent instance within a group
+  groupMode?: boolean; // True if this agent is part of a load-balanced group
+}
+
+// ============ Multi-Agent Group Types ============
+
+export type LoadBalanceStrategy = 'round-robin' | 'least-connections' | 'random' | 'weighted';
+
+export interface AgentGroup {
+  id: string;
+  domain: string; // The shared domain for this group
+  organizationId?: string;
+  strategy: LoadBalanceStrategy; // Load balancing strategy
+  agentIds: string[]; // List of agent IDs in this group
+  activeAgentCount: number; // Number of currently active agents
+  createdAt: number;
+  updatedAt: number;
+  // Round-robin state
+  currentIndex: number; // For round-robin load balancing
+  // Health check settings
+  healthCheckEnabled: boolean;
+  healthCheckInterval?: number; // ms, default 30000
+  healthCheckPath?: string; // e.g., "/health"
+  // Metadata
+  metadata?: Record<string, unknown>;
+}
+
+export interface AgentGroupMember {
+  agentId: string;
+  instanceId: string;
+  weight: number; // For weighted load balancing (1-100)
+  healthy: boolean;
+  lastHealthCheck?: number;
+  activeConnections: number; // For least-connections strategy
+  joinedAt: number;
 }
 
 // ============ TCP Tunnel Types ============

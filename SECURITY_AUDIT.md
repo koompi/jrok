@@ -1,6 +1,6 @@
 # Security & Implementation Audit Report
 **Date:** 2025-12-19
-**Jrok Version:** 2.3.0
+**Jrok Version:** 2.4.0
 
 ## Executive Summary
 This document provides a comprehensive security and implementation audit of the Jrok tunnel service, covering backend, CLI, dashboard, and multi-server features.

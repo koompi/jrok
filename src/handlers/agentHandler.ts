@@ -19,6 +19,10 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   const protocol = (url.searchParams.get("protocol") || "http") as TunnelProtocol;
   const forceNew = url.searchParams.get("forceNew") === "true";
   
+  // Multi-agent group parameters
+  const groupMode = url.searchParams.get("groupMode") === "true";
+  const instanceId = url.searchParams.get("instanceId");
+  
   // IP Security parameters from CLI
   const ipSecurityMode = url.searchParams.get("ipSecurityMode") as TunnelIpSecurity['mode'] | null;
   const allowedIpsParam = url.searchParams.get("allowedIps");
@@ -43,6 +47,11 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   // Validate protocol
   if (protocol !== 'http' && protocol !== 'tcp') {
     return new Response("Invalid protocol. Must be 'http' or 'tcp'", { status: 400 });
+  }
+  
+  // TCP protocol doesn't support group mode (load balancing)
+  if (protocol === 'tcp' && groupMode) {
+    return new Response("TCP protocol does not support group mode. Use HTTP protocol for load-balanced multi-agent deployments.", { status: 400 });
   }
 
   // Validate the auth token - must be a valid API key with tunnel:create permission
@@ -160,6 +169,9 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
       protocol,
       forceNew,
       isCustomDomain, // Flag to indicate this is a custom domain tunnel
+      // Multi-agent group settings
+      groupMode,
+      instanceId,
       // IP Security settings from CLI
       ipSecurity: ipSecurityMode ? {
         mode: ipSecurityMode,

@@ -45,7 +45,7 @@ No server setup required. Get started in 30 seconds:
 
 ```bash
 # Install CLI with one command
-curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.3.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.4.0/install.sh | bash
 
 # Expose your local service (you'll be prompted for API key)
 jrok --port 3000
