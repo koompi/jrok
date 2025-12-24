@@ -285,10 +285,14 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
   };
 
   if (groupMode && groupId) {
-    // GROUP MODE: Insert new connection (don't upsert by domain since multiple agents share domain)
-    await collections.agentConnections.insertOne(connectionRecord);
+    // GROUP MODE: Upsert by domain + instanceId (handles reconnects after server restart)
+    await collections.agentConnections.updateOne(
+      { domain: finalDomain, instanceId: effectiveInstanceId },
+      { $set: connectionRecord },
+      { upsert: true }
+    );
     
-    // Add this agent to the group
+    // Add this agent to the group (also uses upsert)
     await agentGroupService.addAgentToGroup(groupId, agentId, effectiveInstanceId, 1);
     
     // Get member count for response

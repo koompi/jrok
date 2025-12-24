@@ -335,12 +335,12 @@ function validateBasicConfig(config: Partial<ClientConfig>): void {
 // Handle incoming HTTP request from server and proxy to local service
 async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConfig): Promise<void> {
   try {
-    const { requestId, method, path, query, headers, body } = message;
+    const { requestId, method, path, query, headers, body, clientIp } = message;
     
     // Build URL to local service
     const localUrl = `http://${config.localHost}:${config.port}${path}${query || ''}`;
     
-    console.log(`📥 ${method} ${path} → ${localUrl}`);
+    console.log(`📥 ${method} ${path} → ${localUrl} [${clientIp || 'unknown'}]`);
     
     // Filter out hop-by-hop headers that shouldn't be forwarded
     const forwardHeaders: Record<string, string> = {};

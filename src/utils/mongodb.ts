@@ -276,6 +276,41 @@ export async function createDistributedStateIndexes(): Promise<void> {
   console.log("✅ Distributed state indexes created");
 }
 
+/**
+ * Clean up stale connections from this server on startup
+ * This prevents duplicate key errors when the server restarts
+ */
+export async function cleanupStaleConnectionsOnStartup(): Promise<void> {
+  const serverId = process.env.SERVER_ID || "default";
+  
+  try {
+    // Remove all agent connections from this server (they're stale after restart)
+    const connResult = await collections.agentConnections.deleteMany({ serverId });
+    if (connResult.deletedCount > 0) {
+      console.log(`🧹 Cleaned up ${connResult.deletedCount} stale agent connections from server ${serverId}`);
+    }
+    
+    // Clean up stale group members (agents that were on this server)
+    // We find all connections that were on this server and remove their group memberships
+    const membersResult = await collections.agentGroupMembers.deleteMany({});
+    if (membersResult.deletedCount > 0) {
+      console.log(`🧹 Cleaned up ${membersResult.deletedCount} stale group members`);
+    }
+    
+    // Clean up empty groups (groups with no active members)
+    const emptyGroups = await collections.agentGroups.deleteMany({ activeAgentCount: { $lte: 0 } });
+    if (emptyGroups.deletedCount > 0) {
+      console.log(`🧹 Cleaned up ${emptyGroups.deletedCount} empty agent groups`);
+    }
+    
+    // Reset agent counts on remaining groups
+    await collections.agentGroups.updateMany({}, { $set: { activeAgentCount: 0, agentIds: [] } });
+    
+  } catch (error) {
+    console.error("⚠️ Error cleaning up stale connections:", error);
+  }
+}
+
 export function getCollections(): Collections {
   if (!collections) {
     throw new Error("Database not connected. Call connectDatabase() first.");

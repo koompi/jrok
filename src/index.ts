@@ -18,7 +18,7 @@ import * as securityService from "./services/securityService";
 import * as crossServerService from "./services/crossServerService";
 import * as certSyncService from "./services/certificateSyncService";
 import * as monitoringService from "./services/monitoringService";
-import { connectDatabase, closeDatabase, createDistributedStateIndexes } from "./utils/mongodb";
+import { connectDatabase, closeDatabase, createDistributedStateIndexes, cleanupStaleConnectionsOnStartup } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { initTelegram } from "./services/notificationService";
 import { generateId } from "./utils/helpers";
@@ -97,7 +97,7 @@ async function handleWebSocketTunnel(
 }
 
 // Forward HTTP request to agent via WebSocket
-async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string): Promise<Response> {
+async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string, clientIp?: string): Promise<Response> {
   return new Promise(async (resolve) => {
     const requestId = generateId();
     const timeout = setTimeout(() => {
@@ -138,6 +138,7 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
         query: new URL(req.url).search,
         headers,
         body,
+        clientIp: clientIp || "unknown",
       }));
     } catch (error) {
       clearTimeout(timeout);
@@ -326,6 +327,10 @@ async function startServer() {
     // Create distributed state indexes
     await createDistributedStateIndexes();
     console.log("✅ Distributed state indexes created");
+
+    // Clean up stale connections from previous server instance
+    await cleanupStaleConnectionsOnStartup();
+    console.log("✅ Stale connections cleaned up");
 
     // Initialize security service
     securityService.initSecurityService();
@@ -1613,7 +1618,7 @@ async function startServer() {
           }
 
           // Forward regular HTTP request to agent via WebSocket (with bandwidth tracking)
-          const response = await forwardRequestToAgent(req, finalAgentWs, agent, tunnelId);
+          const response = await forwardRequestToAgent(req, finalAgentWs, agent, tunnelId, clientIp);
           
           // Track connection close and bandwidth
           securityService.trackHttpConnection(tunnelId || subdomain, false);
