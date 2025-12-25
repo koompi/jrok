@@ -1913,6 +1913,16 @@ async function startServer() {
 
     console.log("✅ Auto-cleanup enabled (agents: 30s, tunnels: 5m, rate limits: 10m, stats: 1h)");
 
+    // Cleanup orphaned and stale TCP allocations every hour
+    setInterval(async () => {
+      try {
+        await tcpService.cleanupOrphanedAllocations();
+        await tcpService.cleanupStaleAllocations(7); // Clean allocations inactive for 7+ days
+      } catch (error) {
+        console.error("TCP allocation cleanup error:", error);
+      }
+    }, 60 * 60 * 1000);
+
     // Check certificate sync queue every 5 minutes (pull new certs to local storage)
     setInterval(async () => {
       try {

@@ -52,8 +52,33 @@ export function registerAgentConnection(agentId: string, ws: WebSocket): void {
 export async function unregisterAgentConnection(agentId: string): Promise<void> {
   agentConnections.delete(agentId);
   
-  // Clean up any TCP allocations for this agent
-  await deallocatePortByAgentId(agentId);
+  // Don't deallocate TCP ports on disconnect - keep them for reconnection
+  // Just stop the local TCP server but keep the allocation in DB
+  await stopTcpServersForAgent(agentId);
+}
+
+/**
+ * Stop TCP servers for an agent without deallocating the port
+ * This allows the same port to be reused on reconnection
+ */
+async function stopTcpServersForAgent(agentId: string): Promise<void> {
+  const collections = getCollections();
+  
+  const allocations = await collections.tcpPortAllocations.find({
+    agentId,
+    serverId: SERVER_ID,
+    active: true,
+  }).toArray();
+  
+  for (const allocation of allocations) {
+    // Stop local TCP server but DON'T remove from MongoDB
+    const server = tcpServers.get(allocation.port);
+    if (server) {
+      server.close();
+      tcpServers.delete(allocation.port);
+      console.log(`⏸️ TCP server stopped for port ${allocation.port} (allocation preserved for reconnection)`);
+    }
+  }
 }
 
 export function getAgentConnection(agentId: string): WebSocket | undefined {
@@ -106,6 +131,7 @@ async function isPortAvailable(port: number): Promise<boolean> {
 
 /**
  * Allocate a TCP port for a tunnel (distributed via MongoDB)
+ * Supports persistent allocation - if the tunnel already has a port, it will be reused
  */
 export async function allocatePort(
   tunnelId: string,
@@ -116,16 +142,36 @@ export async function allocatePort(
 ): Promise<TcpPortAllocation | null> {
   const collections = getCollections();
   
-  // Check if tunnel already has a port allocated on ANY server
+  // Check if tunnel already has a port allocated (active or inactive)
+  // This enables persistent port allocation across reconnections
   const existingAllocation = await collections.tcpPortAllocations.findOne({
     tunnelId,
-    active: true,
   });
   
   if (existingAllocation) {
-    // If it's on this server, return it
+    // If it's on this server, reactivate and return it
     if (existingAllocation.serverId === SERVER_ID) {
-      return existingAllocation as TcpPortAllocation;
+      // Update with new agent info and mark as active
+      await collections.tcpPortAllocations.updateOne(
+        { tunnelId },
+        { 
+          $set: { 
+            agentId, 
+            localPort, 
+            localHost, 
+            active: true,
+            updatedAt: new Date()
+          } 
+        }
+      );
+      console.log(`♻️ Reusing persistent TCP port ${existingAllocation.port} for tunnel ${tunnelId}`);
+      return {
+        ...existingAllocation,
+        agentId,
+        localPort,
+        localHost,
+        active: true,
+      } as TcpPortAllocation;
     }
     // If on another server, we need to deallocate there first or return error
     console.warn(`⚠️ Tunnel ${tunnelId} already has port ${existingAllocation.port} on server ${existingAllocation.serverId}`);
@@ -209,19 +255,21 @@ export async function deallocatePort(port: number): Promise<void> {
 }
 
 /**
- * Deallocate port by tunnel ID
+ * Deallocate port by tunnel ID (permanent deletion)
+ * Use this when a tunnel is being deleted, not just disconnected
  */
 export async function deallocatePortByTunnelId(tunnelId: string): Promise<void> {
   const collections = getCollections();
   
+  // Look for any allocation (active or inactive) for this tunnel
   const allocation = await collections.tcpPortAllocations.findOne({
     tunnelId,
     serverId: SERVER_ID,
-    active: true,
   });
   
   if (allocation) {
     await deallocatePort(allocation.port);
+    console.log(`🗑️ Permanently deallocated TCP port ${allocation.port} for tunnel ${tunnelId}`);
   }
 }
 
@@ -555,40 +603,60 @@ export async function getTcpStatsGlobal(): Promise<{
 }
 
 /**
- * Cleanup inactive allocations (called periodically)
+ * Cleanup orphaned allocations - only those where the tunnel has been deleted
+ * This is called periodically but preserves allocations for disconnected agents
  */
-export async function cleanupInactiveAllocations(): Promise<void> {
+export async function cleanupOrphanedAllocations(): Promise<void> {
   const collections = getCollections();
   
   // Get all allocations for this server
   const allocations = await collections.tcpPortAllocations.find({
     serverId: SERVER_ID,
-    active: true,
   }).toArray();
   
   for (const allocation of allocations) {
-    const agentWs = agentConnections.get(allocation.agentId);
-    if (!agentWs || agentWs.readyState !== 1) {
-      console.log(`🧹 Cleaning up TCP allocation for disconnected agent: port ${allocation.port}`);
+    // Check if the tunnel still exists
+    const tunnel = await collections.tunnels.findOne({ id: allocation.tunnelId });
+    if (!tunnel) {
+      console.log(`🧹 Cleaning up orphaned TCP allocation (tunnel deleted): port ${allocation.port}`);
       await deallocatePort(allocation.port);
     }
   }
 }
 
 /**
+ * Cleanup inactive allocations that are older than a threshold
+ * Used to reclaim ports from tunnels that haven't reconnected in a long time
+ */
+export async function cleanupStaleAllocations(maxAgeDays: number = 7): Promise<void> {
+  const collections = getCollections();
+  
+  const staleThreshold = Date.now() - (maxAgeDays * 24 * 60 * 60 * 1000);
+  
+  // Find allocations that are inactive and older than threshold
+  const staleAllocations = await collections.tcpPortAllocations.find({
+    serverId: SERVER_ID,
+    active: false,
+    createdAt: { $lt: staleThreshold },
+  }).toArray();
+  
+  for (const allocation of staleAllocations) {
+    console.log(`🧹 Cleaning up stale TCP allocation (${maxAgeDays}+ days inactive): port ${allocation.port}`);
+    await deallocatePort(allocation.port);
+  }
+}
+
+/**
  * Restore TCP servers on startup (from MongoDB state)
+ * Allocations are preserved but TCP servers need to be restarted when agents reconnect
  */
 export async function restoreTcpServersOnStartup(): Promise<void> {
   const collections = getCollections();
   
-  // Mark all allocations for this server as inactive first
-  // (they will be reactivated when agents reconnect)
-  await collections.tcpPortAllocations.updateMany(
-    { serverId: SERVER_ID },
-    { $set: { active: false } }
-  );
+  // Count allocations for this server (they'll be reactivated when agents reconnect)
+  const count = await collections.tcpPortAllocations.countDocuments({ serverId: SERVER_ID });
   
-  console.log(`🔄 TCP allocations reset for server ${SERVER_ID} on startup`);
+  console.log(`🔄 Found ${count} TCP port allocations for server ${SERVER_ID} - will reactivate on agent reconnection`);
 }
 
 /**
