@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maintenance | KOOMPI Cloud</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono&display=swap');
+
+        :root {
+            --primary: #8e44ad;
+            --bg: #f8f9fa;
+            --text-main: #2d3436;
+            --text-sec: #636e72;
+            --border: #e1e4e8;
+            --soft-purple: #f4eef8;
+        }
+
+        body, html {
+            margin: 0; padding: 0; height: 100%;
+            background-color: var(--bg);
+            font-family: 'Inter', sans-serif;
+            display: flex; justify-content: center; align-items: center;
+            overflow: hidden;
+        }
+
+        .grid-bg {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background-image: linear-gradient(var(--border) 1px, transparent 1px),
+                              linear-gradient(90deg, var(--border) 1px, transparent 1px);
+            background-size: 40px 40px; opacity: 0.4; z-index: 1;
+        }
+
+        .container {
+            position: relative; z-index: 10; width: 95%; max-width: 1100px;
+            display: grid; grid-template-columns: 1fr 1.2fr;
+            background: white; border-radius: 30px;
+            box-shadow: 0 30px 60px rgba(0,0,0,0.08);
+            overflow: hidden; border: 1px solid white;
+            animation: popIn 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes popIn {
+            from { opacity: 0; transform: scale(0.95) translateY(20px); }
+            to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+
+        .content {
+            padding: 4rem;
+            background: linear-gradient(135deg, #ffffff 0%, var(--soft-purple) 100%);
+            display: flex; flex-direction: column; justify-content: center;
+        }
+
+        .logo-box {
+            display: inline-flex; align-items: center; gap: 10px; margin-bottom: 2rem;
+            padding: 8px 15px; background: white; border-radius: 12px;
+            width: fit-content; box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        }
+
+        h1 { font-size: 3.2rem; font-weight: 800; line-height: 1.1; margin: 0 0 1.5rem 0; color: var(--text-main); }
+        h1 span { color: var(--primary); }
+        p { font-size: 1.1rem; color: var(--text-sec); line-height: 1.6; margin-bottom: 2rem; }
+
+        .image-panel {
+            background: #fff; padding: 1.5rem;
+            border-left: 1px solid var(--border);
+            display: flex; flex-direction: column; justify-content: center;
+        }
+
+        .img-frame {
+            position: relative; width: 100%; aspect-ratio: 16/10;
+            border-radius: 20px; overflow: hidden;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.15);
+            background: #eee;
+        }
+
+        .img-frame img { 
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%; object-fit: cover; 
+            transition: opacity 1.5s ease-in-out;
+            opacity: 0;
+        }
+
+        .img-frame img.active { opacity: 1; }
+
+        .timer-zone { margin-top: 2rem; font-family: 'JetBrains Mono', monospace; }
+        
+        .progress-container {
+            width: 100%; height: 6px; background: #eee;
+            border-radius: 10px; margin-top: 10px; overflow: hidden;
+        }
+
+        .progress-bar {
+            height: 100%; width: 100%; background: var(--primary);
+            transition: width 1s linear;
+        }
+
+        .status-badge {
+            display: inline-flex; align-items: center; gap: 8px;
+            font-size: 0.75rem; color: var(--primary); font-weight: 700;
+            text-transform: uppercase; letter-spacing: 1px;
+        }
+
+        .pulse { width: 8px; height: 8px; background: var(--primary); border-radius: 50%; animation: pulse-ring 1.5s infinite; }
+        @keyframes pulse-ring { 0% { transform: scale(1); opacity: 1; } 100% { transform: scale(2.5); opacity: 0; } }
+
+        @media (max-width: 900px) {
+            .container { grid-template-columns: 1fr; }
+            .image-panel { border-left: none; border-top: 1px solid var(--border); }
+            .content { padding: 2rem; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="grid-bg"></div>
+
+    <div class="container">
+        <div class="content">
+            <div class="logo-box">
+                <span style="color:var(--primary); font-weight: 900;">K_</span>
+                <span style="font-weight: 700; font-size: 0.9rem; color: var(--text-main);">KOOMPI Cloud</span>
+            </div>
+
+            <h1>System <span>Online</span> Soon</h1>
+            <p>We are currently synchronizing our environment. The portal will resume once the service agent is detected.</p>
+            
+            <div class="timer-zone">
+                <div class="status-badge">
+                    <div class="pulse"></div> Service Monitoring Active
+                </div>
+                <div class="progress-container">
+                    <div class="progress-bar" id="progress"></div>
+                </div>
+                <div style="margin-top: 12px; font-size: 0.8rem; color: var(--text-sec);">
+                    RE-CONNECTING IN: <span id="timer" style="color: var(--primary); font-weight: bold;">15</span>S
+                </div>
+            </div>
+        </div>
+
+        <div class="image-panel">
+            <div class="img-frame" id="slideshow">
+                <img src="https://dynamic-media-cdn.tripadvisor.com/media/photo-o/2f/6e/59/34/caption.jpg?w=700&h=400&s=1" class="active">
+                <img src="https://www.agoda.com/wp-content/uploads/2024/04/siem-reap-cambodia-angkor-wat.jpg">
+                <img src="https://rafflesgrandhotelangkor.com/wp-content/uploads/2025/04/01_Angkor-Wat-agriculture_1600.jpg">
+                <img src="https://res.cloudinary.com/rainforest-cruises/images/c_fill,g_auto/f_auto,q_auto/v1620066623/Top-Angkor-Temples-Must-See-Angkor-Wat/Top-Angkor-Temples-Must-See-Angkor-Wat.jpg">
+            </div>
+            <div style="margin-top: 1.5rem; text-align: center; color: var(--text-sec); font-size: 0.75rem; font-family: 'JetBrains Mono';">
+                [ LOCATION: SIEM REAP, CAMBODIA ]
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 1. Countdown & Progress logic
+        let timeLeft = 15;
+        const totalTime = 15;
+        const timerText = document.getElementById('timer');
+        const progressBar = document.getElementById('progress');
+
+        const countdown = setInterval(() => {
+            timeLeft--;
+            timerText.textContent = timeLeft;
+            
+            // Update progress bar
+            const percentage = (timeLeft / totalTime) * 100;
+            progressBar.style.width = percentage + "%";
+
+            if (timeLeft <= 0) {
+                clearInterval(countdown);
+                checkAndReload();
+            }
+        }, 1000);
+
+        // 2. Synchronized connection check
+        async function checkAndReload() {
+            try {
+                // Testing the actual domain to see if Jrok agent is back
+                const response = await fetch(window.location.href, { mode: 'no-cors' });
+                window.location.reload();
+            } catch (e) {
+                window.location.reload();
+            }
+        }
+
+        // 3. Image Slideshow logic (changes every 4 seconds)
+        const images = document.querySelectorAll('#slideshow img');
+        let currentImg = 0;
+
+        setInterval(() => {
+            images[currentImg].classList.remove('active');
+            currentImg = (currentImg + 1) % images.length;
+            images[currentImg].classList.add('active');
+        }, 4000);
+    </script>
+
+</body>
+</html>
