@@ -1684,7 +1684,7 @@ async function startServer() {
         }
 
         // Domain routes
-        if (path === "/domains" && method === "POST") {
+        if ((path === "/domains" || path === "/domains/") && method === "POST") {
           return await domainHandler.handleRegisterDomain(req);
         }
 
