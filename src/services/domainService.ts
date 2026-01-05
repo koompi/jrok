@@ -32,9 +32,9 @@ export async function verifyCname(domain: string, expectedTarget: string): Promi
       if (normalizedRecord === normalizedExpected) {
         return { verified: true, actualCname: record };
       }
-      // Also accept if pointing to base domain (tunnel.koompi.cloud)
-      if (normalizedRecord === BASE_DOMAIN.toLowerCase()) {
-        console.log(`[DNS] CNAME points to base domain ${BASE_DOMAIN}, accepting as valid`);
+      // Also accept if pointing to base domain or any subdomain of base domain
+      if (normalizedRecord === BASE_DOMAIN.toLowerCase() || normalizedRecord.endsWith(`.${BASE_DOMAIN.toLowerCase()}`)) {
+        console.log(`[DNS] CNAME points to ${normalizedRecord} (suffix match), accepting as valid`);
         return { verified: true, actualCname: record };
       }
     }
