@@ -78,10 +78,10 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
       return new Response("Unauthorized to impersonate organization", { status: 403 });
     }
   }
-
   // ====== PLAN LIMIT CHECK: Tunnel Count ======
   if (effectiveOrgId) {
-    const tunnelLimit = await planLimitService.checkTunnelLimit(effectiveOrgId);
+    console.log(`[AgentHandler] Checking tunnel limit for org: ${effectiveOrgId}, domain: ${domain}`);
+    const tunnelLimit = await planLimitService.checkTunnelLimit(effectiveOrgId, domain);
     if (!tunnelLimit.allowed) {
       console.warn(`🚫 Tunnel limit reached for org ${authResult.organizationId}: ${tunnelLimit.current}/${tunnelLimit.limit}`);
       monitoringService.addLog('warn', 'plan_limits', `Tunnel limit reached`, {

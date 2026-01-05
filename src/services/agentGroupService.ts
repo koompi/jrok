@@ -26,13 +26,13 @@ export async function getOrCreateGroup(
   strategy: LoadBalanceStrategy = 'round-robin'
 ): Promise<AgentGroup> {
   const collections = getCollections();
-  
+
   // Try to find existing group
   const existing = await collections.agentGroups.findOne({ domain });
   if (existing) {
     return existing as unknown as AgentGroup;
   }
-  
+
   // Create new group
   const group: AgentGroup = {
     id: generateId(),
@@ -47,10 +47,10 @@ export async function getOrCreateGroup(
     healthCheckEnabled: true,
     healthCheckInterval: 30000,
   };
-  
+
   await collections.agentGroups.insertOne(group);
   console.log(`✅ Created agent group for domain: ${domain}`);
-  
+
   return group;
 }
 
@@ -86,16 +86,16 @@ export async function isGroupedDomain(domain: string): Promise<boolean> {
  */
 export async function deleteGroup(groupId: string): Promise<void> {
   const collections = getCollections();
-  
+
   // Remove all members first
   await collections.agentGroupMembers.deleteMany({ groupId });
-  
+
   // Remove the group
   await collections.agentGroups.deleteOne({ id: groupId });
-  
+
   // Clean up local cache
   roundRobinCounters.delete(groupId);
-  
+
   console.log(`🗑️ Deleted agent group: ${groupId}`);
 }
 
@@ -113,7 +113,7 @@ export async function addAgentToGroup(
   weight: number = 1
 ): Promise<AgentGroupMember> {
   const collections = getCollections();
-  
+
   const member: AgentGroupMember = {
     agentId,
     instanceId,
@@ -123,7 +123,7 @@ export async function addAgentToGroup(
     activeConnections: 0,
     joinedAt: Date.now(),
   };
-  
+
   // Upsert member by groupId + instanceId (instance IDs are stable across reconnections)
   // This ensures container-1 always maps to the same member record
   await collections.agentGroupMembers.updateOne(
@@ -131,7 +131,7 @@ export async function addAgentToGroup(
     { $set: { ...member, groupId } },
     { upsert: true }
   );
-  
+
   // Update group's agent list and count
   await collections.agentGroups.updateOne(
     { id: groupId },
@@ -141,9 +141,9 @@ export async function addAgentToGroup(
       $set: { updatedAt: Date.now() }
     }
   );
-  
+
   console.log(`➕ Agent ${agentId} (instance: ${instanceId}) joined group ${groupId}`);
-  
+
   return member;
 }
 
@@ -152,16 +152,16 @@ export async function addAgentToGroup(
  */
 export async function removeAgentFromGroup(agentId: string): Promise<void> {
   const collections = getCollections();
-  
+
   // Find the member to get the group ID
   const member = await collections.agentGroupMembers.findOne({ agentId });
   if (!member) return;
-  
+
   const groupId = member.groupId;
-  
+
   // Remove member
   await collections.agentGroupMembers.deleteOne({ agentId });
-  
+
   // Update group
   const updateResult = await collections.agentGroups.findOneAndUpdate(
     { id: groupId },
@@ -172,9 +172,9 @@ export async function removeAgentFromGroup(agentId: string): Promise<void> {
     },
     { returnDocument: 'after' }
   );
-  
+
   console.log(`➖ Agent ${agentId} left group ${groupId}`);
-  
+
   // If group is empty, consider deleting it
   if (updateResult && updateResult.activeAgentCount <= 0) {
     // Keep the group for a while in case agents reconnect
@@ -188,7 +188,7 @@ export async function removeAgentFromGroup(agentId: string): Promise<void> {
  */
 export async function getGroupMembers(groupId: string): Promise<AgentGroupMember[]> {
   const collections = getCollections();
-  const members = await collections.agentGroupMembers.find({ groupId }).toArray();
+  const members = await collections.agentGroupMembers.find({ groupId }).sort({ instanceId: 1 }).toArray();
   return members as unknown as AgentGroupMember[];
 }
 
@@ -197,10 +197,10 @@ export async function getGroupMembers(groupId: string): Promise<AgentGroupMember
  */
 export async function getHealthyGroupMembers(groupId: string): Promise<AgentGroupMember[]> {
   const collections = getCollections();
-  const members = await collections.agentGroupMembers.find({ 
-    groupId, 
-    healthy: true 
-  }).toArray();
+  const members = await collections.agentGroupMembers.find({
+    groupId,
+    healthy: true
+  }).sort({ instanceId: 1 }).toArray();
   return members as unknown as AgentGroupMember[];
 }
 
@@ -211,11 +211,11 @@ export async function updateMemberHealth(agentId: string, healthy: boolean): Pro
   const collections = getCollections();
   await collections.agentGroupMembers.updateOne(
     { agentId },
-    { 
-      $set: { 
-        healthy, 
-        lastHealthCheck: Date.now() 
-      } 
+    {
+      $set: {
+        healthy,
+        lastHealthCheck: Date.now()
+      }
     }
   );
 }
@@ -252,28 +252,28 @@ export async function decrementMemberConnections(agentId: string): Promise<void>
  */
 export async function selectAgent(domain: string): Promise<Agent | null> {
   const group = await getGroupByDomain(domain);
-  
+
   // If no group exists, fall back to single-agent lookup
   if (!group) {
     return agentService.getAgentByDomainAsync(domain);
   }
-  
+
   // Get healthy members
   const healthyMembers = await getHealthyGroupMembers(group.id);
-  
+
   console.log(`⚖️  Load balancer: domain=${domain}, strategy=${group.strategy}, healthyMembers=${healthyMembers.length}`);
   healthyMembers.forEach((m, i) => {
     console.log(`   [${i}] instanceId=${m.instanceId}, agentId=${m.agentId}`);
   });
-  
+
   if (healthyMembers.length === 0) {
     console.warn(`⚠️ No healthy agents in group for domain: ${domain}`);
     return null;
   }
-  
+
   // Select agent based on strategy
   let selectedMember: AgentGroupMember;
-  
+
   switch (group.strategy) {
     case 'round-robin':
       selectedMember = await selectRoundRobin(group, healthyMembers);
@@ -290,17 +290,17 @@ export async function selectAgent(domain: string): Promise<Agent | null> {
     default:
       selectedMember = await selectRoundRobin(group, healthyMembers);
   }
-  
+
   // Get the actual agent
   const agent = await agentService.getAgentAsync(selectedMember.agentId);
-  
+
   console.log(`⚖️  Selected: instanceId=${selectedMember.instanceId}, agentId=${selectedMember.agentId}, agentFound=${!!agent}`);
-  
+
   if (agent) {
     // Track connection for least-connections strategy
     await incrementMemberConnections(selectedMember.agentId);
   }
-  
+
   return agent;
 }
 
@@ -308,21 +308,21 @@ export async function selectAgent(domain: string): Promise<Agent | null> {
  * Round-robin selection
  */
 async function selectRoundRobin(
-  group: AgentGroup, 
+  group: AgentGroup,
   members: AgentGroupMember[]
 ): Promise<AgentGroupMember> {
   const collections = getCollections();
-  
+
   // Get current index from local cache or database
   let currentIndex = roundRobinCounters.get(group.id) ?? group.currentIndex ?? 0;
-  
+
   // Select member
   const selectedMember = members[currentIndex % members.length];
-  
+
   // Increment and wrap index
   const nextIndex = (currentIndex + 1) % members.length;
   roundRobinCounters.set(group.id, nextIndex);
-  
+
   // Periodically sync to database (every 10 requests)
   if (nextIndex % 10 === 0) {
     await collections.agentGroups.updateOne(
@@ -330,7 +330,7 @@ async function selectRoundRobin(
       { $set: { currentIndex: nextIndex } }
     );
   }
-  
+
   return selectedMember;
 }
 
@@ -338,7 +338,7 @@ async function selectRoundRobin(
  * Least-connections selection
  */
 function selectLeastConnections(members: AgentGroupMember[]): AgentGroupMember {
-  return members.reduce((min, member) => 
+  return members.reduce((min, member) =>
     member.activeConnections < min.activeConnections ? member : min
   );
 }
@@ -357,10 +357,10 @@ function selectRandom(members: AgentGroupMember[]): AgentGroupMember {
 function selectWeighted(members: AgentGroupMember[]): AgentGroupMember {
   // Calculate total weight
   const totalWeight = members.reduce((sum, m) => sum + m.weight, 0);
-  
+
   // Generate random number in range [0, totalWeight)
   let random = Math.random() * totalWeight;
-  
+
   // Find the member
   for (const member of members) {
     random -= member.weight;
@@ -368,7 +368,7 @@ function selectWeighted(members: AgentGroupMember[]): AgentGroupMember {
       return member;
     }
   }
-  
+
   // Fallback to first member
   return members[0];
 }
@@ -388,11 +388,11 @@ export async function getGroupStats(groupId: string): Promise<{
 } | null> {
   const group = await getGroupById(groupId);
   if (!group) return null;
-  
+
   const members = await getGroupMembers(groupId);
   const healthyMembers = members.filter(m => m.healthy);
   const totalConnections = members.reduce((sum, m) => sum + m.activeConnections, 0);
-  
+
   return {
     totalMembers: members.length,
     healthyMembers: healthyMembers.length,
@@ -414,7 +414,7 @@ export async function getGroupsByOrganization(organizationId: string): Promise<A
  * Update group strategy
  */
 export async function updateGroupStrategy(
-  groupId: string, 
+  groupId: string,
   strategy: LoadBalanceStrategy
 ): Promise<void> {
   const collections = getCollections();
@@ -432,13 +432,13 @@ export async function getAgentGroupInfo(agentId: string): Promise<{
   member: AgentGroupMember;
 } | null> {
   const collections = getCollections();
-  
+
   const member = await collections.agentGroupMembers.findOne({ agentId });
   if (!member) return null;
-  
+
   const group = await collections.agentGroups.findOne({ id: member.groupId });
   if (!group) return null;
-  
+
   return {
     group: group as unknown as AgentGroup,
     member: member as unknown as AgentGroupMember,
@@ -456,16 +456,16 @@ export async function getAgentGroupInfo(agentId: string): Promise<{
 export async function cleanupUnhealthyAgents(maxAgeMs: number = 60000): Promise<number> {
   const collections = getCollections();
   const cutoff = Date.now() - maxAgeMs;
-  
+
   const result = await collections.agentGroupMembers.updateMany(
     { lastHealthCheck: { $lt: cutoff }, healthy: true },
     { $set: { healthy: false } }
   );
-  
+
   if (result.modifiedCount > 0) {
     console.log(`🏥 Marked ${result.modifiedCount} agents as unhealthy`);
   }
-  
+
   return result.modifiedCount;
 }
 
@@ -476,16 +476,16 @@ export async function cleanupUnhealthyAgents(maxAgeMs: number = 60000): Promise<
 export async function cleanupStaleMembers(maxAgeMs: number = 300000): Promise<number> {
   const collections = getCollections();
   const cutoff = Date.now() - maxAgeMs;
-  
+
   // Find stale members
   const staleMembers = await collections.agentGroupMembers.find({
     lastHealthCheck: { $lt: cutoff }
   }).toArray();
-  
+
   // Remove each and update their groups
   for (const member of staleMembers) {
     await removeAgentFromGroup(member.agentId);
   }
-  
+
   return staleMembers.length;
 }

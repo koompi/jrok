@@ -76,24 +76,24 @@ export interface RegisterAgentResult {
 // =============================================================================
 
 async function checkDomainAvailability(
-  domain: string, 
+  domain: string,
   organizationId?: string,
   forceNew?: boolean
 ): Promise<{ available: boolean; ownedByOrg?: string }> {
   const collections = getCollections();
-  
+
   // Check for active agent connection on any server
-  const existingConnection = await collections.agentConnections.findOne({ 
-    domain, 
-    active: true 
+  const existingConnection = await collections.agentConnections.findOne({
+    domain,
+    active: true
   });
-  
+
   if (existingConnection) {
     // Domain has an active agent
     if (forceNew) {
       return { available: false, ownedByOrg: existingConnection.organizationId };
     }
-    
+
     // Same org can reuse
     if (organizationId && existingConnection.organizationId === organizationId) {
       // Check if it's on this server (can take over) or different server
@@ -103,10 +103,10 @@ async function checkDomainAvailability(
       // Different server owns it - need to wait for disconnect or use --force-new
       return { available: false, ownedByOrg: existingConnection.organizationId };
     }
-    
+
     return { available: false, ownedByOrg: existingConnection.organizationId };
   }
-  
+
   // Check tunnel ownership (for inactive tunnels)
   const existingTunnel = await getTunnelByDomain(domain);
   if (existingTunnel) {
@@ -118,28 +118,28 @@ async function checkDomainAvailability(
     }
     return { available: false, ownedByOrg: existingTunnel.organizationId };
   }
-  
+
   return { available: true };
 }
 
 async function generateUniqueDomain(baseDomain: string): Promise<string> {
   const collections = getCollections();
-  
+
   for (let i = 0; i < 10; i++) {
     const suffix = generateShortSuffix();
     const newDomain = `${baseDomain}-${suffix}`;
-    
+
     // Check both agent connections and tunnels
     const [existingConn, existingTunnel] = await Promise.all([
       collections.agentConnections.findOne({ domain: newDomain }),
       getTunnelByDomain(newDomain),
     ]);
-    
+
     if (!existingConn && !existingTunnel) {
       return newDomain;
     }
   }
-  
+
   return `${baseDomain}-${Date.now().toString(36)}`;
 }
 
@@ -164,93 +164,94 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
   } = options;
 
   const collections = getCollections();
-  
+
   // Import group service for multi-agent support
   const agentGroupService = await import("./agentGroupService");
-  
+
   // For custom domains, skip availability check - we already validated in agentHandler
   // For subdomains, check availability and generate unique if needed
   let finalDomain = requestedDomain;
   let wasModified = false;
   let groupId: string | undefined;
   let groupMemberCount: number | undefined;
-  
-  if (!isCustomDomain) {
-    if (groupMode) {
-      // GROUP MODE: Join existing agents instead of taking over or creating unique domain
-      // First check if there's an existing group for this domain
-      const existingGroup = await agentGroupService.getGroupByDomain(requestedDomain);
-      
-      if (existingGroup) {
-        // Verify organization ownership
-        if (organizationId && existingGroup.organizationId && 
-            existingGroup.organizationId !== organizationId) {
+
+  if (groupMode) {
+    // GROUP MODE: Join existing agents instead of taking over or creating unique domain
+    // Works for both subdomains and custom domains
+
+    // First check if there's an existing group for this domain
+    const existingGroup = await agentGroupService.getGroupByDomain(requestedDomain);
+
+    if (existingGroup) {
+      // Verify organization ownership
+      if (organizationId && existingGroup.organizationId &&
+        existingGroup.organizationId !== organizationId) {
+        throw new Error(`Domain "${requestedDomain}" belongs to a different organization`);
+      }
+      groupId = existingGroup.id;
+      console.log(`🔗 Joining existing agent group for domain: ${requestedDomain}`);
+    } else {
+      // Check if there's a single agent already on this domain
+      const existingConnection = await collections.agentConnections.findOne({
+        domain: requestedDomain,
+        active: true
+      });
+
+      if (existingConnection) {
+        // Convert to group mode - create a group and add existing agent
+        if (organizationId && existingConnection.organizationId &&
+          existingConnection.organizationId !== organizationId) {
           throw new Error(`Domain "${requestedDomain}" belongs to a different organization`);
         }
-        groupId = existingGroup.id;
-        console.log(`🔗 Joining existing agent group for domain: ${requestedDomain}`);
-      } else {
-        // Check if there's a single agent already on this domain
-        const existingConnection = await collections.agentConnections.findOne({ 
-          domain: requestedDomain, 
-          active: true 
-        });
-        
-        if (existingConnection) {
-          // Convert to group mode - create a group and add existing agent
-          if (organizationId && existingConnection.organizationId && 
-              existingConnection.organizationId !== organizationId) {
-            throw new Error(`Domain "${requestedDomain}" belongs to a different organization`);
-          }
-          
-          // Create new group
-          const newGroup = await agentGroupService.getOrCreateGroup(
-            requestedDomain, 
-            organizationId || existingConnection.organizationId
+
+        // Create new group
+        const newGroup = await agentGroupService.getOrCreateGroup(
+          requestedDomain,
+          organizationId || existingConnection.organizationId
+        );
+        groupId = newGroup.id;
+
+        // Add existing agent to the group if it's not already in one
+        if (!existingConnection.groupId) {
+          await agentGroupService.addAgentToGroup(
+            groupId,
+            existingConnection.agentId,
+            existingConnection.instanceId || existingConnection.agentId.substring(0, 8),
+            1
           );
-          groupId = newGroup.id;
-          
-          // Add existing agent to the group if it's not already in one
-          if (!existingConnection.groupId) {
-            await agentGroupService.addAgentToGroup(
-              groupId,
-              existingConnection.agentId,
-              existingConnection.instanceId || existingConnection.agentId.substring(0, 8),
-              1
-            );
-            // Update existing connection with group info
-            await collections.agentConnections.updateOne(
-              { agentId: existingConnection.agentId },
-              { $set: { groupId, groupMode: true } }
-            );
-          }
-          
-          console.log(`🔄 Converted domain "${requestedDomain}" to group mode`);
-        } else {
-          // Check tunnel ownership for inactive tunnels
-          const existingTunnel = await getTunnelByDomain(requestedDomain);
-          if (existingTunnel && existingTunnel.organizationId && 
-              organizationId && existingTunnel.organizationId !== organizationId) {
-            throw new Error(`Domain "${requestedDomain}" belongs to a different organization`);
-          }
-          
-          // No existing agents - create new group
-          const newGroup = await agentGroupService.getOrCreateGroup(requestedDomain, organizationId);
-          groupId = newGroup.id;
-          console.log(`✨ Created new agent group for domain: ${requestedDomain}`);
+          // Update existing connection with group info
+          await collections.agentConnections.updateOne(
+            { agentId: existingConnection.agentId },
+            { $set: { groupId, groupMode: true } }
+          );
         }
-      }
-    } else {
-      // SINGLE AGENT MODE (existing behavior)
-      const availability = await checkDomainAvailability(requestedDomain, organizationId, forceNew);
-      
-      if (!availability.available) {
-        finalDomain = await generateUniqueDomain(requestedDomain);
-        wasModified = true;
-        console.log(`📛 Domain "${requestedDomain}" taken, using "${finalDomain}" instead`);
+
+        console.log(`🔄 Converted domain "${requestedDomain}" to group mode`);
+      } else {
+        // Check tunnel ownership for inactive tunnels
+        const existingTunnel = await getTunnelByDomain(requestedDomain);
+        if (existingTunnel && existingTunnel.organizationId &&
+          organizationId && existingTunnel.organizationId !== organizationId) {
+          throw new Error(`Domain "${requestedDomain}" belongs to a different organization`);
+        }
+
+        // No existing agents - create new group
+        const newGroup = await agentGroupService.getOrCreateGroup(requestedDomain, organizationId);
+        groupId = newGroup.id;
+        console.log(`✨ Created new agent group for domain: ${requestedDomain}`);
       }
     }
+  } else if (!isCustomDomain) {
+    // SINGLE AGENT MODE (subdomains)
+    const availability = await checkDomainAvailability(requestedDomain, organizationId, forceNew);
+
+    if (!availability.available) {
+      finalDomain = await generateUniqueDomain(requestedDomain);
+      wasModified = true;
+      console.log(`📛 Domain "${requestedDomain}" taken, using "${finalDomain}" instead`);
+    }
   } else {
+    // SINGLE AGENT MODE (custom domains)
     console.log(`🌐 Using custom domain: ${requestedDomain}`);
   }
 
@@ -258,7 +259,7 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
   const now = new Date();
   // For single agent mode, use full agentId as instanceId to ensure uniqueness
   // For group mode, use provided instanceId or generate a short one
-  const effectiveInstanceId = groupMode 
+  const effectiveInstanceId = groupMode
     ? (instanceId || `instance-${agentId.substring(0, 8)}`)
     : `single-${agentId}`;
 
@@ -291,10 +292,10 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
       { $set: connectionRecord },
       { upsert: true }
     );
-    
+
     // Add this agent to the group (also uses upsert)
     await agentGroupService.addAgentToGroup(groupId, agentId, effectiveInstanceId, 1);
-    
+
     // Get member count for response
     const members = await agentGroupService.getGroupMembers(groupId);
     groupMemberCount = members.length;
@@ -337,7 +338,7 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
 
   // Log activity
   if (organizationId) {
-    const activityMsg = groupMode 
+    const activityMsg = groupMode
       ? `${finalDomain} (instance: ${effectiveInstanceId}, group members: ${groupMemberCount})`
       : finalDomain;
     activityService.logAgentConnected(organizationId, agentId, activityMsg, clientIp).catch((err) => {
@@ -345,11 +346,11 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     });
   }
 
-  const logMsg = groupMode 
+  const logMsg = groupMode
     ? `✅ Agent registered: ${finalDomain} (instance: ${effectiveInstanceId}, group: ${groupId}, members: ${groupMemberCount})`
     : `✅ Agent registered: ${finalDomain} on server ${SERVER_ID}`;
   console.log(logMsg);
-  
+
   return { agent, finalDomain, wasModified, groupId, groupMemberCount };
 }
 
@@ -362,16 +363,16 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
     const collections = getCollections();
     const existingTunnel = await getTunnelByDomain(agent.domain);
     const newProtocol = agent.protocol || 'http';
-    
+
     if (existingTunnel) {
       // Check if protocol changed from http to tcp or vice versa
       const protocolChanged = existingTunnel.protocol !== newProtocol;
-      
+
       // If switching to TCP, we need to allocate a port
       let tcpPort = existingTunnel.tcpPort;
       if (newProtocol === 'tcp') {
         const tcpService = await import("./tcpService");
-        
+
         if (!existingTunnel.tcpPort || protocolChanged) {
           // Need to allocate a new port
           const allocation = await tcpService.allocatePort(
@@ -422,30 +423,32 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
         tcpPort = undefined;
         console.log(`✅ TCP port deallocated for tunnel: ${agent.domain}`);
       }
-      
+
       agent.tunnelId = existingTunnel.id;
-      
+
       await collections.tunnels.updateOne(
         { domain: agent.domain },
-        { $set: {
-          agentId,
-          localPort: agent.localPort,
-          localHost: agent.localHost,
-          active: true,
-          updatedAt: Date.now(),
-          serverId: SERVER_ID,
-          serverHost: SERVER_HOST,
-          protocol: newProtocol,
-          tcpPort: tcpPort,
-        }}
+        {
+          $set: {
+            agentId,
+            localPort: agent.localPort,
+            localHost: agent.localHost,
+            active: true,
+            updatedAt: Date.now(),
+            serverId: SERVER_ID,
+            serverHost: SERVER_HOST,
+            protocol: newProtocol,
+            tcpPort: tcpPort,
+          }
+        }
       );
-      
+
       // Update agent connection with tunnel ID
       await collections.agentConnections.updateOne(
         { agentId },
         { $set: { tunnelId: existingTunnel.id } }
       );
-      
+
       invalidateTunnelCache(agent.domain);
       console.log(`✅ Tunnel updated: ${agent.domain} (protocol: ${newProtocol}, server: ${SERVER_ID})`);
     } else {
@@ -460,7 +463,7 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
         agentId,
         organizationId
       );
-      
+
       if (newTunnel?.id) {
         agent.tunnelId = newTunnel.id;
         await collections.agentConnections.updateOne(
@@ -468,7 +471,7 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
           { $set: { tunnelId: newTunnel.id } }
         );
       }
-      
+
       invalidateTunnelCache(agent.domain);
       console.log(`✅ Tunnel created: ${agent.domain} (protocol: ${agent.protocol || 'http'})`);
     }
@@ -483,19 +486,19 @@ async function createTunnelForAgent(agent: Agent, agentId: string, organizationI
 
 export async function unregisterAgent(id: string): Promise<void> {
   const collections = getCollections();
-  
+
   // Get agent connection from MongoDB
   const connection = await collections.agentConnections.findOne({ agentId: id });
-  
+
   if (connection) {
     // Remove from MongoDB
     await collections.agentConnections.deleteOne({ agentId: id });
-    
+
     // Handle group membership cleanup
     if (connection.groupMode && connection.groupId) {
       const agentGroupService = await import("./agentGroupService");
       await agentGroupService.removeAgentFromGroup(id);
-      
+
       // Check if group still has members
       const remainingMembers = await agentGroupService.getGroupMembers(connection.groupId);
       if (remainingMembers.length === 0) {
@@ -528,21 +531,21 @@ export async function unregisterAgent(id: string): Promise<void> {
     if (connection.organizationId) {
       const instanceInfo = connection.groupMode ? ` (instance: ${connection.instanceId})` : '';
       activityService.logAgentDisconnected(
-        connection.organizationId, 
-        id, 
-        `${connection.domain}${instanceInfo}`, 
+        connection.organizationId,
+        id,
+        `${connection.domain}${instanceInfo}`,
         connection.clientIp
       ).catch((err) => {
         console.error("Failed to log agent disconnected activity:", err);
       });
     }
-    
-    const logMsg = connection.groupMode 
+
+    const logMsg = connection.groupMode
       ? `🔌 Agent unregistered: ${connection.domain} (instance: ${connection.instanceId})`
       : `🔌 Agent unregistered: ${connection.domain}`;
     console.log(logMsg);
   }
-  
+
   // Remove local socket reference
   localSockets.delete(id);
 }
@@ -557,9 +560,9 @@ export async function unregisterAgent(id: string): Promise<void> {
 export async function getAgentAsync(id: string): Promise<Agent | null> {
   const collections = getCollections();
   const connection = await collections.agentConnections.findOne({ agentId: id, active: true });
-  
+
   if (!connection) return null;
-  
+
   return connectionToAgent(connection);
 }
 
@@ -570,7 +573,7 @@ export async function getAgentAsync(id: string): Promise<Agent | null> {
 export function getAgent(id: string): Agent | null {
   // Check if socket exists locally - if not, agent is not on this server
   if (!localSockets.has(id)) return null;
-  
+
   // Return a minimal agent for local socket
   // Note: This is sync and can't query MongoDB, so it's limited
   return null;
@@ -582,9 +585,9 @@ export function getAgent(id: string): Agent | null {
 export async function getAgentByDomainAsync(domain: string): Promise<Agent | null> {
   const collections = getCollections();
   const connection = await collections.agentConnections.findOne({ domain, active: true });
-  
+
   if (!connection) return null;
-  
+
   return connectionToAgent(connection);
 }
 
@@ -610,9 +613,9 @@ export async function getAllAgentsAsync(): Promise<Agent[]> {
  */
 export async function getLocalAgentsAsync(): Promise<Agent[]> {
   const collections = getCollections();
-  const connections = await collections.agentConnections.find({ 
-    serverId: SERVER_ID, 
-    active: true 
+  const connections = await collections.agentConnections.find({
+    serverId: SERVER_ID,
+    active: true
   }).toArray();
   return connections.map(connectionToAgent);
 }
@@ -650,9 +653,9 @@ export async function getAgentServerInfo(domain: string): Promise<{
 } | null> {
   const collections = getCollections();
   const connection = await collections.agentConnections.findOne({ domain, active: true });
-  
+
   if (!connection) return null;
-  
+
   return {
     agentId: connection.agentId,
     serverId: connection.serverId,
@@ -676,9 +679,9 @@ export async function updateHeartbeat(id: string): Promise<void> {
 
 export async function isAgentConnected(id: string): Promise<boolean> {
   const collections = getCollections();
-  const connection = await collections.agentConnections.findOne({ 
-    agentId: id, 
-    active: true 
+  const connection = await collections.agentConnections.findOne({
+    agentId: id,
+    active: true
   });
   return !!connection;
 }
@@ -689,17 +692,17 @@ export async function isAgentConnected(id: string): Promise<boolean> {
 export async function cleanupStaleAgents(maxAgeMs: number = 120000): Promise<number> {
   const collections = getCollections();
   const cutoff = new Date(Date.now() - maxAgeMs);
-  
+
   // Find and remove stale connections ON THIS SERVER ONLY
   const staleConnections = await collections.agentConnections.find({
     serverId: SERVER_ID,
     lastHeartbeat: { $lt: cutoff },
   }).toArray();
-  
+
   for (const conn of staleConnections) {
     await unregisterAgent(conn.agentId);
   }
-  
+
   return staleConnections.length;
 }
 
@@ -746,12 +749,12 @@ export function getAgentIdBySocket(socket: WebSocket): string | null {
  */
 export async function sendServerHeartbeat(): Promise<void> {
   const collections = getCollections();
-  
+
   const localAgentCount = localSockets.size;
-  
+
   await collections.serverHeartbeats.updateOne(
     { serverId: SERVER_ID },
-    { 
+    {
       $set: {
         serverId: SERVER_ID,
         serverHost: SERVER_HOST,
@@ -779,12 +782,12 @@ export async function getHealthyServers(): Promise<Array<{
 }>> {
   const collections = getCollections();
   const cutoff = new Date(Date.now() - 30000); // 30 second threshold
-  
+
   const servers = await collections.serverHeartbeats.find({
     lastHeartbeat: { $gt: cutoff },
     healthy: true,
   }).toArray();
-  
+
   return servers.map(s => ({
     serverId: s.serverId,
     serverHost: s.serverHost,

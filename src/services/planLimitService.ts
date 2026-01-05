@@ -48,15 +48,33 @@ export interface PlanInfo {
 /**
  * Get plan information for an organization
  */
+/**
+ * Get plan information for an organization
+ */
 export async function getOrganizationPlan(organizationId: string): Promise<PlanInfo> {
   const collections = getCollections();
 
   try {
-    // Get subscription
-    const subscription = await collections.subscriptions.findOne({
+    // Get subscription - try string ID first
+    let subscription = await collections.subscriptions.findOne({
       organizationId,
       status: 'active'
     });
+
+    // If not found, try ObjectId
+    if (!subscription) {
+      try {
+        const { ObjectId } = await import("mongodb");
+        if (ObjectId.isValid(organizationId)) {
+          subscription = await collections.subscriptions.findOne({
+            organizationId: new ObjectId(organizationId),
+            status: 'active'
+          });
+        }
+      } catch (e) {
+        // Ignore ObjectId errors
+      }
+    }
 
     if (!subscription) {
       return { plan: null, limits: DEFAULT_FREE_LIMITS, tier: 'free' };
@@ -96,7 +114,7 @@ export async function getOrganizationPlan(organizationId: string): Promise<PlanI
 /**
  * Check if organization can create a new tunnel
  */
-export async function checkTunnelLimit(organizationId: string): Promise<LimitCheckResult> {
+export async function checkTunnelLimit(organizationId: string, intendedDomain?: string): Promise<LimitCheckResult> {
   const collections = getCollections();
   const { limits, tier } = await getOrganizationPlan(organizationId);
 
@@ -122,7 +140,30 @@ export async function checkTunnelLimit(organizationId: string): Promise<LimitChe
   // Use the higher of the two counts
   const currentCount = Math.max(tunnelCount, agentCount);
 
+  console.log(`[LimitCheck] Org: ${organizationId}, Domain: ${intendedDomain}`);
+  console.log(`[LimitCheck] Tunnels: ${tunnelCount}, UniqueAgents: ${agentCount}, Domains: ${JSON.stringify(uniqueAgentDomains)}`);
+
+  // FIX: Also check if there is an active TUNNEL for this domain.
+  // If a tunnel exists but has no agents (zombie/reconnecting), we should allowed to reconnect to it.
+  const existingTunnel = await collections.tunnels.findOne({
+    domain: intendedDomain,
+    organizationId,
+    active: true
+  });
+
+  // If intendedDomain is active (agent connected OR tunnel exists), bypass limit.
+  if (intendedDomain && (uniqueAgentDomains.includes(intendedDomain) || existingTunnel)) {
+    console.log(`[LimitCheck] Bypassing limit for existing domain/tunnel: ${intendedDomain}`);
+    return {
+      allowed: true, // Allow joining existing active domain
+      current: currentCount,
+      limit: limits.maxTunnels,
+      percentUsed: (currentCount / limits.maxTunnels) * 100
+    };
+  }
+
   const allowed = currentCount < limits.maxTunnels;
+  console.log(`[LimitCheck] Allowed: ${allowed} (Current: ${currentCount}, Limit: ${limits.maxTunnels})`);
   const percentUsed = (currentCount / limits.maxTunnels) * 100;
 
   return {

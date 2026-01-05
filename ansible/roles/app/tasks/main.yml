@@ -17,7 +17,6 @@
         --exclude=node_modules \
         --exclude=.git \
         --exclude=.env \
-        --exclude=cli \
         /root/jrok-staging/ {{ app_dir }}/
       echo "Code copied from staging"
     else

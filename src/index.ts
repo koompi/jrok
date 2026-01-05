@@ -568,6 +568,12 @@ async function startServer() {
                 // Build response headers
                 const responseHeaders = new Headers(message.headers || {});
 
+                // Add debug headers
+                responseHeaders.set('X-Jrok-Agent-Id', pending.agent.id);
+                if (pending.agent.instanceId) {
+                  responseHeaders.set('X-Jrok-Instance-Id', pending.agent.instanceId);
+                }
+
                 // Remove Content-Encoding header when we've decoded the body
                 // This prevents the browser from trying to decompress already-decoded content
                 if (message.isBase64) {
