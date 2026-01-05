@@ -1,10 +1,10 @@
 import { getCollections } from "../utils/mongodb";
 import { generateId } from "../utils/helpers";
 import { getSystemSettings } from "./adminService";
-import type { 
-  User, 
-  AuthSession, 
-  KoompiOAuthTokens, 
+import type {
+  User,
+  AuthSession,
+  KoompiOAuthTokens,
   KoompiUserInfo,
   AuthContext,
   ApiKey,
@@ -31,7 +31,7 @@ const JWT_EXPIRES_IN = 7 * 24 * 60 * 60; // 7 days in seconds
 function createJWT(payload: Record<string, unknown>, expiresIn: number): string {
   const header = { alg: "HS256", typ: "JWT" };
   const now = Math.floor(Date.now() / 1000);
-  
+
   const fullPayload = {
     ...payload,
     iat: now,
@@ -40,7 +40,7 @@ function createJWT(payload: Record<string, unknown>, expiresIn: number): string 
 
   const base64Header = Buffer.from(JSON.stringify(header)).toString("base64url");
   const base64Payload = Buffer.from(JSON.stringify(fullPayload)).toString("base64url");
-  
+
   const signature = crypto
     .createHmac("sha256", EFFECTIVE_JWT_SECRET)
     .update(`${base64Header}.${base64Payload}`)
@@ -59,9 +59,9 @@ function verifyJWT(token: string | null | undefined): Record<string, unknown> | 
     if (parts.length !== 3) {
       return null;
     }
-    
+
     const [header, payload, signature] = parts;
-    
+
     const expectedSignature = crypto
       .createHmac("sha256", EFFECTIVE_JWT_SECRET)
       .update(`${header}.${payload}`)
@@ -72,7 +72,7 @@ function verifyJWT(token: string | null | undefined): Record<string, unknown> | 
     }
 
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString());
-    
+
     // Check expiration
     if (decoded.exp && decoded.exp < Math.floor(Date.now() / 1000)) {
       return null;
@@ -98,7 +98,7 @@ export function getOAuthLoginUrl(state?: string): string {
 
 // Exchange authorization code for tokens
 export async function exchangeCodeForTokens(
-  code: string, 
+  code: string,
   state?: string,
   codeVerifier?: string
 ): Promise<KoompiOAuthTokens> {
@@ -106,10 +106,10 @@ export async function exchangeCodeForTokens(
     throw new Error("KOOMPI_CLIENT_ID and KOOMPI_CLIENT_SECRET must be set");
   }
 
-  console.log("Exchanging code for tokens...", { 
+  console.log("Exchanging code for tokens...", {
     hasCode: !!code,
     redirect_uri: KOOMPI_REDIRECT_URI,
-    has_verifier: !!codeVerifier 
+    has_verifier: !!codeVerifier
   });
 
   const response = await fetch(`${KOOMPI_OAUTH_URL}/v1/oauth/token`, {
@@ -162,7 +162,7 @@ export async function fetchKoompiUserInfo(accessToken: string): Promise<KoompiUs
 // Find or create user from KOOMPI OAuth data
 export async function findOrCreateUser(koompUser: KoompiUserInfo["user"]): Promise<User> {
   const collections = getCollections();
-  
+
   // Check if user exists
   let user = await collections.users.findOne({ koompId: koompUser._id }) as User | null;
 
@@ -227,8 +227,8 @@ export async function findOrCreateUser(koompUser: KoompiUserInfo["user"]): Promi
 
 // Create session for user
 export async function createSession(
-  userId: string, 
-  userAgent?: string, 
+  userId: string,
+  userAgent?: string,
   ipAddress?: string
 ): Promise<AuthSession> {
   const collections = getCollections();
@@ -237,11 +237,11 @@ export async function createSession(
   const sessionId = generateId();
 
   const token = createJWT(
-    { 
+    {
       sessionId,
       userId,
       type: "session",
-    }, 
+    },
     JWT_EXPIRES_IN
   );
 
@@ -282,14 +282,14 @@ export async function validateSessionToken(token: string | null | undefined): Pr
   if (!token) {
     return null;
   }
-  
+
   const decoded = verifyJWT(token);
   if (!decoded || decoded.type !== "session") {
     return null;
   }
 
   const sessionId = decoded.sessionId as string;
-  
+
   // Check cache first
   const cached = sessionCache.get(sessionId);
   if (cached && Date.now() - cached.timestamp < SESSION_CACHE_TTL) {
@@ -297,7 +297,7 @@ export async function validateSessionToken(token: string | null | undefined): Pr
   }
 
   const collections = getCollections();
-  
+
   // Check if session exists and is valid
   const session = await collections.sessions.findOne({
     id: sessionId,
@@ -310,7 +310,7 @@ export async function validateSessionToken(token: string | null | undefined): Pr
   }
 
   // Get user
-  const user = await collections.users.findOne({ 
+  const user = await collections.users.findOne({
     id: decoded.userId,
     isActive: true,
   }) as User | null;
@@ -331,7 +331,7 @@ export async function getSession(token: string): Promise<AuthSession | null> {
   }
 
   const collections = getCollections();
-  
+
   const session = await collections.sessions.findOne({
     id: decoded.sessionId,
     expiresAt: { $gt: Date.now() },
@@ -380,7 +380,7 @@ export async function validateApiKey(key: string): Promise<{ apiKey: ApiKey; org
       collections.apiKeys.updateOne(
         { id: cached.apiKey.id },
         { $set: { lastUsedAt: Date.now() } }
-      ).catch(() => {}); // Ignore errors for this non-critical update
+      ).catch(() => { }); // Ignore errors for this non-critical update
     }
     return { apiKey: cached.apiKey, organization: cached.organization };
   }
@@ -410,13 +410,13 @@ export async function validateApiKey(key: string): Promise<{ apiKey: ApiKey; org
 
   // Cache the result
   apiKeyCache.set(keyHash, { apiKey, organization, timestamp: Date.now() });
-  
+
   // Update lastUsedAt (fire-and-forget)
   lastUsedUpdateTimes.set(keyHash, Date.now());
   collections.apiKeys.updateOne(
     { id: apiKey.id },
     { $set: { lastUsedAt: Date.now() } }
-  ).catch(() => {});
+  ).catch(() => { });
 
   return { apiKey, organization };
 }
@@ -452,12 +452,12 @@ export async function authenticateRequest(req: Request): Promise<AuthContext | n
   if (authHeader.startsWith("Bearer ")) {
     const token = authHeader.slice(7);
     const user = await validateSessionToken(token);
-    
+
     if (user) {
       // Check cache for user's organization
       let organization: Organization | null = null;
       const cached = userOrgCache.get(user.id);
-      
+
       if (cached && Date.now() - cached.timestamp < USER_ORG_CACHE_TTL) {
         organization = cached.organization;
       } else {
@@ -469,7 +469,7 @@ export async function authenticateRequest(req: Request): Promise<AuthContext | n
           ],
           isActive: true,
         }) as Organization | null;
-        
+
         // Cache the result
         userOrgCache.set(user.id, { organization, timestamp: Date.now() });
       }
@@ -539,7 +539,7 @@ export async function getUserByKoompId(koompId: string): Promise<User | null> {
 // Update user role (super admin only)
 export async function updateUserRole(userId: string, role: User["role"]): Promise<User | null> {
   const collections = getCollections();
-  
+
   const result = await collections.users.findOneAndUpdate(
     { id: userId },
     { $set: { role, updatedAt: Date.now() } },
@@ -563,7 +563,7 @@ export async function getAllUsers(limit = 100, skip = 0): Promise<User[]> {
 // Deactivate user (super admin only)
 export async function deactivateUser(userId: string): Promise<boolean> {
   const collections = getCollections();
-  
+
   const result = await collections.users.updateOne(
     { id: userId },
     { $set: { isActive: false, updatedAt: Date.now() } }
@@ -581,6 +581,7 @@ export async function validateApiKeyForAgent(rawKey: string): Promise<{
   reason?: string;
   organizationId?: string;
   apiKeyId?: string;
+  permissions?: string[];
 }> {
   if (!rawKey || typeof rawKey !== 'string') {
     return { valid: false, reason: "API key is required" };
@@ -592,41 +593,42 @@ export async function validateApiKeyForAgent(rawKey: string): Promise<{
   }
 
   const collections = getCollections();
-  
+
   // Hash the key to compare with stored hash
   const hash = crypto.createHash("sha256").update(rawKey).digest("hex");
-  
-  const apiKey = await collections.apiKeys.findOne({ 
-    key: hash, 
-    isActive: true 
+
+  const apiKey = await collections.apiKeys.findOne({
+    key: hash,
+    isActive: true
   });
-  
+
   if (!apiKey) {
     return { valid: false, reason: "Invalid or revoked API key" };
   }
-  
+
   // Check expiration
   if (apiKey.expiresAt && apiKey.expiresAt < Date.now()) {
     return { valid: false, reason: "API key has expired" };
   }
-  
+
   // Check if key has tunnel:create permission (also accept tunnels:write for backward compatibility)
-  const hasTunnelPermission = apiKey.permissions.includes('tunnel:create') || 
-                               apiKey.permissions.includes('tunnels:write') || 
-                               apiKey.permissions.includes('*');
+  const hasTunnelPermission = apiKey.permissions.includes('tunnel:create') ||
+    apiKey.permissions.includes('tunnels:write') ||
+    apiKey.permissions.includes('*');
   if (!hasTunnelPermission) {
     return { valid: false, reason: "API key does not have tunnel:create permission" };
   }
-  
+
   // Update last used timestamp
   await collections.apiKeys.updateOne(
     { id: apiKey.id },
     { $set: { lastUsedAt: Date.now() } }
   );
-  
-  return { 
-    valid: true, 
+
+  return {
+    valid: true,
     organizationId: apiKey.organizationId,
-    apiKeyId: apiKey.id
+    apiKeyId: apiKey.id,
+    permissions: apiKey.permissions
   };
 }

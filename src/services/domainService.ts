@@ -86,6 +86,7 @@ async function generateUniqueSubdomain(baseName: string): Promise<string> {
 export async function registerCustomDomain(
   request: RegisterCustomDomainRequest
 ): Promise<CustomDomain> {
+  console.log(`[DomainService] Registering custom domain: ${request.domain}. OrganizationId: ${request.organizationId}`);
   // Check if domain already exists
   const existing = await db.getCustomDomainByName(request.domain);
   if (existing) {

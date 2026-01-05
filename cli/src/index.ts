@@ -51,6 +51,7 @@ interface ClientConfig {
     allowedIps?: string[];
     blockedIps?: string[];
   };
+  organizationId?: string; // Organization ID for authorization
 }
 
 interface ServiceInfo {
@@ -121,7 +122,7 @@ async function promptInput(question: string, isPassword = false): Promise<string
 function compareVersions(v1: string, v2: string): number {
   const parts1 = v1.replace(/^v/, '').split('.').map(Number);
   const parts2 = v2.replace(/^v/, '').split('.').map(Number);
-  
+
   for (let i = 0; i < 3; i++) {
     const p1 = parts1[i] || 0;
     const p2 = parts2[i] || 0;
@@ -137,15 +138,15 @@ async function checkForUpdates(silent = false): Promise<{ hasUpdate: boolean; la
     const response = await fetch(`${GITHUB_API}/releases/latest`, {
       headers: { 'Accept': 'application/vnd.github.v3+json' },
     });
-    
+
     if (!response.ok) {
       if (!silent) console.log('⚠️  Could not check for updates');
       return { hasUpdate: false };
     }
-    
+
     const data = await response.json();
     const latestVersion = data.tag_name.replace(/^v/, ''); // Remove 'v' prefix
-    
+
     if (compareVersions(latestVersion, VERSION) > 0) {
       if (!silent) {
         console.log(`\n📦 Update available: ${VERSION} → ${latestVersion}`);
@@ -153,7 +154,7 @@ async function checkForUpdates(silent = false): Promise<{ hasUpdate: boolean; la
       }
       return { hasUpdate: true, latestVersion };
     }
-    
+
     if (!silent) {
       console.log('✅ You are using the latest version');
     }
@@ -169,19 +170,19 @@ async function checkForUpdates(silent = false): Promise<{ hasUpdate: boolean; la
 // Auto-check for updates on startup (if not checked recently)
 async function autoCheckForUpdates(): Promise<void> {
   const config = loadStoredConfig();
-  
+
   // Skip if user disabled it or checked recently
   if (config.skipUpdateCheck) return;
-  
+
   const now = Date.now();
   const lastCheck = config.lastUpdateCheck || 0;
-  
+
   if (now - lastCheck < UPDATE_CHECK_INTERVAL) return;
-  
+
   // Update last check time
   config.lastUpdateCheck = now;
   saveStoredConfig(config);
-  
+
   // Check for updates silently
   await checkForUpdates(true);
 }
@@ -250,13 +251,13 @@ function parseArgs(): { command: string; subcommand?: string; args: Record<strin
 
 function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
   const storedConfig = loadStoredConfig();
-  const serviceType = args['docker-service'] ? 'docker-swarm' : 
-                     args['k8s-service'] ? 'kubernetes' : 
-                     'port';
-  
+  const serviceType = args['docker-service'] ? 'docker-swarm' :
+    args['k8s-service'] ? 'kubernetes' :
+      'port';
+
   // Check if TCP protocol is requested
   const isTcp = args['tcp'] === 'true' || args['tcp'] === '' || process.env.JROK_PROTOCOL === 'tcp';
-  
+
   // Check if force-new is requested (always create new subdomain)
   const forceNew = args['force-new'] === 'true' || args['force-new'] === '' || args['new'] === 'true' || args['new'] === '';
 
@@ -266,18 +267,18 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
 
   // Parse IP security options
   let ipSecurity: ClientConfig['ipSecurity'] | undefined;
-  
+
   // --restrict flag: enable allowlist mode (only specified IPs can access)
   if (args['restrict'] === 'true' || args['restrict'] === '') {
     ipSecurity = { mode: 'allowlist', allowedIps: [] };
   }
-  
+
   // --allow-ip: specify IPs for allowlist (implies allowlist mode)
   if (args['allow-ip']) {
     const allowedIps = args['allow-ip'].split(',').map(ip => ip.trim()).filter(ip => ip);
     ipSecurity = { mode: 'allowlist', allowedIps };
   }
-  
+
   // --block-ip: specify IPs for blocklist (implies blocklist mode)
   if (args['block-ip']) {
     const blockedIps = args['block-ip'].split(',').map(ip => ip.trim()).filter(ip => ip);
@@ -287,9 +288,9 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
   return {
     serverUrl: args["server"] || process.env.JROK_SERVER || storedConfig.serverUrl || DEFAULT_SERVER,
     domain: args["domain"] || process.env.JROK_DOMAIN,
-    port: args["port"] ? parseInt(args["port"]) : 
-          process.env.JROK_PORT ? parseInt(process.env.JROK_PORT) : 
-          serviceType === 'port' ? 3000 : undefined,
+    port: args["port"] ? parseInt(args["port"]) :
+      process.env.JROK_PORT ? parseInt(process.env.JROK_PORT) :
+        serviceType === 'port' ? 3000 : undefined,
     localHost: args["host"] || process.env.JROK_HOST || "localhost",
     authToken: args["auth"] || process.env.JROK_AUTH || storedConfig.apiKey,
     serviceType: serviceType as 'port' | 'docker-swarm' | 'kubernetes',
@@ -299,6 +300,7 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
     groupMode,
     instanceId,
     ipSecurity,
+    organizationId: args["org"] || storedConfig.organizationId,
   };
 }
 
@@ -336,12 +338,12 @@ function validateBasicConfig(config: Partial<ClientConfig>): void {
 async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConfig): Promise<void> {
   try {
     const { requestId, method, path, query, headers, body, clientIp } = message;
-    
+
     // Build URL to local service
     const localUrl = `http://${config.localHost}:${config.port}${path}${query || ''}`;
-    
+
     console.log(`📥 ${method} ${path} → ${localUrl} [${clientIp || 'unknown'}]`);
-    
+
     // Filter out hop-by-hop headers that shouldn't be forwarded
     const forwardHeaders: Record<string, string> = {};
     const hopByHopHeaders = new Set([
@@ -349,7 +351,7 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
       'te', 'trailers', 'transfer-encoding', 'upgrade',
       'content-length', // Let fetch handle this
     ]);
-    
+
     if (headers) {
       for (const [key, value] of Object.entries(headers)) {
         if (!hopByHopHeaders.has(key.toLowerCase())) {
@@ -357,7 +359,7 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
         }
       }
     }
-    
+
     // Forward request to local service
     const localResponse = await fetch(localUrl, {
       method,
@@ -365,7 +367,7 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
       body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
       redirect: 'manual', // Don't follow redirects automatically
     });
-    
+
     // Read response - use ArrayBuffer for binary content
     const responseBuffer = await localResponse.arrayBuffer();
     const responseBody = Buffer.from(responseBuffer).toString('base64');
@@ -373,7 +375,7 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
     localResponse.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
-    
+
     // Send response back to server
     ws.send(JSON.stringify({
       type: "http_response",
@@ -384,11 +386,11 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
       body: responseBody,
       isBase64: true,
     }));
-    
+
     console.log(`📤 ${localResponse.status} ${localResponse.statusText}`);
   } catch (error) {
     console.error(`❌ Error forwarding request:`, error);
-    
+
     // Send error response
     ws.send(JSON.stringify({
       type: "http_response",
@@ -407,23 +409,23 @@ const localWsConnections = new Map<string, WebSocket>();
 // Handle WebSocket connection request from server
 async function handleWsConnect(message: any, serverWs: WebSocket, config: ClientConfig): Promise<void> {
   const { wsId, path, headers } = message;
-  
+
   // Build WebSocket URL to local service
   const wsUrl = `ws://${config.localHost}:${config.port}${path || '/'}`;
-  
+
   console.log(`🔌 WS Connect: ${path} → ${wsUrl} [${wsId}]`);
-  
+
   try {
     // Create WebSocket connection to local service
     const localWs = new WebSocket(wsUrl, {
       headers: headers || {},
     });
-    
+
     localWs.on('open', () => {
       console.log(`✅ WS Connected: ${path} [${wsId}]`);
       localWsConnections.set(wsId, localWs);
     });
-    
+
     localWs.on('message', (data: Buffer | string) => {
       // Forward message from local service to server
       const isBinary = Buffer.isBuffer(data);
@@ -434,11 +436,11 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
         isBinary,
       }));
     });
-    
+
     localWs.on('close', (code: number, reason: Buffer) => {
       console.log(`🔌 WS Closed: ${path} [${wsId}] (${code})`);
       localWsConnections.delete(wsId);
-      
+
       // Notify server about close
       serverWs.send(JSON.stringify({
         type: "ws_close_response",
@@ -447,11 +449,11 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
         reason: reason?.toString() || '',
       }));
     });
-    
+
     localWs.on('error', (error: Error) => {
       console.error(`❌ WS Error: ${path} [${wsId}]:`, error.message);
       localWsConnections.delete(wsId);
-      
+
       // Notify server about error
       serverWs.send(JSON.stringify({
         type: "ws_error",
@@ -461,7 +463,7 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
     });
   } catch (error) {
     console.error(`❌ Failed to connect WebSocket [${wsId}]:`, error);
-    
+
     // Notify server about error
     serverWs.send(JSON.stringify({
       type: "ws_error",
@@ -475,12 +477,12 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
 function handleWsMessage(message: any): void {
   const { wsId, data, isBinary } = message;
   const localWs = localWsConnections.get(wsId);
-  
+
   if (!localWs || localWs.readyState !== WebSocket.OPEN) {
     console.warn(`⚠️ No active WebSocket for [${wsId}]`);
     return;
   }
-  
+
   try {
     // Decode and forward message to local service
     const payload = isBinary ? Buffer.from(data, 'base64') : data;
@@ -494,7 +496,7 @@ function handleWsMessage(message: any): void {
 function handleWsClose(message: any): void {
   const { wsId, code, reason } = message;
   const localWs = localWsConnections.get(wsId);
-  
+
   if (localWs) {
     console.log(`🔌 WS Close request: [${wsId}]`);
     localWs.close(code || 1000, reason || '');
@@ -511,27 +513,27 @@ const localTcpConnections = new Map<string, net.Socket>();
 // Handle TCP connection request from server
 async function handleTcpConnect(message: any, serverWs: WebSocket, config: ClientConfig): Promise<void> {
   const { connectionId, localPort, localHost, remoteAddress, remotePort } = message;
-  
+
   console.log(`🔌 TCP Connect: ${remoteAddress}:${remotePort} → ${localHost}:${localPort} [${connectionId}]`);
-  
+
   try {
     // Create TCP connection to local service
     const localSocket = net.createConnection({
       host: localHost || config.localHost,
       port: localPort || config.port,
     });
-    
+
     localSocket.on('connect', () => {
       console.log(`✅ TCP Connected: ${localHost}:${localPort} [${connectionId}]`);
       localTcpConnections.set(connectionId, localSocket);
-      
+
       // Notify server that we're connected
       serverWs.send(JSON.stringify({
         type: "tcp_connected",
         connectionId,
       }));
     });
-    
+
     localSocket.on('data', (data: Buffer) => {
       // Forward data from local service to server
       serverWs.send(JSON.stringify({
@@ -540,22 +542,22 @@ async function handleTcpConnect(message: any, serverWs: WebSocket, config: Clien
         data: data.toString('base64'),
       }));
     });
-    
+
     localSocket.on('close', () => {
       console.log(`🔌 TCP Closed: ${localHost}:${localPort} [${connectionId}]`);
       localTcpConnections.delete(connectionId);
-      
+
       // Notify server about close
       serverWs.send(JSON.stringify({
         type: "tcp_close_response",
         connectionId,
       }));
     });
-    
+
     localSocket.on('error', (error: Error) => {
       console.error(`❌ TCP Error: ${localHost}:${localPort} [${connectionId}]:`, error.message);
       localTcpConnections.delete(connectionId);
-      
+
       // Notify server about error
       serverWs.send(JSON.stringify({
         type: "tcp_error",
@@ -565,7 +567,7 @@ async function handleTcpConnect(message: any, serverWs: WebSocket, config: Clien
     });
   } catch (error) {
     console.error(`❌ Failed to connect TCP [${connectionId}]:`, error);
-    
+
     // Notify server about error
     serverWs.send(JSON.stringify({
       type: "tcp_error",
@@ -579,12 +581,12 @@ async function handleTcpConnect(message: any, serverWs: WebSocket, config: Clien
 function handleTcpData(message: any, serverWs: WebSocket): void {
   const { connectionId, data } = message;
   const localSocket = localTcpConnections.get(connectionId);
-  
+
   if (!localSocket) {
     console.warn(`⚠️ No active TCP connection for [${connectionId}]`);
     return;
   }
-  
+
   try {
     // Decode and forward data to local service
     const buffer = Buffer.from(data, 'base64');
@@ -598,7 +600,7 @@ function handleTcpData(message: any, serverWs: WebSocket): void {
 function handleTcpClose(message: any): void {
   const { connectionId } = message;
   const localSocket = localTcpConnections.get(connectionId);
-  
+
   if (localSocket) {
     console.log(`🔌 TCP Close request: [${connectionId}]`);
     localSocket.end();
@@ -610,7 +612,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   const baseDomain = getBaseDomain(config.serverUrl);
   const fullDomain = `${config.domain}.${baseDomain}`;
   const protocol = config.protocol || 'http';
-  
+
   const wsUrl = new URL(config.serverUrl);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
   wsUrl.pathname = "/ws/agent";
@@ -618,10 +620,13 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   wsUrl.searchParams.set("serviceType", config.serviceType || 'port');
   wsUrl.searchParams.set("auth", config.authToken);
   wsUrl.searchParams.set("protocol", protocol);
+  if (config.organizationId) {
+    wsUrl.searchParams.set("organizationId", config.organizationId);
+  }
   if (config.forceNew) {
     wsUrl.searchParams.set("forceNew", "true");
   }
-  
+
   // Multi-agent group mode settings
   if (config.groupMode) {
     wsUrl.searchParams.set("groupMode", "true");
@@ -629,7 +634,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
       wsUrl.searchParams.set("instanceId", config.instanceId);
     }
   }
-  
+
   // IP Security settings
   if (config.ipSecurity) {
     wsUrl.searchParams.set("ipSecurityMode", config.ipSecurity.mode);
@@ -651,11 +656,11 @@ async function connectAgent(config: ClientConfig): Promise<void> {
     wsUrl.searchParams.set("k8sService", config.serviceName!);
   }
 
-  const serviceDesc = config.serviceType === 'port' 
+  const serviceDesc = config.serviceType === 'port'
     ? `${config.localHost}:${config.port}`
     : config.serviceType === 'docker-swarm'
-    ? `Docker Swarm: ${config.serviceName}`
-    : `Kubernetes: ${config.serviceName}`;
+      ? `Docker Swarm: ${config.serviceName}`
+      : `Kubernetes: ${config.serviceName}`;
 
   console.log(`\n🔌 Connecting to jrok server...`);
   console.log(`📍 Domain: ${config.domain}`);
@@ -676,7 +681,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   ws.onopen = () => {
     reconnectAttempts = 0;
     console.log("✅ Connected to server!");
-    
+
     if (protocol === 'http') {
       console.log(`🌐 Your service is now available at: https://${fullDomain}`);
     } else {
@@ -698,7 +703,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
       if (message.type === "welcome") {
         console.log(`✨ ${message.message}`);
         console.log(`🆔 Agent ID: ${message.agentId}`);
-        
+
         // Check if domain was modified due to conflict
         if (message.domainModified && message.domain) {
           console.log(`\n⚠️  Requested subdomain "${message.requestedDomain}" was taken`);
@@ -709,7 +714,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
             console.log(`🌐 Your service is available at: https://${actualFullDomain}`);
           }
         }
-        
+
         // Display group mode info
         if (message.groupMode) {
           console.log(`\n⚖️  Group Mode: Active`);
@@ -717,7 +722,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
           console.log(`   👥 Group Members: ${message.groupMemberCount}`);
           console.log(`   🔄 Load Balancing: Round-robin`);
         }
-        
+
         // Display IP security status if enabled
         if (message.ipSecurity) {
           console.log(`\n🔐 IP Security: ${message.ipSecurity.mode}`);
@@ -727,7 +732,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
             console.log(`   🚫 ${message.ipSecurity.blockedIps} IPs are blocked`);
           }
         }
-        
+
         // For TCP tunnels, display the assigned port
         if (message.tcpPort) {
           tcpPort = message.tcpPort;
@@ -779,7 +784,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
     clearInterval(heartbeatInterval);
     reconnectAttempts++;
     const delay = Math.min(5000 * reconnectAttempts, 30000); // Max 30s delay
-    
+
     // Close all local WebSocket connections
     for (const [wsId, localWs] of localWsConnections.entries()) {
       try {
@@ -789,7 +794,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
       }
     }
     localWsConnections.clear();
-    
+
     console.log(`\n🔌 Disconnected from server`);
     console.log(`🔄 Attempting to reconnect in ${delay / 1000}s (attempt ${reconnectAttempts})...`);
 
@@ -802,7 +807,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
 async function listServices(config: { serverUrl: string; authToken: string }): Promise<void> {
   try {
     const baseDomain = getBaseDomain(config.serverUrl);
-    
+
     const response = await fetch(`${config.serverUrl}/tunnels`, {
       method: 'GET',
       headers: {
@@ -874,7 +879,7 @@ async function disconnectService(config: { serverUrl: string; domain: string; au
 async function listOrganizations(serverUrl: string, authToken: string): Promise<void> {
   try {
     const response = await fetch(`${serverUrl}/organizations`, {
-      headers: { 
+      headers: {
         'Authorization': `Bearer ${authToken}`,
         'X-API-Key': authToken,
       },
@@ -935,7 +940,7 @@ async function createOrganization(serverUrl: string, authToken: string, name: st
     console.log(`✅ Organization created: ${org.name}`);
     console.log(`🆔 ID: ${org.id || org._id}`);
     console.log(`🔗 Slug: ${org.slug}`);
-    
+
     // Save to config
     const config = loadStoredConfig();
     config.organizationId = org.id || org._id;
@@ -960,7 +965,7 @@ async function setDefaultOrganization(orgId: string): Promise<void> {
 async function listApiKeys(serverUrl: string, authToken: string, orgId: string): Promise<void> {
   try {
     const response = await fetch(`${serverUrl}/organizations/${orgId}/api-keys`, {
-      headers: { 
+      headers: {
         'Authorization': `Bearer ${authToken}`,
         'X-API-Key': authToken,
       },
@@ -1000,9 +1005,9 @@ async function listApiKeys(serverUrl: string, authToken: string, orgId: string):
 }
 
 async function createApiKey(
-  serverUrl: string, 
-  authToken: string, 
-  orgId: string, 
+  serverUrl: string,
+  authToken: string,
+  orgId: string,
   name: string,
   permissions: string[] = ['tunnel:create', 'tunnel:read', 'tunnel:delete']
 ): Promise<void> {
@@ -1024,7 +1029,7 @@ async function createApiKey(
 
     const data = await response.json();
     const rawKey = data.rawKey || data.key;
-    
+
     console.log(`\n✅ API Key created: ${name}`);
     console.log(`\n⚠️  IMPORTANT: Save this key now! It will only be shown once.\n`);
     console.log(`🔑 API Key: ${rawKey}`);
@@ -1043,7 +1048,7 @@ async function revokeApiKey(serverUrl: string, authToken: string, orgId: string,
   try {
     const response = await fetch(`${serverUrl}/organizations/${orgId}/api-keys/${keyId}`, {
       method: 'DELETE',
-      headers: { 
+      headers: {
         'Authorization': `Bearer ${authToken}`,
         'X-API-Key': authToken,
       },
@@ -1064,9 +1069,9 @@ async function revokeApiKey(serverUrl: string, authToken: string, orgId: string,
 // ============== Custom Domain Management ==============
 
 async function registerCustomDomain(
-  serverUrl: string, 
-  authToken: string, 
-  domainName: string, 
+  serverUrl: string,
+  authToken: string,
+  domainName: string,
   email: string,
   subdomain?: string
 ): Promise<void> {
@@ -1125,7 +1130,7 @@ async function checkDomainStatus(serverUrl: string, authToken: string, domainNam
     console.log(`   Expected CNAME: ${data.cnameTarget}`);
     console.log(`   Actual CNAME:   ${data.actualCname || '(none found)'}`);
     console.log(`   Verified:       ${data.verified ? '✅ Yes' : '❌ No'}`);
-    
+
     if (!data.verified) {
       console.log(`\n💡 Add this CNAME record to your DNS:`);
       console.log(`   ${domainName}  CNAME  ${data.cnameTarget}\n`);
@@ -1145,7 +1150,7 @@ async function checkDomainStatus(serverUrl: string, authToken: string, domainNam
 async function verifyCustomDomain(serverUrl: string, authToken: string, domainName: string): Promise<void> {
   try {
     console.log(`\n🔍 Verifying CNAME for ${domainName}...`);
-    
+
     const response = await fetch(`${serverUrl}/domains/${encodeURIComponent(domainName)}/verify`, {
       method: 'POST',
       headers: {
@@ -1224,7 +1229,7 @@ async function listCustomDomains(serverUrl: string, authToken: string): Promise<
 
 function showConfig(): void {
   const config = loadStoredConfig();
-  
+
   console.log("\n⚙️  Current Configuration:\n");
   console.log(`Server URL:      ${config.serverUrl || '(not set)'}`);
   console.log(`API Key:         ${config.apiKey ? config.apiKey.slice(0, 15) + '...' : '(not set)'}`);
@@ -1236,7 +1241,7 @@ function showConfig(): void {
 
 function setConfig(args: Record<string, string>): void {
   const config = loadStoredConfig();
-  
+
   if (args.server) {
     config.serverUrl = args.server;
     console.log(`✅ Server URL set to: ${args.server}`);
@@ -1249,7 +1254,7 @@ function setConfig(args: Record<string, string>): void {
     config.organizationId = args.org;
     console.log(`✅ Organization ID set to: ${args.org}`);
   }
-  
+
   saveStoredConfig(config);
 }
 
@@ -1266,15 +1271,15 @@ async function whoami(serverUrl: string, authToken: string): Promise<void> {
     if (authToken.startsWith('jrok_')) {
       console.log("\n🔑 Using API Key authentication");
       console.log(`Key prefix: ${authToken.slice(0, 15)}...`);
-      
+
       // Try to validate by making a request
       const response = await fetch(`${serverUrl}/organizations`, {
-        headers: { 
+        headers: {
           'Authorization': `Bearer ${authToken}`,
           'X-API-Key': authToken,
         },
       });
-      
+
       if (response.ok) {
         const data = await response.json();
         const orgs = data.organizations || data || [];
@@ -1294,11 +1299,11 @@ async function whoami(serverUrl: string, authToken: string): Promise<void> {
       const response = await fetch(`${serverUrl}/auth/me`, {
         headers: { 'Authorization': `Bearer ${authToken}` },
       });
-      
+
       if (!response.ok) {
         throw new Error('Invalid session token');
       }
-      
+
       const data = await response.json();
       const user = data.user || data;
       console.log("\n👤 Current User:\n");
@@ -1485,7 +1490,7 @@ For more info: https://github.com/koompi/jrok
 async function main(): Promise<void> {
   try {
     const { command, subcommand, args } = parseArgs();
-    
+
     // Auto-check for updates on startup (skip for non-interactive commands)
     if (!['version', 'help', '--version', '-v', '--help', '-h'].includes(command)) {
       await autoCheckForUpdates();
@@ -1496,14 +1501,14 @@ async function main(): Promise<void> {
     const getServerAndAuth = () => {
       const serverUrl = args.server || process.env.JROK_SERVER || storedConfig.serverUrl;
       const authToken = args.auth || process.env.JROK_AUTH || storedConfig.apiKey;
-      
+
       if (!serverUrl) {
         throw new Error("Missing server URL. Use --server, config, or JROK_SERVER env var");
       }
       if (!authToken) {
         throw new Error("Missing auth token. Use --auth, config, or JROK_AUTH env var");
       }
-      
+
       return { serverUrl, authToken };
     };
 
@@ -1518,7 +1523,7 @@ async function main(): Promise<void> {
     switch (command) {
       case "connect": {
         const config = buildConfig(args);
-        
+
         // If no auth token, prompt for it
         if (!config.authToken) {
           console.log(`\n🔐 No API key configured.`);
@@ -1529,7 +1534,7 @@ async function main(): Promise<void> {
             process.exit(1);
           }
           config.authToken = authToken;
-          
+
           // Save for future use
           const storedCfg = loadStoredConfig();
           storedCfg.apiKey = authToken;
@@ -1539,17 +1544,17 @@ async function main(): Promise<void> {
           saveStoredConfig(storedCfg);
           console.log(`💾 Configuration saved to ${CONFIG_FILE}\n`);
         }
-        
+
         // Auto-generate domain if not provided
         if (!config.domain) {
           config.domain = generateSubdomain();
           console.log(`🎲 Generated subdomain: ${config.domain}`);
         }
-        
+
         validateConnectConfig(config);
         await connectAgent(config);
         // Keep the process running
-        await new Promise(() => {});
+        await new Promise(() => { });
         break;
       }
 
@@ -1590,7 +1595,7 @@ async function main(): Promise<void> {
 
       case "org": {
         const { serverUrl, authToken } = getServerAndAuth();
-        
+
         switch (subcommand) {
           case "list":
             await listOrganizations(serverUrl, authToken);
@@ -1619,7 +1624,7 @@ async function main(): Promise<void> {
       case "apikey": {
         const { serverUrl, authToken } = getServerAndAuth();
         const orgId = getOrgId();
-        
+
         switch (subcommand) {
           case "list":
             await listApiKeys(serverUrl, authToken, orgId);
@@ -1651,7 +1656,7 @@ async function main(): Promise<void> {
 
       case "domain": {
         const { serverUrl, authToken } = getServerAndAuth();
-        
+
         switch (subcommand) {
           case "register": {
             if (!args.name) {
@@ -1707,14 +1712,14 @@ async function main(): Promise<void> {
       case "doctor": {
         console.log('🏥 Running jrok health check...\n');
         console.log(`📌 Current version: ${VERSION}`);
-        
+
         // Check for updates
         const { hasUpdate, latestVersion } = await checkForUpdates(false);
-        
+
         if (hasUpdate) {
           console.log(`\n🔄 To update to v${latestVersion}, run:`);
           console.log(`   curl -fsSL ${GITHUB_RAW}/v${latestVersion}/install.sh | bash`);
-          
+
           // Prompt for auto-update
           const answer = await promptInput('\n🚀 Would you like to update now? (y/n): ');
           if (answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') {
@@ -1730,7 +1735,7 @@ async function main(): Promise<void> {
             }
           }
         }
-        
+
         // Check config
         console.log('\n📝 Configuration:');
         const config = loadStoredConfig();
@@ -1738,7 +1743,7 @@ async function main(): Promise<void> {
         console.log(`   Server: ${config.serverUrl || 'not set'}`);
         console.log(`   API Key: ${config.apiKey ? '✓ configured' : '✗ not set'}`);
         console.log(`   Organization: ${config.organizationName || 'not set'}`);
-        
+
         // Test server connection
         if (config.serverUrl && config.apiKey) {
           try {
@@ -1750,7 +1755,7 @@ async function main(): Promise<void> {
                 'Content-Type': 'application/json',
               },
             });
-            
+
             if (response.ok) {
               const data = await response.json();
               const orgs = data.organizations || data || [];
@@ -1768,7 +1773,7 @@ async function main(): Promise<void> {
             console.log(`   Error: ${error instanceof Error ? error.message : error}`);
           }
         }
-        
+
         console.log('\n✨ Health check complete!');
         break;
       }
