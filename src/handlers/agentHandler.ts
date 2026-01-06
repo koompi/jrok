@@ -81,7 +81,7 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   // ====== PLAN LIMIT CHECK: Tunnel Count ======
   if (effectiveOrgId) {
     console.log(`[AgentHandler] Checking tunnel limit for org: ${effectiveOrgId}, domain: ${domain}`);
-    const tunnelLimit = await planLimitService.checkTunnelLimit(effectiveOrgId, domain);
+    const tunnelLimit = await planLimitService.checkTunnelLimit(effectiveOrgId, domain, instanceId || undefined);
     if (!tunnelLimit.allowed) {
       console.warn(`🚫 Tunnel limit reached for org ${authResult.organizationId}: ${tunnelLimit.current}/${tunnelLimit.limit}`);
       monitoringService.addLog('warn', 'plan_limits', `Tunnel limit reached`, {

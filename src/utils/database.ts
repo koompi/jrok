@@ -35,13 +35,13 @@ export async function getTunnel(id: string): Promise<Tunnel | null> {
   if (cached && Date.now() - cached.timestamp < TUNNEL_CACHE_TTL) {
     return cached.data;
   }
-  
+
   const collections = getCollections();
   const tunnel = await collections.tunnels.findOne({ _id: new ObjectId(id) });
-  
+
   // Update cache
   tunnelIdCache.set(id, { data: tunnel as Tunnel | null, timestamp: Date.now() });
-  
+
   return tunnel as Tunnel | null;
 }
 
@@ -82,13 +82,13 @@ export async function getTunnelByDomain(domain: string): Promise<Tunnel | null> 
   if (cached && Date.now() - cached.timestamp < TUNNEL_CACHE_TTL) {
     return cached.data;
   }
-  
+
   const collections = getCollections();
   const tunnel = await collections.tunnels.findOne({ domain });
-  
+
   // Update cache
   tunnelDomainCache.set(domain, { data: tunnel as Tunnel | null, timestamp: Date.now() });
-  
+
   return tunnel as Tunnel | null;
 }
 
@@ -143,7 +143,21 @@ export async function updateCustomDomainByName(domain: string, updates: Partial<
   );
 }
 
-export async function deleteCustomDomain(id: string): Promise<void> {
+export async function deleteCustomDomainById(id: string): Promise<void> {
   const collections = getCollections();
-  await collections.customDomains.deleteOne({ _id: new ObjectId(id) });
+  // Try to delete by _id (ObjectId) first
+  if (ObjectId.isValid(id)) {
+    await collections.customDomains.deleteOne({ _id: new ObjectId(id) });
+  } else {
+    // Fallback: try by UUID 'id' field (legacy)
+    await collections.customDomains.deleteOne({ id: id });
+  }
+}
+
+export async function deleteCustomDomainByName(domainName: string): Promise<void> {
+  const collections = getCollections();
+  const result = await collections.customDomains.deleteOne({ domain: domainName });
+  if (result.deletedCount === 0) {
+    throw new Error(`Domain ${domainName} not found in database`);
+  }
 }

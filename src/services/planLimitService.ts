@@ -114,7 +114,11 @@ export async function getOrganizationPlan(organizationId: string): Promise<PlanI
 /**
  * Check if organization can create a new tunnel
  */
-export async function checkTunnelLimit(organizationId: string, intendedDomain?: string): Promise<LimitCheckResult> {
+export async function checkTunnelLimit(
+  organizationId: string,
+  intendedDomain?: string,
+  instanceId?: string
+): Promise<LimitCheckResult> {
   const collections = getCollections();
   const { limits, tier } = await getOrganizationPlan(organizationId);
 
@@ -140,10 +144,10 @@ export async function checkTunnelLimit(organizationId: string, intendedDomain?: 
   // Use the higher of the two counts
   const currentCount = Math.max(tunnelCount, agentCount);
 
-  console.log(`[LimitCheck] Org: ${organizationId}, Domain: ${intendedDomain}`);
+  console.log(`[LimitCheck] Org: ${organizationId}, Domain: ${intendedDomain}, Instance: ${instanceId}`);
   console.log(`[LimitCheck] Tunnels: ${tunnelCount}, UniqueAgents: ${agentCount}, Domains: ${JSON.stringify(uniqueAgentDomains)}`);
 
-  // FIX: Also check if there is an active TUNNEL for this domain.
+  // FIX: 1. Also check if there is an active TUNNEL for this domain.
   // If a tunnel exists but has no agents (zombie/reconnecting), we should allowed to reconnect to it.
   const existingTunnel = await collections.tunnels.findOne({
     domain: intendedDomain,
@@ -151,11 +155,25 @@ export async function checkTunnelLimit(organizationId: string, intendedDomain?: 
     active: true
   });
 
-  // If intendedDomain is active (agent connected OR tunnel exists), bypass limit.
-  if (intendedDomain && (uniqueAgentDomains.includes(intendedDomain) || existingTunnel)) {
-    console.log(`[LimitCheck] Bypassing limit for existing domain/tunnel: ${intendedDomain}`);
+  // FIX: 2. Check if this instance already has active agents (same instance can have multiple domains/connections)
+  // This allows connecting a Custom Domain to an existing instance without consumption of extra tunnel quota.
+  let instanceHasActiveAgents = false;
+  if (instanceId) {
+    const existingInstanceAgents = await collections.agentConnections.findOne({
+      organizationId,
+      active: true,
+      instanceId: instanceId
+    });
+    if (existingInstanceAgents) {
+      instanceHasActiveAgents = true;
+    }
+  }
+
+  // If intendedDomain is active (agent connected OR tunnel exists) OR instance is already active, bypass limit.
+  if ((intendedDomain && uniqueAgentDomains.includes(intendedDomain)) || existingTunnel || instanceHasActiveAgents) {
+    console.log(`[LimitCheck] Bypassing limit for existing entity: Domain=${intendedDomain}, Instance=${instanceId}`);
     return {
-      allowed: true, // Allow joining existing active domain
+      allowed: true, // Allow joining existing active domain or instance
       current: currentCount,
       limit: limits.maxTunnels,
       percentUsed: (currentCount / limits.maxTunnels) * 100

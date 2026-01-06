@@ -10,8 +10,7 @@
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target node",
-    "prepare": "cd cli && npm install && npm run build"
+    "build": "bun build src/index.ts --outdir dist --target node"
   },
   "dependencies": {
     "mongodb": "^6.4.0"

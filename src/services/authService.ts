@@ -442,14 +442,13 @@ export function invalidateUserOrgCache(userId?: string): void {
 export async function authenticateRequest(req: Request): Promise<AuthContext | null> {
   const authHeader = req.headers.get("authorization");
 
-  if (!authHeader) {
-    return null;
-  }
+  // Note: We don't return null immediately if authHeader is missing
+  // because we also want to check for X-API-Key header below
 
   const collections = getCollections();
 
   // Check for Bearer token (session)
-  if (authHeader.startsWith("Bearer ")) {
+  if (authHeader && authHeader.startsWith("Bearer ")) {
     const token = authHeader.slice(7);
     const user = await validateSessionToken(token);
 

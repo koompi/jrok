@@ -90,6 +90,25 @@ export async function registerCustomDomain(
   // Check if domain already exists
   const existing = await db.getCustomDomainByName(request.domain);
   if (existing) {
+    // If domain exists but belongs to same organization, return it (idempotent/upsert behavior)
+    if (existing.organizationId === request.organizationId) {
+      console.log(`[DomainService] Domain ${request.domain} already registered to this organization. Returning existing record.`);
+      // Ensure targetSubdomain exists (for legacy records)
+      if (!existing.targetSubdomain || !existing.cnameTarget) {
+        const baseSubdomain = request.subdomain || sanitizeDomainToSubdomain(request.domain);
+        const targetSubdomain = await generateUniqueSubdomain(baseSubdomain);
+        const cnameTarget = `${targetSubdomain}.${BASE_DOMAIN}`;
+
+        await db.updateCustomDomainByName(request.domain, {
+          targetSubdomain,
+          cnameTarget,
+          organizationId: request.organizationId // Ensure org ID is set
+        });
+        existing.targetSubdomain = targetSubdomain;
+        existing.cnameTarget = cnameTarget;
+      }
+      return existing;
+    }
     throw new Error(`Domain ${request.domain} is already registered`);
   }
 
@@ -661,8 +680,8 @@ export async function deleteCustomDomain(domainName: string): Promise<void> {
     }
   }
 
-  // Remove domain from database
-  await db.deleteCustomDomain(domain.id);
+  // Remove domain from database by name (more reliable than by id)
+  await db.deleteCustomDomainByName(domainName);
 
   console.log(`✅ Deleted custom domain ${domainName}`);
 }
