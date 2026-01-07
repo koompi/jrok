@@ -78,10 +78,15 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
       return new Response("Unauthorized to impersonate organization", { status: 403 });
     }
   }
+
+  // For plan limits, use the API key's org (not impersonated org)
+  // because impersonated orgs (from external systems like kconsole) may not have subscriptions in jrok
+  const planLimitOrgId = authResult.organizationId;
+
   // ====== PLAN LIMIT CHECK: Tunnel Count ======
-  if (effectiveOrgId) {
-    console.log(`[AgentHandler] Checking tunnel limit for org: ${effectiveOrgId}, domain: ${domain}`);
-    const tunnelLimit = await planLimitService.checkTunnelLimit(effectiveOrgId, domain, instanceId || undefined);
+  if (planLimitOrgId) {
+    console.log(`[AgentHandler] Checking tunnel limit for org: ${planLimitOrgId}, domain: ${domain}, effectiveOrg: ${effectiveOrgId}`);
+    const tunnelLimit = await planLimitService.checkTunnelLimit(planLimitOrgId, domain, instanceId || undefined);
     if (!tunnelLimit.allowed) {
       console.warn(`🚫 Tunnel limit reached for org ${authResult.organizationId}: ${tunnelLimit.current}/${tunnelLimit.limit}`);
       monitoringService.addLog('warn', 'plan_limits', `Tunnel limit reached`, {
@@ -101,7 +106,7 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
     }
 
     // ====== PLAN LIMIT CHECK: Bandwidth ======
-    const bandwidthLimit = await planLimitService.checkBandwidthLimit(effectiveOrgId);
+    const bandwidthLimit = await planLimitService.checkBandwidthLimit(planLimitOrgId);
     if (!bandwidthLimit.allowed || bandwidthLimit.suspended) {
       console.warn(`🚫 Bandwidth limit exceeded for org ${authResult.organizationId}`);
       monitoringService.addLog('warn', 'plan_limits', `Bandwidth limit exceeded`, {
