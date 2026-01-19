@@ -11,6 +11,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { createInterface } from 'readline';
 import { randomUUID } from 'crypto';
+import * as net from 'net';
 import WebSocket from 'ws';
 
 const VERSION = "2.4.0"; // Updated for TCP tunnel support (SSH, MongoDB, etc.)
