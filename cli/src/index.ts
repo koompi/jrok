@@ -523,6 +523,10 @@ async function handleTcpConnect(message: any, serverWs: WebSocket, config: Clien
       port: localPort || config.port,
     });
 
+    // Enable keepalive to prevent idle timeouts for databases
+    localSocket.setKeepAlive(true, 10000); // 10s initial delay
+    localSocket.setNoDelay(true);          // Disable Nagle's algo for lower latency
+
     localSocket.on('connect', () => {
       console.log(`✅ TCP Connected: ${localHost}:${localPort} [${connectionId}]`);
       localTcpConnections.set(connectionId, localSocket);

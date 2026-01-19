@@ -24,6 +24,17 @@ const TCP_PORT_MIN = parseInt(process.env.TCP_PORT_MIN || "10000");
 const TCP_PORT_MAX = parseInt(process.env.TCP_PORT_MAX || "20000");
 
 // =============================================================================
+// TCP KEEPALIVE CONFIGURATION
+// =============================================================================
+// Critical for database connections (MongoDB, Redis, RabbitMQ, PostgreSQL)
+// These settings prevent connections from being dropped by NAT/firewall timeouts
+
+const TCP_KEEPALIVE_ENABLED = true;
+const TCP_KEEPALIVE_INITIAL_DELAY_MS = 10000;  // 10 seconds before first probe
+const TCP_SOCKET_TIMEOUT_MS = 60000;           // 60 second inactivity timeout (0 to disable)
+const TCP_NO_DELAY = true;                     // Disable Nagle's algorithm for lower latency
+
+// =============================================================================
 // LOCAL STATE (must be per-server for socket management)
 // =============================================================================
 
@@ -51,7 +62,7 @@ export function registerAgentConnection(agentId: string, ws: WebSocket): void {
 
 export async function unregisterAgentConnection(agentId: string): Promise<void> {
   agentConnections.delete(agentId);
-  
+
   // Don't deallocate TCP ports on disconnect - keep them for reconnection
   // Just stop the local TCP server but keep the allocation in DB
   await stopTcpServersForAgent(agentId);
@@ -63,13 +74,13 @@ export async function unregisterAgentConnection(agentId: string): Promise<void> 
  */
 async function stopTcpServersForAgent(agentId: string): Promise<void> {
   const collections = getCollections();
-  
+
   const allocations = await collections.tcpPortAllocations.find({
     agentId,
     serverId: SERVER_ID,
     active: true,
   }).toArray();
-  
+
   for (const allocation of allocations) {
     // Stop local TCP server but DON'T remove from MongoDB
     const server = tcpServers.get(allocation.port);
@@ -95,22 +106,22 @@ export function getAgentConnection(agentId: string): WebSocket | undefined {
  */
 async function findAvailablePort(): Promise<number | null> {
   const collections = getCollections();
-  
+
   // Get all allocated ports for this server
   const allocatedPorts = await collections.tcpPortAllocations.find({
     serverId: SERVER_ID,
     active: true,
   }).project({ port: 1 }).toArray();
-  
+
   const usedPorts = new Set(allocatedPorts.map(a => a.port));
-  
+
   // Find first available port in our range
   for (let port = TCP_PORT_MIN; port <= TCP_PORT_MAX; port++) {
     if (!usedPorts.has(port)) {
       return port;
     }
   }
-  
+
   return null;
 }
 
@@ -141,27 +152,27 @@ export async function allocatePort(
   organizationId?: string
 ): Promise<TcpPortAllocation | null> {
   const collections = getCollections();
-  
+
   // Check if tunnel already has a port allocated (active or inactive)
   // This enables persistent port allocation across reconnections
   const existingAllocation = await collections.tcpPortAllocations.findOne({
     tunnelId,
   });
-  
+
   if (existingAllocation) {
     // If it's on this server, reactivate and return it
     if (existingAllocation.serverId === SERVER_ID) {
       // Update with new agent info and mark as active
       await collections.tcpPortAllocations.updateOne(
         { tunnelId },
-        { 
-          $set: { 
-            agentId, 
-            localPort, 
-            localHost, 
+        {
+          $set: {
+            agentId,
+            localPort,
+            localHost,
             active: true,
             updatedAt: new Date()
-          } 
+          }
         }
       );
       console.log(`♻️ Reusing persistent TCP port ${existingAllocation.port} for tunnel ${tunnelId}`);
@@ -237,7 +248,7 @@ export async function allocatePort(
  */
 export async function deallocatePort(port: number): Promise<void> {
   const collections = getCollections();
-  
+
   // Stop local TCP server if running
   const server = tcpServers.get(port);
   if (server) {
@@ -260,13 +271,13 @@ export async function deallocatePort(port: number): Promise<void> {
  */
 export async function deallocatePortByTunnelId(tunnelId: string): Promise<void> {
   const collections = getCollections();
-  
+
   // Look for any allocation (active or inactive) for this tunnel
   const allocation = await collections.tcpPortAllocations.findOne({
     tunnelId,
     serverId: SERVER_ID,
   });
-  
+
   if (allocation) {
     await deallocatePort(allocation.port);
     console.log(`🗑️ Permanently deallocated TCP port ${allocation.port} for tunnel ${tunnelId}`);
@@ -278,13 +289,13 @@ export async function deallocatePortByTunnelId(tunnelId: string): Promise<void> 
  */
 export async function deallocatePortByAgentId(agentId: string): Promise<void> {
   const collections = getCollections();
-  
+
   const allocations = await collections.tcpPortAllocations.find({
     agentId,
     serverId: SERVER_ID,
     active: true,
   }).toArray();
-  
+
   for (const allocation of allocations) {
     await deallocatePort(allocation.port);
   }
@@ -386,8 +397,28 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
       return;
     }
 
+    // ============ CONFIGURE TCP KEEPALIVE ============
+    // Critical for database connections (MongoDB, Redis, RabbitMQ, PostgreSQL)
+    // Prevents connections from being dropped by NAT/firewall timeouts
+    if (TCP_KEEPALIVE_ENABLED) {
+      clientSocket.setKeepAlive(true, TCP_KEEPALIVE_INITIAL_DELAY_MS);
+    }
+    if (TCP_NO_DELAY) {
+      clientSocket.setNoDelay(true);  // Disable Nagle's algorithm for lower latency
+    }
+    if (TCP_SOCKET_TIMEOUT_MS > 0) {
+      clientSocket.setTimeout(TCP_SOCKET_TIMEOUT_MS);
+    }
+
+    // Handle timeout (doesn't close socket, just emits event)
+    clientSocket.on('timeout', () => {
+      console.log(`⏰ TCP connection [${connectionId}] timed out after ${TCP_SOCKET_TIMEOUT_MS}ms inactivity`);
+      // Don't close - let the connection continue, database connections can be idle
+      // clientSocket.end();
+    });
+
     // Track connection
-    securityService.trackTcpConnection(allocation.tunnelId, allocation.organizationId, true);
+    securityService.trackTcpConnection(allocation.tunnelId, allocation.organizationId, true, remoteIp);
 
     const agentWs = agentConnections.get(allocation.agentId);
     if (!agentWs || agentWs.readyState !== 1) {
@@ -443,7 +474,7 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
     clientSocket.on('close', () => {
       console.log(`🔌 TCP connection [${connectionId}] closed (in: ${totalBytesIn}, out: ${totalBytesOut})`);
       securityService.trackTcpConnection(allocation.tunnelId, allocation.organizationId, false);
-      
+
       const ws = agentConnections.get(allocation.agentId);
       if (ws && ws.readyState === 1) {
         ws.send(JSON.stringify({ type: "tcp_close", connectionId }));
@@ -585,14 +616,14 @@ export async function getTcpStatsGlobal(): Promise<{
   serverStats: Array<{ serverId: string; allocatedPorts: number }>;
 }> {
   const collections = getCollections();
-  
+
   const pipeline = [
     { $match: { active: true } },
     { $group: { _id: "$serverId", allocatedPorts: { $sum: 1 } } },
   ];
-  
+
   const results = await collections.tcpPortAllocations.aggregate(pipeline).toArray();
-  
+
   return {
     totalAllocatedPorts: results.reduce((sum, r) => sum + r.allocatedPorts, 0),
     serverStats: results.map(r => ({
@@ -608,12 +639,12 @@ export async function getTcpStatsGlobal(): Promise<{
  */
 export async function cleanupOrphanedAllocations(): Promise<void> {
   const collections = getCollections();
-  
+
   // Get all allocations for this server
   const allocations = await collections.tcpPortAllocations.find({
     serverId: SERVER_ID,
   }).toArray();
-  
+
   for (const allocation of allocations) {
     // Check if the tunnel still exists
     const tunnel = await collections.tunnels.findOne({ id: allocation.tunnelId });
@@ -630,16 +661,16 @@ export async function cleanupOrphanedAllocations(): Promise<void> {
  */
 export async function cleanupStaleAllocations(maxAgeDays: number = 7): Promise<void> {
   const collections = getCollections();
-  
+
   const staleThreshold = Date.now() - (maxAgeDays * 24 * 60 * 60 * 1000);
-  
+
   // Find allocations that are inactive and older than threshold
   const staleAllocations = await collections.tcpPortAllocations.find({
     serverId: SERVER_ID,
     active: false,
     createdAt: { $lt: staleThreshold },
   }).toArray();
-  
+
   for (const allocation of staleAllocations) {
     console.log(`🧹 Cleaning up stale TCP allocation (${maxAgeDays}+ days inactive): port ${allocation.port}`);
     await deallocatePort(allocation.port);
@@ -652,10 +683,10 @@ export async function cleanupStaleAllocations(maxAgeDays: number = 7): Promise<v
  */
 export async function restoreTcpServersOnStartup(): Promise<void> {
   const collections = getCollections();
-  
+
   // Count allocations for this server (they'll be reactivated when agents reconnect)
   const count = await collections.tcpPortAllocations.countDocuments({ serverId: SERVER_ID });
-  
+
   console.log(`🔄 Found ${count} TCP port allocations for server ${SERVER_ID} - will reactivate on agent reconnection`);
 }
 
@@ -664,7 +695,7 @@ export async function restoreTcpServersOnStartup(): Promise<void> {
  */
 export async function cleanupServerPorts(): Promise<void> {
   const collections = getCollections();
-  
+
   // Close all TCP servers
   for (const [port, server] of tcpServers.entries()) {
     try {
@@ -675,7 +706,7 @@ export async function cleanupServerPorts(): Promise<void> {
     }
   }
   tcpServers.clear();
-  
+
   // Close all TCP connections
   for (const [connectionId, connection] of tcpConnections.entries()) {
     try {
@@ -685,13 +716,13 @@ export async function cleanupServerPorts(): Promise<void> {
     }
   }
   tcpConnections.clear();
-  
+
   // Mark all allocations for this server as inactive
   await collections.tcpPortAllocations.updateMany(
     { serverId: SERVER_ID },
     { $set: { active: false } }
   );
-  
+
   console.log(`🧹 Cleaned up all TCP resources for server ${SERVER_ID}`);
 }
 
