@@ -11,18 +11,19 @@ import type { Organization, Plan, Tunnel, TunnelIpSecurity } from "../types/inde
 // ============ Configuration ============
 
 // Default limits (can be overridden by plan)
+// NOTE: These limits are multiplied by plan tier (free=1x, starter=5x, pro=20x, enterprise=100x)
 const DEFAULT_LIMITS = {
-  // HTTP Limits
-  maxHttpRequestsPerMinute: 60,      // Per tunnel
-  maxHttpRequestsPerHour: 1000,      // Per tunnel
-  maxHttpConnectionsPerTunnel: 100,  // Concurrent connections per tunnel
-  
-  // TCP Limits  
-  maxTcpConnectionsPerTunnel: 10,    // Concurrent TCP connections per tunnel
-  maxTcpConnectionsPerOrg: 50,       // Total TCP connections for org
-  maxTcpBytesPerMinute: 10 * 1024 * 1024, // 10MB per minute per tunnel
-  maxTcpBytesPerHour: 100 * 1024 * 1024,  // 100MB per hour per tunnel
-  
+  // HTTP Limits - Increased to handle modern web apps with HMR, asset loading, API calls
+  maxHttpRequestsPerMinute: 300,     // Per tunnel (was 60, increased for burst support)
+  maxHttpRequestsPerHour: 5000,      // Per tunnel (was 1000)
+  maxHttpConnectionsPerTunnel: 200,  // Concurrent connections per tunnel (was 100)
+
+  // TCP Limits - Increased for database connections like MongoDB, PostgreSQL
+  maxTcpConnectionsPerTunnel: 50,    // Concurrent TCP connections per tunnel (was 10)
+  maxTcpConnectionsPerOrg: 200,      // Total TCP connections for org (was 50)
+  maxTcpBytesPerMinute: 100 * 1024 * 1024, // 100MB per minute per tunnel (was 10MB)
+  maxTcpBytesPerHour: 1000 * 1024 * 1024,  // 1GB per hour per tunnel (was 100MB)
+
   // Global limits
   maxBandwidthBytesPerMonth: 1 * 1024 * 1024 * 1024, // 1GB default
 };
@@ -35,24 +36,31 @@ const PLAN_MULTIPLIERS: Record<string, number> = {
   enterprise: 100, // Effectively unlimited
 };
 
-// ============ In-Memory Tracking ============
+// ============ Token Bucket Rate Limiting ============
+// Token bucket allows burst traffic while maintaining average rate limits
+// This handles shared public IPs better than fixed window
 
-// Rate limit tracking (key: tunnelId or orgId)
-interface RateLimitEntry {
-  count: number;
-  windowStart: number;
+interface TokenBucket {
+  tokens: number;          // Current available tokens
+  lastRefill: number;      // Last time tokens were refilled
+  maxTokens: number;       // Maximum bucket capacity (burst limit)
+  refillRate: number;      // Tokens added per second
 }
 
-// HTTP rate limits
-const httpRequestsPerMinute = new Map<string, RateLimitEntry>();
-const httpRequestsPerHour = new Map<string, RateLimitEntry>();
-const httpConnectionsPerTunnel = new Map<string, number>();
+// Token buckets per client identifier (layered: session > apiKey > IP+UA > IP)
+const httpTokenBuckets = new Map<string, TokenBucket>();
+const tcpTokenBuckets = new Map<string, TokenBucket>();
 
-// TCP rate limits
+// Per-tunnel global limits (secondary safety net for DDoS)
+const tunnelRequestCounts = new Map<string, { count: number; windowStart: number }>();
+
+// Connection tracking
+const httpConnectionsPerTunnel = new Map<string, number>();
 const tcpConnectionsPerTunnel = new Map<string, number>();
 const tcpConnectionsPerOrg = new Map<string, number>();
-const tcpBytesPerMinute = new Map<string, RateLimitEntry>();
-const tcpBytesPerHour = new Map<string, RateLimitEntry>();
+const tcpConnectionsPerClient = new Map<string, number>(); // Per-client TCP limits
+const tcpBytesPerMinute = new Map<string, { count: number; windowStart: number }>();
+const tcpBytesPerHour = new Map<string, { count: number; windowStart: number }>();
 
 // Bandwidth tracking (monthly)
 const monthlyBandwidth = new Map<string, { bytes: number; month: string }>();
@@ -70,6 +78,7 @@ interface ConnectionLog {
   organizationId?: string;
   type: 'http' | 'tcp';
   remoteIp: string;
+  clientId?: string;  // The layered client identifier used
   timestamp: number;
   bytesIn: number;
   bytesOut: number;
@@ -92,6 +101,145 @@ interface BlockedIp {
 
 const blockedIps = new Map<string, BlockedIp>();
 
+// ============ Layered Client Identification ============
+
+/**
+ * Generate a client identifier using layered identification strategy:
+ * Priority: sessionToken > apiKeyId > IP+UserAgent > IP
+ * This handles shared public IPs (offices, cafes, mobile carriers)
+ */
+export interface ClientIdentifier {
+  id: string;
+  type: 'session' | 'apiKey' | 'ip_ua' | 'ip';
+  ip: string;
+  userAgent?: string;
+  sessionToken?: string;
+  apiKeyId?: string;
+}
+
+export function generateClientId(
+  ip: string,
+  userAgent?: string,
+  sessionToken?: string,
+  apiKeyId?: string
+): ClientIdentifier {
+  // Priority 1: Session token (most accurate for authenticated users)
+  if (sessionToken) {
+    return {
+      id: `session:${sessionToken.substring(0, 32)}`,
+      type: 'session',
+      ip,
+      sessionToken
+    };
+  }
+
+  // Priority 2: API Key (for programmatic access)
+  if (apiKeyId) {
+    return {
+      id: `apikey:${apiKeyId}`,
+      type: 'apiKey',
+      ip,
+      apiKeyId
+    };
+  }
+
+  // Priority 3: IP + User-Agent hash (differentiates devices on same IP)
+  if (userAgent && userAgent.length > 10) {
+    // Simple hash of user agent to keep key size reasonable
+    const uaHash = simpleHash(userAgent);
+    return {
+      id: `ip_ua:${ip}:${uaHash}`,
+      type: 'ip_ua',
+      ip,
+      userAgent
+    };
+  }
+
+  // Priority 4: IP only (fallback)
+  return {
+    id: `ip:${ip}`,
+    type: 'ip',
+    ip
+  };
+}
+
+function simpleHash(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return Math.abs(hash).toString(36);
+}
+
+// ============ Token Bucket Functions ============
+
+/**
+ * Get or create a token bucket for a client
+ * @param buckets - The bucket map (http or tcp)
+ * @param key - Client identifier + tunnel combo
+ * @param maxTokens - Maximum tokens (burst capacity)
+ * @param refillRate - Tokens per second
+ */
+function getOrCreateBucket(
+  buckets: Map<string, TokenBucket>,
+  key: string,
+  maxTokens: number,
+  refillRate: number
+): TokenBucket {
+  let bucket = buckets.get(key);
+  const now = Date.now();
+
+  if (!bucket) {
+    bucket = {
+      tokens: maxTokens, // Start with full bucket
+      lastRefill: now,
+      maxTokens,
+      refillRate
+    };
+    buckets.set(key, bucket);
+    return bucket;
+  }
+
+  // Refill tokens based on time elapsed
+  const elapsed = (now - bucket.lastRefill) / 1000; // seconds
+  const tokensToAdd = elapsed * bucket.refillRate;
+  bucket.tokens = Math.min(bucket.maxTokens, bucket.tokens + tokensToAdd);
+  bucket.lastRefill = now;
+
+  // Update limits if they changed (e.g., plan upgrade)
+  bucket.maxTokens = maxTokens;
+  bucket.refillRate = refillRate;
+
+  return bucket;
+}
+
+/**
+ * Try to consume tokens from a bucket
+ * @returns { allowed, retryAfter, remaining }
+ */
+function consumeToken(bucket: TokenBucket, tokensNeeded: number = 1): {
+  allowed: boolean;
+  retryAfter?: number;
+  remaining: number;
+} {
+  if (bucket.tokens >= tokensNeeded) {
+    bucket.tokens -= tokensNeeded;
+    return { allowed: true, remaining: Math.floor(bucket.tokens) };
+  }
+
+  // Calculate when enough tokens will be available
+  const tokensDeficit = tokensNeeded - bucket.tokens;
+  const retryAfter = Math.ceil(tokensDeficit / bucket.refillRate);
+
+  return {
+    allowed: false,
+    retryAfter,
+    remaining: 0
+  };
+}
+
 // ============ Helper Functions ============
 
 function generateLogId(): string {
@@ -107,22 +255,32 @@ function getMultiplier(planTier?: string): number {
   return PLAN_MULTIPLIERS[planTier || 'free'] || 1;
 }
 
+// Legacy rate limit entry type (kept for backward compatibility with cleanup functions)
+interface RateLimitEntry {
+  count: number;
+  windowStart: number;
+}
+
+// Legacy rate limit maps (being phased out, but kept for cleanup functions)
+const httpRequestsPerMinute = new Map<string, RateLimitEntry>();
+const httpRequestsPerHour = new Map<string, RateLimitEntry>();
+
 /**
  * Check if IP matches an allowlist entry (supports CIDR notation)
  */
 function ipMatchesAllowlist(ip: string, allowlist: Set<string>): boolean {
   if (allowlist.size === 0) return true; // Empty allowlist = allow all
-  
+
   // Direct match
   if (allowlist.has(ip)) return true;
-  
+
   // CIDR match (basic implementation)
   for (const entry of allowlist) {
     if (entry.includes('/')) {
       if (ipInCidr(ip, entry)) return true;
     }
   }
-  
+
   return false;
 }
 
@@ -131,17 +289,17 @@ function ipMatchesAllowlist(ip: string, allowlist: Set<string>): boolean {
  */
 function ipMatchesList(ip: string, ipList: string[]): boolean {
   if (!ipList || ipList.length === 0) return false;
-  
+
   // Direct match
   if (ipList.includes(ip)) return true;
-  
+
   // CIDR match
   for (const entry of ipList) {
     if (entry.includes('/') && ipInCidr(ip, entry)) {
       return true;
     }
   }
-  
+
   return false;
 }
 
@@ -152,7 +310,7 @@ function ipMatchesList(ip: string, ipList: string[]): boolean {
  */
 export function checkIpSecurity(tunnelId: string, remoteIp: string): { allowed: boolean; reason?: string } {
   const security = ipSecurityCache.get(tunnelId);
-  
+
   // Default: allow-all mode
   if (!security || security.mode === 'allow-all') {
     // Check legacy allowlist for backward compatibility
@@ -162,7 +320,7 @@ export function checkIpSecurity(tunnelId: string, remoteIp: string): { allowed: 
     }
     return { allowed: true };
   }
-  
+
   // Allowlist mode: only listed IPs can access
   if (security.mode === 'allowlist') {
     if (!security.allowedIps || security.allowedIps.length === 0) {
@@ -174,7 +332,7 @@ export function checkIpSecurity(tunnelId: string, remoteIp: string): { allowed: 
     }
     return { allowed: false, reason: 'IP not in allowlist' };
   }
-  
+
   // Blocklist mode: listed IPs are blocked, all others allowed
   if (security.mode === 'blocklist') {
     if (security.blockedIps && ipMatchesList(remoteIp, security.blockedIps)) {
@@ -182,7 +340,7 @@ export function checkIpSecurity(tunnelId: string, remoteIp: string): { allowed: 
     }
     return { allowed: true };
   }
-  
+
   return { allowed: true };
 }
 
@@ -195,12 +353,12 @@ function ipInCidr(ip: string, cidr: string): boolean {
     const range = parts[0];
     const bits = parts[1];
     if (!range || !bits) return false;
-    
+
     const mask = ~(2 ** (32 - parseInt(bits)) - 1);
-    
+
     const ipNum = ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet), 0);
     const rangeNum = range.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet), 0);
-    
+
     return (ipNum & mask) === (rangeNum & mask);
   } catch {
     return false;
@@ -213,20 +371,36 @@ export interface HttpSecurityCheck {
   allowed: boolean;
   reason?: string;
   retryAfter?: number; // seconds
+  remaining?: number;  // remaining tokens/requests
+  clientId?: string;   // the client identifier used for rate limiting
 }
 
 /**
- * Check if HTTP request should be allowed
+ * Extended options for HTTP request security check
+ */
+export interface HttpSecurityOptions {
+  userAgent?: string;
+  sessionToken?: string;
+  apiKeyId?: string;
+}
+
+/**
+ * Check if HTTP request should be allowed using Token Bucket algorithm
+ * with layered client identification for fair rate limiting
+ * 
+ * Rate limits are applied per-client (session > apiKey > IP+UA > IP) within each tunnel,
+ * with a secondary global tunnel limit as DDoS protection.
  */
 export async function checkHttpRequest(
   tunnelId: string,
   organizationId: string | undefined,
   remoteIp: string,
-  planTier?: string
+  planTier?: string,
+  options?: HttpSecurityOptions
 ): Promise<HttpSecurityCheck> {
   const now = Date.now();
   const multiplier = getMultiplier(planTier);
-  
+
   // Check global blocked IPs first
   const blocked = blockedIps.get(remoteIp);
   if (blocked && blocked.expiresAt > now) {
@@ -240,7 +414,7 @@ export async function checkHttpRequest(
     });
     return { allowed: false, reason: `IP blocked: ${blocked.reason}`, retryAfter: Math.ceil((blocked.expiresAt - now) / 1000) };
   }
-  
+
   // Check tunnel IP security (allowlist/blocklist)
   const ipSecurityCheck = checkIpSecurity(tunnelId, remoteIp);
   if (!ipSecurityCheck.allowed) {
@@ -254,39 +428,79 @@ export async function checkHttpRequest(
     });
     return { allowed: false, reason: ipSecurityCheck.reason };
   }
-  
-  // Check per-minute rate limit
-  const minuteKey = `${tunnelId}:minute`;
-  const minuteLimit = DEFAULT_LIMITS.maxHttpRequestsPerMinute * multiplier;
-  const minuteCheck = checkRateLimit(httpRequestsPerMinute, minuteKey, minuteLimit, 60000, now);
-  if (!minuteCheck.allowed) {
+
+  // Generate layered client identifier
+  const clientInfo = generateClientId(
+    remoteIp,
+    options?.userAgent,
+    options?.sessionToken,
+    options?.apiKeyId
+  );
+
+  // === Token Bucket Rate Limiting (per-client within tunnel) ===
+  // 
+  // Token bucket config:
+  // - maxTokens (burst capacity): requests per minute * 2 (allows burst)
+  // - refillRate: requests per minute / 60 (tokens per second)
+  const maxTokens = DEFAULT_LIMITS.maxHttpRequestsPerMinute * multiplier * 2; // 2x burst capacity
+  const refillRate = (DEFAULT_LIMITS.maxHttpRequestsPerMinute * multiplier) / 60; // per second
+
+  const bucketKey = `${tunnelId}:${clientInfo.id}`;
+  const bucket = getOrCreateBucket(httpTokenBuckets, bucketKey, maxTokens, refillRate);
+  const tokenResult = consumeToken(bucket, 1);
+
+  if (!tokenResult.allowed) {
     logConnection({
       tunnelId,
       organizationId,
       type: 'http',
       remoteIp,
+      clientId: clientInfo.id,
       status: 'rate_limited',
-      reason: 'Per-minute rate limit exceeded',
+      reason: 'Rate limit exceeded (token bucket)',
     });
-    return { allowed: false, reason: 'Rate limit exceeded (per minute)', retryAfter: minuteCheck.retryAfter };
+    return {
+      allowed: false,
+      reason: `Rate limit exceeded. You can make ${Math.round(refillRate * 60)} requests/minute.`,
+      retryAfter: tokenResult.retryAfter,
+      clientId: clientInfo.id
+    };
   }
-  
-  // Check per-hour rate limit
-  const hourKey = `${tunnelId}:hour`;
-  const hourLimit = DEFAULT_LIMITS.maxHttpRequestsPerHour * multiplier;
-  const hourCheck = checkRateLimit(httpRequestsPerHour, hourKey, hourLimit, 3600000, now);
-  if (!hourCheck.allowed) {
-    logConnection({
-      tunnelId,
-      organizationId,
-      type: 'http',
-      remoteIp,
-      status: 'rate_limited',
-      reason: 'Per-hour rate limit exceeded',
-    });
-    return { allowed: false, reason: 'Rate limit exceeded (per hour)', retryAfter: hourCheck.retryAfter };
+
+  // === Secondary: Global tunnel limit (DDoS protection) ===
+  // This prevents all clients combined from overwhelming a tunnel
+  const globalTunnelLimit = DEFAULT_LIMITS.maxHttpRequestsPerMinute * multiplier * 10; // 10x for all clients
+  const tunnelCount = tunnelRequestCounts.get(tunnelId);
+
+  if (tunnelCount) {
+    // Check if we're in a new window
+    if (now - tunnelCount.windowStart > 60000) {
+      tunnelCount.count = 1;
+      tunnelCount.windowStart = now;
+    } else {
+      tunnelCount.count++;
+      if (tunnelCount.count > globalTunnelLimit) {
+        logConnection({
+          tunnelId,
+          organizationId,
+          type: 'http',
+          remoteIp,
+          clientId: clientInfo.id,
+          status: 'rate_limited',
+          reason: 'Global tunnel rate limit exceeded (DDoS protection)',
+        });
+        return {
+          allowed: false,
+          reason: 'Service is experiencing high traffic. Please try again later.',
+          retryAfter: Math.ceil((60000 - (now - tunnelCount.windowStart)) / 1000),
+          clientId: clientInfo.id
+        };
+      }
+    }
+  } else {
+    tunnelRequestCounts.set(tunnelId, { count: 1, windowStart: now });
   }
-  
+
   // Check concurrent connections
   const currentConnections = httpConnectionsPerTunnel.get(tunnelId) || 0;
   const maxConnections = DEFAULT_LIMITS.maxHttpConnectionsPerTunnel * multiplier;
@@ -296,26 +510,29 @@ export async function checkHttpRequest(
       organizationId,
       type: 'http',
       remoteIp,
+      clientId: clientInfo.id,
       status: 'rate_limited',
       reason: 'Max concurrent connections reached',
     });
     return { allowed: false, reason: 'Too many concurrent connections' };
   }
-  
-  // Increment counters
-  incrementRateLimit(httpRequestsPerMinute, minuteKey, 60000, now);
-  incrementRateLimit(httpRequestsPerHour, hourKey, 3600000, now);
-  
+
   logConnection({
     tunnelId,
     organizationId,
     type: 'http',
     remoteIp,
+    clientId: clientInfo.id,
     status: 'allowed',
   });
-  
-  return { allowed: true };
+
+  return {
+    allowed: true,
+    remaining: tokenResult.remaining,
+    clientId: clientInfo.id
+  };
 }
+
 
 /**
  * Track HTTP connection open/close
@@ -334,10 +551,13 @@ export function trackHttpConnection(tunnelId: string, isOpen: boolean): void {
 export interface TcpSecurityCheck {
   allowed: boolean;
   reason?: string;
+  retryAfter?: number;
+  clientId?: string;
 }
 
 /**
  * Check if TCP connection should be allowed
+ * Uses per-client rate limiting to prevent one client from monopolizing connections
  */
 export async function checkTcpConnection(
   tunnelId: string,
@@ -347,7 +567,10 @@ export async function checkTcpConnection(
 ): Promise<TcpSecurityCheck> {
   const now = Date.now();
   const multiplier = getMultiplier(planTier);
-  
+
+  // Generate client identifier (IP-based for TCP since no User-Agent)
+  const clientInfo = generateClientId(remoteIp);
+
   // Check global blocked IPs first
   const blocked = blockedIps.get(remoteIp);
   if (blocked && blocked.expiresAt > now) {
@@ -356,12 +579,13 @@ export async function checkTcpConnection(
       organizationId,
       type: 'tcp',
       remoteIp,
+      clientId: clientInfo.id,
       status: 'blocked',
       reason: blocked.reason,
     });
-    return { allowed: false, reason: `IP blocked: ${blocked.reason}` };
+    return { allowed: false, reason: `IP blocked: ${blocked.reason}`, clientId: clientInfo.id };
   }
-  
+
   // Check tunnel IP security (allowlist/blocklist)
   const ipSecurityCheck = checkIpSecurity(tunnelId, remoteIp);
   if (!ipSecurityCheck.allowed) {
@@ -370,13 +594,37 @@ export async function checkTcpConnection(
       organizationId,
       type: 'tcp',
       remoteIp,
+      clientId: clientInfo.id,
       status: 'blocked',
       reason: ipSecurityCheck.reason || 'IP security check failed',
     });
-    return { allowed: false, reason: ipSecurityCheck.reason };
+    return { allowed: false, reason: ipSecurityCheck.reason, clientId: clientInfo.id };
   }
-  
-  // Check per-tunnel TCP connection limit
+
+  // === Per-client TCP connection limit ===
+  // Prevents one client from using all connections
+  const clientKey = `${tunnelId}:${clientInfo.id}`;
+  const clientConnections = tcpConnectionsPerClient.get(clientKey) || 0;
+  const maxPerClient = Math.max(5, Math.floor(DEFAULT_LIMITS.maxTcpConnectionsPerTunnel * multiplier / 10)); // Each client gets 10% of tunnel limit, min 5
+
+  if (clientConnections >= maxPerClient) {
+    logConnection({
+      tunnelId,
+      organizationId,
+      type: 'tcp',
+      remoteIp,
+      clientId: clientInfo.id,
+      status: 'rate_limited',
+      reason: 'Max TCP connections per client reached',
+    });
+    return {
+      allowed: false,
+      reason: `Max TCP connections per client (${maxPerClient}) reached. Other users can still connect.`,
+      clientId: clientInfo.id
+    };
+  }
+
+  // === Global tunnel limit (DDoS protection) ===
   const tunnelConnections = tcpConnectionsPerTunnel.get(tunnelId) || 0;
   const maxPerTunnel = DEFAULT_LIMITS.maxTcpConnectionsPerTunnel * multiplier;
   if (tunnelConnections >= maxPerTunnel) {
@@ -385,12 +633,17 @@ export async function checkTcpConnection(
       organizationId,
       type: 'tcp',
       remoteIp,
+      clientId: clientInfo.id,
       status: 'rate_limited',
       reason: 'Max TCP connections per tunnel reached',
     });
-    return { allowed: false, reason: `Max TCP connections per tunnel (${maxPerTunnel}) reached` };
+    return {
+      allowed: false,
+      reason: `Max TCP connections per tunnel (${maxPerTunnel}) reached`,
+      clientId: clientInfo.id
+    };
   }
-  
+
   // Check per-org TCP connection limit
   if (organizationId) {
     const orgConnections = tcpConnectionsPerOrg.get(organizationId) || 0;
@@ -401,28 +654,40 @@ export async function checkTcpConnection(
         organizationId,
         type: 'tcp',
         remoteIp,
+        clientId: clientInfo.id,
         status: 'rate_limited',
         reason: 'Max TCP connections per organization reached',
       });
-      return { allowed: false, reason: `Max TCP connections per organization (${maxPerOrg}) reached` };
+      return {
+        allowed: false,
+        reason: `Max TCP connections per organization (${maxPerOrg}) reached`,
+        clientId: clientInfo.id
+      };
     }
   }
-  
+
   logConnection({
     tunnelId,
     organizationId,
     type: 'tcp',
     remoteIp,
+    clientId: clientInfo.id,
     status: 'allowed',
   });
-  
-  return { allowed: true };
+
+  return { allowed: true, clientId: clientInfo.id };
 }
 
 /**
  * Track TCP connection open/close
+ * Now tracks per-client to support fair rate limiting
  */
-export function trackTcpConnection(tunnelId: string, organizationId: string | undefined, isOpen: boolean): void {
+export function trackTcpConnection(
+  tunnelId: string,
+  organizationId: string | undefined,
+  isOpen: boolean,
+  remoteIp?: string  // Optional: for per-client tracking
+): void {
   // Per-tunnel tracking
   const tunnelCurrent = tcpConnectionsPerTunnel.get(tunnelId) || 0;
   if (isOpen) {
@@ -430,7 +695,7 @@ export function trackTcpConnection(tunnelId: string, organizationId: string | un
   } else {
     tcpConnectionsPerTunnel.set(tunnelId, Math.max(0, tunnelCurrent - 1));
   }
-  
+
   // Per-org tracking
   if (organizationId) {
     const orgCurrent = tcpConnectionsPerOrg.get(organizationId) || 0;
@@ -440,7 +705,20 @@ export function trackTcpConnection(tunnelId: string, organizationId: string | un
       tcpConnectionsPerOrg.set(organizationId, Math.max(0, orgCurrent - 1));
     }
   }
+
+  // Per-client tracking (for fair rate limiting)
+  if (remoteIp) {
+    const clientInfo = generateClientId(remoteIp);
+    const clientKey = `${tunnelId}:${clientInfo.id}`;
+    const clientCurrent = tcpConnectionsPerClient.get(clientKey) || 0;
+    if (isOpen) {
+      tcpConnectionsPerClient.set(clientKey, clientCurrent + 1);
+    } else {
+      tcpConnectionsPerClient.set(clientKey, Math.max(0, clientCurrent - 1));
+    }
+  }
 }
+
 
 /**
  * Check TCP bandwidth limit
@@ -452,29 +730,29 @@ export function checkTcpBandwidth(
 ): { allowed: boolean; reason?: string } {
   const now = Date.now();
   const multiplier = getMultiplier(planTier);
-  
+
   // Check per-minute bandwidth
   const minuteKey = `${tunnelId}:minute`;
   const minuteEntry = tcpBytesPerMinute.get(minuteKey);
   const minuteLimit = DEFAULT_LIMITS.maxTcpBytesPerMinute * multiplier;
-  
+
   if (minuteEntry && now - minuteEntry.windowStart < 60000) {
     if (minuteEntry.count + bytes > minuteLimit) {
       return { allowed: false, reason: 'TCP bandwidth limit exceeded (per minute)' };
     }
   }
-  
+
   // Check per-hour bandwidth
   const hourKey = `${tunnelId}:hour`;
   const hourEntry = tcpBytesPerHour.get(hourKey);
   const hourLimit = DEFAULT_LIMITS.maxTcpBytesPerHour * multiplier;
-  
+
   if (hourEntry && now - hourEntry.windowStart < 3600000) {
     if (hourEntry.count + bytes > hourLimit) {
       return { allowed: false, reason: 'TCP bandwidth limit exceeded (per hour)' };
     }
   }
-  
+
   return { allowed: true };
 }
 
@@ -483,15 +761,15 @@ export function checkTcpBandwidth(
  */
 export function trackTcpBandwidth(tunnelId: string, organizationId: string | undefined, bytes: number): void {
   const now = Date.now();
-  
+
   // Track per-minute
   const minuteKey = `${tunnelId}:minute`;
   incrementBandwidth(tcpBytesPerMinute, minuteKey, bytes, 60000, now);
-  
+
   // Track per-hour
   const hourKey = `${tunnelId}:hour`;
   incrementBandwidth(tcpBytesPerHour, hourKey, bytes, 3600000, now);
-  
+
   // Track monthly bandwidth for org
   if (organizationId) {
     trackMonthlyBandwidth(organizationId, bytes);
@@ -506,7 +784,7 @@ export function trackTcpBandwidth(tunnelId: string, organizationId: string | und
 export function trackMonthlyBandwidth(organizationId: string, bytes: number): void {
   const currentMonth = getCurrentMonth();
   const entry = monthlyBandwidth.get(organizationId);
-  
+
   if (!entry || entry.month !== currentMonth) {
     monthlyBandwidth.set(organizationId, { bytes, month: currentMonth });
   } else {
@@ -520,11 +798,11 @@ export function trackMonthlyBandwidth(organizationId: string, bytes: number): vo
 export function getMonthlyBandwidth(organizationId: string): number {
   const currentMonth = getCurrentMonth();
   const entry = monthlyBandwidth.get(organizationId);
-  
+
   if (!entry || entry.month !== currentMonth) {
     return 0;
   }
-  
+
   return entry.bytes;
 }
 
@@ -539,12 +817,12 @@ export function checkMonthlyBandwidth(
   const limitBytes = DEFAULT_LIMITS.maxBandwidthBytesPerMonth * multiplier;
   const usedBytes = getMonthlyBandwidth(organizationId);
   const percentUsed = limitBytes > 0 ? (usedBytes / limitBytes) * 100 : 0;
-  
+
   // Enterprise plan (-1 bandwidth) means unlimited
   if (planTier === 'enterprise') {
     return { allowed: true, usedBytes, limitBytes: -1, percentUsed: 0 };
   }
-  
+
   return {
     allowed: usedBytes < limitBytes,
     usedBytes,
@@ -609,24 +887,24 @@ export function getTunnelIpSecurity(tunnelId: string): TunnelIpSecurity {
  * Set IP security settings for a tunnel and persist to MongoDB
  */
 export async function setTunnelIpSecurity(
-  tunnelId: string, 
+  tunnelId: string,
   security: TunnelIpSecurity,
   updatedBy?: string
 ): Promise<void> {
   const collections = getCollections();
-  
+
   // Add metadata
   security.updatedAt = Date.now();
   if (updatedBy) security.updatedBy = updatedBy;
-  
+
   // Update cache with provided key
   ipSecurityCache.set(tunnelId, security);
-  
+
   // Find the tunnel to get both ID and domain for caching
   const tunnel = await collections.tunnels.findOne(
     { $or: [{ id: tunnelId }, { domain: tunnelId }] }
   );
-  
+
   // Also cache by the alternate key (domain or ID) for lookups
   if (tunnel) {
     if (tunnel.id && tunnel.id !== tunnelId) {
@@ -636,13 +914,13 @@ export async function setTunnelIpSecurity(
       ipSecurityCache.set(tunnel.domain, security);
     }
   }
-  
+
   // Persist to MongoDB (update tunnel document)
   await collections.tunnels.updateOne(
     { $or: [{ id: tunnelId }, { domain: tunnelId }] },
     { $set: { ipSecurity: security, updatedAt: Date.now() } }
   );
-  
+
   console.log(`🔐 Updated IP security for tunnel ${tunnelId}: mode=${security.mode}`);
 }
 
@@ -650,7 +928,7 @@ export async function setTunnelIpSecurity(
  * Set allowlist mode with IPs
  */
 export async function setTunnelAllowlist(
-  tunnelId: string, 
+  tunnelId: string,
   allowedIps: string[],
   updatedBy?: string
 ): Promise<void> {
@@ -665,7 +943,7 @@ export async function setTunnelAllowlist(
  * Set blocklist mode with IPs
  */
 export async function setTunnelBlocklist(
-  tunnelId: string, 
+  tunnelId: string,
   blockedIps: string[],
   updatedBy?: string
 ): Promise<void> {
@@ -691,13 +969,13 @@ export async function setTunnelAllowAll(tunnelId: string, updatedBy?: string): P
  * Add IP to tunnel's allowlist (if in allowlist mode) or blocklist (if in blocklist mode)
  */
 export async function addIpToTunnelSecurity(
-  tunnelId: string, 
-  ip: string, 
+  tunnelId: string,
+  ip: string,
   listType: 'allow' | 'block',
   updatedBy?: string
 ): Promise<void> {
   const current = getTunnelIpSecurity(tunnelId);
-  
+
   if (listType === 'allow') {
     const allowedIps = current.allowedIps || [];
     if (!allowedIps.includes(ip)) {
@@ -725,15 +1003,15 @@ export async function addIpToTunnelSecurity(
  * Remove IP from tunnel's allowlist or blocklist
  */
 export async function removeIpFromTunnelSecurity(
-  tunnelId: string, 
+  tunnelId: string,
   ip: string,
   updatedBy?: string
 ): Promise<void> {
   const current = getTunnelIpSecurity(tunnelId);
-  
+
   const allowedIps = (current.allowedIps || []).filter(i => i !== ip);
   const blockedIps = (current.blockedIps || []).filter(i => i !== ip);
-  
+
   await setTunnelIpSecurity(tunnelId, {
     ...current,
     allowedIps,
@@ -747,20 +1025,20 @@ export async function removeIpFromTunnelSecurity(
 export async function loadIpSecurityFromDb(): Promise<void> {
   try {
     const collections = getCollections();
-    
+
     // Load from tunnels collection
     const tunnels = await collections.tunnels.find(
       { ipSecurity: { $exists: true } },
       { projection: { id: 1, domain: 1, ipSecurity: 1 } }
     ).toArray();
-    
+
     for (const tunnel of tunnels) {
       if (tunnel.ipSecurity) {
         const tunnelKey = tunnel.id || tunnel.domain;
         ipSecurityCache.set(tunnelKey, tunnel.ipSecurity as TunnelIpSecurity);
       }
     }
-    
+
     console.log(`📋 Loaded IP security settings for ${ipSecurityCache.size} tunnels from DB`);
   } catch (error) {
     console.error('⚠️ Failed to load IP security from DB:', error);
@@ -797,12 +1075,12 @@ export function unblockIp(ip: string): void {
 export function isIpBlocked(ip: string): boolean {
   const blocked = blockedIps.get(ip);
   if (!blocked) return false;
-  
+
   if (blocked.expiresAt <= Date.now()) {
     blockedIps.delete(ip);
     return false;
   }
-  
+
   return true;
 }
 
@@ -812,7 +1090,7 @@ export function isIpBlocked(ip: string): boolean {
 export function getBlockedIps(): BlockedIp[] {
   const now = Date.now();
   const result: BlockedIp[] = [];
-  
+
   for (const [ip, entry] of blockedIps.entries()) {
     if (entry.expiresAt > now) {
       result.push(entry);
@@ -820,7 +1098,7 @@ export function getBlockedIps(): BlockedIp[] {
       blockedIps.delete(ip);
     }
   }
-  
+
   return result;
 }
 
@@ -831,6 +1109,7 @@ function logConnection(params: {
   organizationId?: string;
   type: 'http' | 'tcp';
   remoteIp: string;
+  clientId?: string;  // Layered client identifier
   status: 'allowed' | 'blocked' | 'rate_limited';
   reason?: string;
   bytesIn?: number;
@@ -843,6 +1122,7 @@ function logConnection(params: {
     organizationId: params.organizationId,
     type: params.type,
     remoteIp: params.remoteIp,
+    clientId: params.clientId,
     timestamp: Date.now(),
     bytesIn: params.bytesIn || 0,
     bytesOut: params.bytesOut || 0,
@@ -850,14 +1130,14 @@ function logConnection(params: {
     status: params.status,
     reason: params.reason,
   };
-  
+
   connectionLogBuffer.push(log);
-  
+
   // Log blocked/rate_limited to console
   if (params.status !== 'allowed') {
     console.log(`🛡️ [${params.type.toUpperCase()}] ${params.status}: ${params.remoteIp} -> ${params.tunnelId} (${params.reason})`);
   }
-  
+
   // Flush if buffer is full
   if (connectionLogBuffer.length >= MAX_LOG_BUFFER_SIZE) {
     flushConnectionLogs();
@@ -869,9 +1149,9 @@ function logConnection(params: {
  */
 export async function flushConnectionLogs(): Promise<void> {
   if (connectionLogBuffer.length === 0) return;
-  
+
   const logsToFlush = connectionLogBuffer.splice(0, connectionLogBuffer.length);
-  
+
   try {
     const collections = getCollections();
     await collections.connectionLogs?.insertMany(logsToFlush);
@@ -898,7 +1178,7 @@ export async function getConnectionLogs(
       .skip(offset)
       .limit(limit)
       .toArray();
-    
+
     return (logs || []) as unknown as ConnectionLog[];
   } catch {
     return [];
@@ -921,7 +1201,7 @@ export async function getOrganizationConnectionLogs(
       .skip(offset)
       .limit(limit)
       .toArray();
-    
+
     return (logs || []) as unknown as ConnectionLog[];
   } catch {
     return [];
@@ -938,16 +1218,16 @@ function checkRateLimit(
   now: number
 ): { allowed: boolean; retryAfter?: number } {
   const entry = store.get(key);
-  
+
   if (!entry || now - entry.windowStart >= windowMs) {
     return { allowed: true };
   }
-  
+
   if (entry.count >= limit) {
     const retryAfter = Math.ceil((entry.windowStart + windowMs - now) / 1000);
     return { allowed: false, retryAfter };
   }
-  
+
   return { allowed: true };
 }
 
@@ -958,7 +1238,7 @@ function incrementRateLimit(
   now: number
 ): void {
   const entry = store.get(key);
-  
+
   if (!entry || now - entry.windowStart >= windowMs) {
     store.set(key, { count: 1, windowStart: now });
   } else {
@@ -974,7 +1254,7 @@ function incrementBandwidth(
   now: number
 ): void {
   const entry = store.get(key);
-  
+
   if (!entry || now - entry.windowStart >= windowMs) {
     store.set(key, { count: bytes, windowStart: now });
   } else {
@@ -998,16 +1278,16 @@ export function detectAbuse(
   const key = `${ip}:${pattern}`;
   const now = Date.now();
   const WINDOW_MS = 5 * 60 * 1000; // 5 minutes
-  
+
   const entry = suspiciousPatterns.get(key);
-  
+
   if (!entry || now - entry.firstSeen > WINDOW_MS) {
     suspiciousPatterns.set(key, { count: 1, firstSeen: now });
     return;
   }
-  
+
   entry.count++;
-  
+
   // Thresholds for auto-blocking
   const thresholds: Record<string, number> = {
     rapid_requests: 100,     // 100 suspicious rapid request patterns
@@ -1015,7 +1295,7 @@ export function detectAbuse(
     bandwidth_spike: 10,     // 10 bandwidth spike events
     auth_failure: 20,        // 20 auth failures
   };
-  
+
   if (entry.count >= (thresholds[pattern] || 50)) {
     blockIp(ip, `Auto-blocked: ${pattern}`, 3600); // Block for 1 hour
     suspiciousPatterns.delete(key);
@@ -1047,12 +1327,12 @@ export function getSecurityStats(): SecurityStats {
   for (const count of httpConnectionsPerTunnel.values()) {
     httpConnections += count;
   }
-  
+
   let tcpConnections = 0;
   for (const count of tcpConnectionsPerTunnel.values()) {
     tcpConnections += count;
   }
-  
+
   return {
     http: {
       activeConnections: httpConnections,
@@ -1076,34 +1356,34 @@ export function getSecurityStats(): SecurityStats {
  */
 export function cleanupExpiredEntries(): void {
   const now = Date.now();
-  
+
   // Cleanup rate limit entries older than their window
   for (const [key, entry] of httpRequestsPerMinute.entries()) {
     if (now - entry.windowStart > 60000) httpRequestsPerMinute.delete(key);
   }
-  
+
   for (const [key, entry] of httpRequestsPerHour.entries()) {
     if (now - entry.windowStart > 3600000) httpRequestsPerHour.delete(key);
   }
-  
+
   for (const [key, entry] of tcpBytesPerMinute.entries()) {
     if (now - entry.windowStart > 60000) tcpBytesPerMinute.delete(key);
   }
-  
+
   for (const [key, entry] of tcpBytesPerHour.entries()) {
     if (now - entry.windowStart > 3600000) tcpBytesPerHour.delete(key);
   }
-  
+
   // Cleanup expired blocked IPs
   for (const [ip, entry] of blockedIps.entries()) {
     if (entry.expiresAt <= now) blockedIps.delete(ip);
   }
-  
+
   // Cleanup old suspicious patterns
   for (const [key, entry] of suspiciousPatterns.entries()) {
     if (now - entry.firstSeen > 5 * 60 * 1000) suspiciousPatterns.delete(key);
   }
-  
+
   console.log('🧹 Security service cleanup completed');
 }
 
@@ -1118,10 +1398,10 @@ let flushInterval: Timer | null = null;
 export function initSecurityService(): void {
   // Cleanup every 5 minutes
   cleanupInterval = setInterval(cleanupExpiredEntries, 5 * 60 * 1000);
-  
+
   // Flush logs every minute
   flushInterval = setInterval(flushConnectionLogs, LOG_FLUSH_INTERVAL);
-  
+
   console.log('🛡️ Security service initialized');
 }
 
@@ -1133,14 +1413,14 @@ export function shutdownSecurityService(): void {
     clearInterval(cleanupInterval);
     cleanupInterval = null;
   }
-  
+
   if (flushInterval) {
     clearInterval(flushInterval);
     flushInterval = null;
   }
-  
+
   // Final flush
   flushConnectionLogs();
-  
+
   console.log('🛡️ Security service shutdown');
 }

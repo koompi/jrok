@@ -239,6 +239,7 @@ async function getPlanTierForOrg(organizationId: string): Promise<string> {
 
     const subscription = await collections.subscriptions.findOne({ organizationId });
     if (!subscription) {
+      console.log(`📊 Rate limit: org=${organizationId} has NO subscription, using 'free' tier`);
       orgPlanCache.set(organizationId, { tier: 'free', timestamp: Date.now() });
       return 'free';
     }
@@ -246,9 +247,11 @@ async function getPlanTierForOrg(organizationId: string): Promise<string> {
     const plan = await collections.plans.findOne({ id: subscription.planId });
     const tier = plan?.tier || 'free';
 
+    console.log(`📊 Rate limit: org=${organizationId} subscription=${subscription.planId} tier=${tier} (multiplier: ${tier === 'enterprise' ? 100 : tier === 'pro' ? 20 : tier === 'starter' ? 5 : 1}x)`);
     orgPlanCache.set(organizationId, { tier, timestamp: Date.now() });
     return tier;
-  } catch {
+  } catch (error) {
+    console.error(`📊 Rate limit lookup error for org=${organizationId}:`, error);
     return 'free';
   }
 }
@@ -1570,15 +1573,23 @@ async function startServer() {
             req.headers.get("x-real-ip") ||
             "unknown";
 
+          // Get User-Agent for layered client identification (differentiates devices on same IP)
+          const userAgent = req.headers.get("user-agent") || undefined;
+
           // Get plan tier for rate limit calculation (defaults to 'free')
           const planTier = agent.organizationId ? await getPlanTierForOrg(agent.organizationId) : 'free';
 
-          // Check security limits (rate limits)
+          // Check security limits (rate limits) with layered client identification
+          // This uses Token Bucket algorithm to allow burst while preventing abuse
           const securityCheck = await securityService.checkHttpRequest(
             tunnelId || subdomain,
             agent.organizationId,
             clientIp,
-            planTier
+            planTier,
+            {
+              userAgent,
+              apiKeyId: agent.apiKeyId,
+            }
           );
 
           if (!securityCheck.allowed) {
