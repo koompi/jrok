@@ -800,6 +800,16 @@ async function connectAgent(config: ClientConfig): Promise<void> {
     }
     localWsConnections.clear();
 
+    // Close all local TCP connections
+    for (const [connectionId, localSocket] of localTcpConnections.entries()) {
+      try {
+        localSocket.end();
+      } catch (e) {
+        // Ignore close errors
+      }
+    }
+    localTcpConnections.clear();
+
     console.log(`\n🔌 Disconnected from server`);
     console.log(`🔄 Attempting to reconnect in ${delay / 1000}s (attempt ${reconnectAttempts})...`);
 
