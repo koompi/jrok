@@ -276,6 +276,40 @@ async function authenticateRequest(req: Request): Promise<AuthContext | null> {
   return null;
 }
 
+// Helper to require super admin for an endpoint
+async function requireSuperAdmin(req: Request): Promise<Response | null> {
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return new Response(
+      JSON.stringify({ success: false, message: "Unauthorized" }),
+      { status: 401, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  const token = authHeader.split(" ")[1];
+  const session = await authService.getSession(token);
+
+  if (!session) {
+    return new Response(
+      JSON.stringify({ success: false, message: "Invalid token" }),
+      { status: 401, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  // Import adminService to check super admin status
+  const { isSuperAdmin } = await import("./services/adminService");
+  const isSuper = await isSuperAdmin(session.userId);
+
+  if (!isSuper) {
+    return new Response(
+      JSON.stringify({ success: false, message: "Forbidden: Super Admin access required" }),
+      { status: 403, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  return null; // Auth passed
+}
+
 // Register local VPS server on startup
 async function registerLocalVpsServer(): Promise<void> {
   try {
@@ -942,6 +976,8 @@ async function startServer() {
 
         // Get full monitoring dashboard data
         if (path === "/admin/monitoring" && method === "GET") {
+          const authError = await requireSuperAdmin(req);
+          if (authError) return addCors(authError);
           return addCors(new Response(
             JSON.stringify({ success: true, data: monitoringService.getDashboardData() }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -950,6 +986,8 @@ async function startServer() {
 
         // Get system health status
         if (path === "/admin/monitoring/health" && method === "GET") {
+          const authError = await requireSuperAdmin(req);
+          if (authError) return addCors(authError);
           return addCors(new Response(
             JSON.stringify({ success: true, health: monitoringService.getSystemHealth() }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -958,6 +996,8 @@ async function startServer() {
 
         // Get metrics history for graphs
         if (path === "/admin/monitoring/metrics" && method === "GET") {
+          const authError = await requireSuperAdmin(req);
+          if (authError) return addCors(authError);
           const url = new URL(req.url);
           const minutes = parseInt(url.searchParams.get("minutes") || "60");
           return addCors(new Response(
@@ -968,6 +1008,8 @@ async function startServer() {
 
         // Get recent logs
         if (path === "/admin/monitoring/logs" && method === "GET") {
+          const authError = await requireSuperAdmin(req);
+          if (authError) return addCors(authError);
           const url = new URL(req.url);
           const count = parseInt(url.searchParams.get("count") || "100");
           const level = url.searchParams.get("level") as 'info' | 'warn' | 'error' | 'debug' | undefined;
@@ -980,6 +1022,8 @@ async function startServer() {
 
         // Get rate limit statistics
         if (path === "/admin/monitoring/rate-limits" && method === "GET") {
+          const authError = await requireSuperAdmin(req);
+          if (authError) return addCors(authError);
           return addCors(new Response(
             JSON.stringify({ success: true, rateLimits: monitoringService.getRateLimitStats() }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -988,6 +1032,8 @@ async function startServer() {
 
         // Get authentication metrics
         if (path === "/admin/monitoring/auth" && method === "GET") {
+          const authError = await requireSuperAdmin(req);
+          if (authError) return addCors(authError);
           return addCors(new Response(
             JSON.stringify({ success: true, auth: monitoringService.getAuthMetrics() }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -996,6 +1042,8 @@ async function startServer() {
 
         // Get certificate metrics
         if (path === "/admin/monitoring/certificates" && method === "GET") {
+          const authError = await requireSuperAdmin(req);
+          if (authError) return addCors(authError);
           return addCors(new Response(
             JSON.stringify({ success: true, certificates: monitoringService.getCertMetrics() }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -1004,6 +1052,8 @@ async function startServer() {
 
         // Get system configuration
         if (path === "/admin/monitoring/config" && method === "GET") {
+          const authError = await requireSuperAdmin(req);
+          if (authError) return addCors(authError);
           const config = await monitoringService.getSystemConfig();
           return addCors(new Response(
             JSON.stringify({ success: true, config }),
@@ -1013,6 +1063,8 @@ async function startServer() {
 
         // Update system configuration
         if (path === "/admin/monitoring/config" && method === "PUT") {
+          const authError = await requireSuperAdmin(req);
+          if (authError) return addCors(authError);
           try {
             const body = await req.json() as Partial<monitoringService.SystemConfig>;
             const config = await monitoringService.updateSystemConfig(body);
@@ -1030,6 +1082,8 @@ async function startServer() {
 
         // Get per-IP connection details (admin debugging)
         if (path === "/admin/monitoring/connections" && method === "GET") {
+          const authError = await requireSuperAdmin(req);
+          if (authError) return addCors(authError);
           return addCors(new Response(
             JSON.stringify({
               success: true,
@@ -1041,6 +1095,8 @@ async function startServer() {
 
         // Clear stuck IP connection counter (admin emergency fix)
         if (path.match(/^\/admin\/monitoring\/connections\/clear\//) && method === "POST") {
+          const authError = await requireSuperAdmin(req);
+          if (authError) return addCors(authError);
           const ipToClear = decodeURIComponent(path.split("/").pop() || "");
           if (!ipToClear) {
             return addCors(new Response(
@@ -1054,6 +1110,7 @@ async function startServer() {
             { status: 200, headers: { "Content-Type": "application/json" } }
           ));
         }
+
 
         // ============ Dashboard Stats & Activity Routes ============
 

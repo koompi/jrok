@@ -1,27 +1,28 @@
 import { useState, useEffect, useCallback } from 'react';
-import { 
-  api, 
-  MonitoringDashboardData, 
-  SystemHealth, 
-  SystemLog, 
+import {
+  api,
+  MonitoringDashboardData,
+  SystemHealth,
+  SystemLog,
   RateLimitStats,
   AuthMetrics,
   CertMetrics,
   SystemMetricsSnapshot,
   SystemConfig,
-  MonitoringConfig
+  MonitoringConfig,
+  IpConnection
 } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
-import { 
-  Loader2, 
-  RefreshCw, 
-  Activity, 
-  Server, 
-  AlertTriangle, 
-  CheckCircle, 
+import {
+  Loader2,
+  RefreshCw,
+  Activity,
+  Server,
+  AlertTriangle,
+  CheckCircle,
   XCircle,
   Cpu,
   HardDrive,
@@ -31,7 +32,8 @@ import {
   Users,
   Lock,
   FileText,
-  Settings
+  Settings,
+  Trash2
 } from 'lucide-react';
 import {
   LineChart,
@@ -61,7 +63,7 @@ function formatUptime(seconds: number): string {
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
-  
+
   if (days > 0) return `${days}d ${hours}h ${minutes}m`;
   if (hours > 0) return `${hours}h ${minutes}m`;
   return `${minutes}m`;
@@ -84,7 +86,7 @@ function HealthBadge({ status }: { status: 'healthy' | 'degraded' | 'critical' }
     critical: { variant: 'destructive' as const, icon: XCircle, color: 'text-red-500' },
   };
   const { variant, icon: Icon, color } = variants[status];
-  
+
   return (
     <Badge variant={variant} className="flex items-center gap-1">
       <Icon className={`h-3 w-3 ${color}`} />
@@ -101,7 +103,7 @@ function LogLevelBadge({ level }: { level: 'info' | 'warn' | 'error' | 'debug' }
     error: 'destructive' as const,
     debug: 'outline' as const,
   };
-  
+
   return <Badge variant={variants[level]}>{level.toUpperCase()}</Badge>;
 }
 
@@ -118,10 +120,10 @@ export default function MonitoringPage() {
       const response = await api.getMonitoringDashboard();
       setData(response.data);
     } catch (error) {
-      toast({ 
-        title: "Error", 
-        description: "Failed to load monitoring data", 
-        variant: "destructive" 
+      toast({
+        title: "Error",
+        description: "Failed to load monitoring data",
+        variant: "destructive"
       });
     } finally {
       setLoading(false);
@@ -136,11 +138,11 @@ export default function MonitoringPage() {
   // Auto-refresh every 10 seconds
   useEffect(() => {
     if (!autoRefresh) return;
-    
+
     const interval = setInterval(() => {
       loadData(false);
     }, 10000);
-    
+
     return () => clearInterval(interval);
   }, [autoRefresh, loadData]);
 
@@ -285,24 +287,24 @@ export default function MonitoringPage() {
                 <ResponsiveContainer width="100%" height={200}>
                   <AreaChart data={data.history.slice(-30)}>
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis 
-                      dataKey="timestamp" 
+                    <XAxis
+                      dataKey="timestamp"
                       tickFormatter={formatTime}
                       fontSize={12}
                     />
-                    <YAxis 
+                    <YAxis
                       tickFormatter={(v) => formatBytes(v)}
                       fontSize={12}
                     />
-                    <Tooltip 
+                    <Tooltip
                       labelFormatter={formatTime}
                       formatter={(value) => [formatBytes(Number(value) || 0), 'Heap Used']}
                     />
-                    <Area 
-                      type="monotone" 
-                      dataKey="memory.heapUsed" 
-                      stroke="#8884d8" 
-                      fill="#8884d8" 
+                    <Area
+                      type="monotone"
+                      dataKey="memory.heapUsed"
+                      stroke="#8884d8"
+                      fill="#8884d8"
                       fillOpacity={0.3}
                     />
                   </AreaChart>
@@ -319,23 +321,23 @@ export default function MonitoringPage() {
                 <ResponsiveContainer width="100%" height={200}>
                   <LineChart data={data.history.slice(-30)}>
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis 
-                      dataKey="timestamp" 
+                    <XAxis
+                      dataKey="timestamp"
                       tickFormatter={formatTime}
                       fontSize={12}
                     />
                     <YAxis fontSize={12} />
                     <Tooltip labelFormatter={formatTime} />
-                    <Line 
-                      type="monotone" 
-                      dataKey="connections.agents" 
-                      stroke="#82ca9d" 
+                    <Line
+                      type="monotone"
+                      dataKey="connections.agents"
+                      stroke="#82ca9d"
                       name="Agents"
                     />
-                    <Line 
-                      type="monotone" 
-                      dataKey="connections.clients" 
-                      stroke="#8884d8" 
+                    <Line
+                      type="monotone"
+                      dataKey="connections.clients"
+                      stroke="#8884d8"
                       name="Clients"
                     />
                   </LineChart>
@@ -395,7 +397,7 @@ export default function MonitoringPage() {
                   </span>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  {data.certificates.lastRenewal 
+                  {data.certificates.lastRenewal
                     ? `Last: ${formatDateTime(data.certificates.lastRenewal)}`
                     : 'No renewals yet'
                   }
@@ -469,10 +471,10 @@ export default function MonitoringPage() {
                     {data.health.connections.agents} / {data.health.connections.maxAgents}
                   </div>
                   <div className="w-full bg-secondary rounded-full h-2 mt-1">
-                    <div 
-                      className="bg-primary h-2 rounded-full" 
-                      style={{ 
-                        width: `${(data.health.connections.agents / data.health.connections.maxAgents) * 100}%` 
+                    <div
+                      className="bg-primary h-2 rounded-full"
+                      style={{
+                        width: `${(data.health.connections.agents / data.health.connections.maxAgents) * 100}%`
                       }}
                     />
                   </div>
@@ -483,10 +485,10 @@ export default function MonitoringPage() {
                     {data.health.connections.clients} / {data.health.connections.maxClients}
                   </div>
                   <div className="w-full bg-secondary rounded-full h-2 mt-1">
-                    <div 
-                      className="bg-primary h-2 rounded-full" 
-                      style={{ 
-                        width: `${(data.health.connections.clients / data.health.connections.maxClients) * 100}%` 
+                    <div
+                      className="bg-primary h-2 rounded-full"
+                      style={{
+                        width: `${(data.health.connections.clients / data.health.connections.maxClients) * 100}%`
                       }}
                     />
                   </div>
@@ -500,6 +502,9 @@ export default function MonitoringPage() {
               </div>
             </CardContent>
           </Card>
+
+          {/* IP Connection Tracking */}
+          <ConnectionTrackingCard onRefresh={() => loadData(true)} />
         </TabsContent>
 
         {/* Logs Tab */}
@@ -513,13 +518,12 @@ export default function MonitoringPage() {
               <ScrollArea className="h-[400px]">
                 <div className="space-y-2">
                   {data.logs.map((log, i) => (
-                    <div 
-                      key={i} 
-                      className={`p-2 border rounded text-sm ${
-                        log.level === 'error' ? 'border-red-500/50 bg-red-500/5' :
+                    <div
+                      key={i}
+                      className={`p-2 border rounded text-sm ${log.level === 'error' ? 'border-red-500/50 bg-red-500/5' :
                         log.level === 'warn' ? 'border-yellow-500/50 bg-yellow-500/5' :
-                        ''
-                      }`}
+                          ''
+                        }`}
                     >
                       <div className="flex items-center gap-2">
                         <LogLevelBadge level={log.level} />
@@ -564,7 +568,7 @@ export default function MonitoringPage() {
                   <div className="text-2xl font-bold text-red-500">{data.auth.failureCount}</div>
                 </div>
               </div>
-              
+
               {data.auth.topFailedIdentifiers.length > 0 && (
                 <div className="mt-4">
                   <div className="text-sm font-medium mb-2">Top Failed Identifiers</div>
@@ -600,7 +604,7 @@ export default function MonitoringPage() {
                   <div className="text-2xl font-bold text-red-500">{data.certificates.renewalFailures}</div>
                 </div>
               </div>
-              
+
               {data.certificates.lastError && (
                 <div className="mt-4 p-2 bg-red-500/10 border border-red-500/50 rounded">
                   <div className="text-sm font-medium text-red-500">Last Error</div>
@@ -621,11 +625,11 @@ export default function MonitoringPage() {
 }
 
 // Configuration Panel Component
-function ConfigurationPanel({ 
-  config, 
-  onUpdate 
-}: { 
-  config: MonitoringConfig; 
+function ConfigurationPanel({
+  config,
+  onUpdate
+}: {
+  config: MonitoringConfig;
   onUpdate: () => void;
 }) {
   const { toast } = useToast();
@@ -647,7 +651,7 @@ function ConfigurationPanel({
 
   const handleSave = async () => {
     if (!fullConfig) return;
-    
+
     setLoading(true);
     try {
       await api.updateSystemConfig(fullConfig);
@@ -840,6 +844,150 @@ function ConfigurationPanel({
           {loading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
           Save Configuration
         </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+// Connection Tracking Card Component
+function ConnectionTrackingCard({ onRefresh }: { onRefresh: () => void }) {
+  const [connections, setConnections] = useState<IpConnection[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [clearing, setClearing] = useState<string | null>(null);
+  const { toast } = useToast();
+
+  const loadConnections = useCallback(async () => {
+    try {
+      const response = await api.getConnectionTracking();
+      setConnections(response.connections || []);
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to load connection tracking data",
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    loadConnections();
+  }, [loadConnections]);
+
+  const handleClear = async (ip: string) => {
+    setClearing(ip);
+    try {
+      const result = await api.clearIpConnections(ip);
+      if (result.cleared) {
+        toast({
+          title: "Success",
+          description: `Cleared ${result.previousCount} connection(s) for ${ip}`
+        });
+        loadConnections();
+        onRefresh();
+      } else {
+        toast({
+          title: "Info",
+          description: "No connections found for this IP"
+        });
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to clear connections",
+        variant: "destructive"
+      });
+    } finally {
+      setClearing(null);
+    }
+  };
+
+  if (loading) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Network className="h-5 w-5" />
+            IP Connection Tracking
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex justify-center py-8">
+            <Loader2 className="h-6 w-6 animate-spin" />
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Network className="h-5 w-5" />
+          IP Connection Tracking
+        </CardTitle>
+        <CardDescription>
+          Monitor and manage per-IP connection counts. Clear stuck counters if needed.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {connections.length === 0 ? (
+          <p className="text-muted-foreground text-center py-4">
+            No active connections tracked
+          </p>
+        ) : (
+          <div className="space-y-2">
+            <div className="flex justify-between text-sm text-muted-foreground border-b pb-2">
+              <span>IP Address</span>
+              <span>Connections</span>
+            </div>
+            {connections.sort((a, b) => b.count - a.count).map((conn) => (
+              <div
+                key={conn.ip}
+                className={`flex justify-between items-center p-2 border rounded ${conn.count >= 50 ? 'border-red-500/50 bg-red-500/5' :
+                  conn.count >= 20 ? 'border-yellow-500/50 bg-yellow-500/5' :
+                    ''
+                  }`}
+              >
+                <div>
+                  <span className="font-mono text-sm">{conn.ip}</span>
+                  {conn.count >= 80 && (
+                    <Badge variant="destructive" className="ml-2 text-xs">High</Badge>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`font-bold ${conn.count >= 50 ? 'text-red-500' :
+                    conn.count >= 20 ? 'text-yellow-500' :
+                      ''
+                    }`}>
+                    {conn.count}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleClear(conn.ip)}
+                    disabled={clearing === conn.ip}
+                    title="Clear connection counter"
+                  >
+                    {clearing === conn.ip ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-4 w-4 text-destructive" />
+                    )}
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="mt-4 flex justify-end">
+          <Button variant="outline" size="sm" onClick={loadConnections}>
+            <RefreshCw className="h-4 w-4 mr-1" />
+            Refresh
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );

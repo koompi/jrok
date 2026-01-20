@@ -228,7 +228,7 @@ class ApiClient {
     if (params?.endDate) searchParams.append('endDate', params.endDate.toString());
     if (params?.limit) searchParams.append('limit', params.limit.toString());
     if (params?.offset) searchParams.append('offset', params.offset.toString());
-    
+
     const query = searchParams.toString();
     return this.request(`/activity${query ? `?${query}` : ''}`);
   }
@@ -308,16 +308,16 @@ class ApiClient {
 
   // ============ New IP Security API ============
 
-  async getTunnelIpSecurity(tunnelId: string): Promise<{ 
-    success: boolean; 
-    tunnelId: string; 
-    ipSecurity: TunnelIpSecurity 
+  async getTunnelIpSecurity(tunnelId: string): Promise<{
+    success: boolean;
+    tunnelId: string;
+    ipSecurity: TunnelIpSecurity
   }> {
     return this.request(`/security/ip/${tunnelId}`);
   }
 
   async setTunnelIpSecurity(
-    tunnelId: string, 
+    tunnelId: string,
     ipSecurity: TunnelIpSecurity
   ): Promise<{ success: boolean; message: string; mode: string }> {
     return this.request(`/security/ip/${tunnelId}`, {
@@ -327,8 +327,8 @@ class ApiClient {
   }
 
   async addIpToTunnelSecurity(
-    tunnelId: string, 
-    ip: string, 
+    tunnelId: string,
+    ip: string,
     listType: 'allow' | 'block'
   ): Promise<{ success: boolean; message: string }> {
     return this.request(`/security/ip/${tunnelId}/add`, {
@@ -338,7 +338,7 @@ class ApiClient {
   }
 
   async removeIpFromTunnelSecurity(
-    tunnelId: string, 
+    tunnelId: string,
     ip: string
   ): Promise<{ success: boolean; message: string }> {
     return this.request(`/security/ip/${tunnelId}/remove`, {
@@ -347,10 +347,10 @@ class ApiClient {
     });
   }
 
-  async getTunnelConnectionLogs(tunnelId: string, limit?: number, offset?: number): Promise<{ 
-    success: boolean; 
-    tunnelId: string; 
-    logs: ConnectionLog[] 
+  async getTunnelConnectionLogs(tunnelId: string, limit?: number, offset?: number): Promise<{
+    success: boolean;
+    tunnelId: string;
+    logs: ConnectionLog[]
   }> {
     const params = new URLSearchParams();
     if (limit) params.append('limit', limit.toString());
@@ -359,9 +359,9 @@ class ApiClient {
     return this.request(`/security/logs/tunnel/${tunnelId}${query ? `?${query}` : ''}`);
   }
 
-  async getOrganizationBandwidth(organizationId: string): Promise<{ 
-    success: boolean; 
-    organizationId: string 
+  async getOrganizationBandwidth(organizationId: string): Promise<{
+    success: boolean;
+    organizationId: string
   } & BandwidthLimit> {
     return this.request(`/security/bandwidth/${organizationId}`);
   }
@@ -381,7 +381,7 @@ class ApiClient {
   }
 
   async getMonitoringLogs(
-    count?: number, 
+    count?: number,
     level?: 'info' | 'warn' | 'error' | 'debug',
     category?: string
   ): Promise<{ success: boolean; logs: SystemLog[] }> {
@@ -413,6 +413,16 @@ class ApiClient {
     return this.request('/admin/monitoring/config', {
       method: 'PUT',
       body: JSON.stringify(config),
+    });
+  }
+
+  async getConnectionTracking(): Promise<{ success: boolean; connections: IpConnection[] }> {
+    return this.request('/admin/monitoring/connections');
+  }
+
+  async clearIpConnections(ip: string): Promise<{ success: boolean; cleared: boolean; previousCount: number }> {
+    return this.request(`/admin/monitoring/connections/clear/${encodeURIComponent(ip)}`, {
+      method: 'POST',
     });
   }
 }
@@ -500,20 +510,20 @@ export interface PlanLimits {
 }
 
 // Activity Types
-export type ActivityCategory = 
-  | "tunnels" 
-  | "domains" 
-  | "api_keys" 
-  | "agents" 
-  | "organization" 
+export type ActivityCategory =
+  | "tunnels"
+  | "domains"
+  | "api_keys"
+  | "agents"
+  | "organization"
   | "auth"
   | "billing";
 
-export type ActivityAction = 
-  | "created" 
-  | "updated" 
-  | "deleted" 
-  | "connected" 
+export type ActivityAction =
+  | "created"
+  | "updated"
+  | "deleted"
+  | "connected"
   | "disconnected"
   | "renewed"
   | "expired"
@@ -814,6 +824,11 @@ export interface SystemConfig {
     autoCleanupEnabled: boolean;
     crossServerRoutingEnabled: boolean;
   };
+}
+
+export interface IpConnection {
+  ip: string;
+  count: number;
 }
 
 export const api = new ApiClient();
