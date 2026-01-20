@@ -1026,908 +1026,909 @@ async function startServer() {
               { status: 500, headers: { "Content-Type": "application/json" } }
             ));
           }
+        }
 
-          // Get per-IP connection details (admin debugging)
-          if (path === "/admin/monitoring/connections" && method === "GET") {
+        // Get per-IP connection details (admin debugging)
+        if (path === "/admin/monitoring/connections" && method === "GET") {
+          return addCors(new Response(
+            JSON.stringify({
+              success: true,
+              connections: monitoringService.getConnectionsPerIpDetails()
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Clear stuck IP connection counter (admin emergency fix)
+        if (path.match(/^\/admin\/monitoring\/connections\/clear\//) && method === "POST") {
+          const ipToClear = decodeURIComponent(path.split("/").pop() || "");
+          if (!ipToClear) {
             return addCors(new Response(
-              JSON.stringify({
-                success: true,
-                connections: monitoringService.getConnectionsPerIpDetails()
-              }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
+              JSON.stringify({ success: false, error: "IP address required" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
             ));
           }
-
-          // Clear stuck IP connection counter (admin emergency fix)
-          if (path.match(/^\/admin\/monitoring\/connections\/clear\//) && method === "POST") {
-            const ipToClear = decodeURIComponent(path.split("/").pop() || "");
-            if (!ipToClear) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, error: "IP address required" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const result = monitoringService.clearConnectionsForIp(ipToClear);
-            return addCors(new Response(
-              JSON.stringify({ success: true, ...result }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // ============ Dashboard Stats & Activity Routes ============
-
-          // Activity routes (require organization context)
-          if (path === "/activity" && method === "GET") {
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            return addCors(await activityHandler.handleListActivity(req, authContext));
-          }
-
-          if (path === "/activity/recent" && method === "GET") {
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            return addCors(await activityHandler.handleRecentActivity(req, authContext));
-          }
-
-          if (path === "/activity/summary" && method === "GET") {
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            return addCors(await activityHandler.handleActivitySummary(req, authContext));
-          }
-
-          // Stats routes
-          if (path === "/stats/dashboard" && method === "GET") {
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            return addCors(await statsHandler.handleDashboardStats(req, authContext));
-          }
-
-          if (path === "/stats/bandwidth" && method === "GET") {
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            return addCors(await statsHandler.handleBandwidthStats(req, authContext));
-          }
-
-          // TCP tunnel stats (public endpoint for monitoring)
-          if (path === "/stats/tcp" && method === "GET") {
-            const stats = await tcpService.getTcpStatsGlobal();
-            const allocations = await tcpService.getAllPortAllocationsGlobal();
-            return addCors(new Response(
-              JSON.stringify({
-                success: true,
-                stats,
-                allocations: allocations.map((a: any) => ({
-                  port: a.port,
-                  tunnelId: a.tunnelId,
-                  localPort: a.localPort,
-                  localHost: a.localHost,
-                  createdAt: a.createdAt,
-                  active: a.active,
-                  serverId: a.serverId,
-                })),
-              }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // ============ Security Management Endpoints ============
-
-          // Get security stats (requires admin auth)
-          if (path === "/security/stats" && method === "GET") {
-            const authContext = await authenticateRequest(req);
-            if (!authContext || authContext.user?.role !== 'super_admin') {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const stats = securityService.getSecurityStats();
-            return addCors(new Response(
-              JSON.stringify({ success: true, stats }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // Get blocked IPs (requires admin auth)
-          if (path === "/security/blocked-ips" && method === "GET") {
-            const authContext = await authenticateRequest(req);
-            if (!authContext || authContext.user?.role !== 'super_admin') {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const blockedIps = securityService.getBlockedIps();
-            return addCors(new Response(
-              JSON.stringify({ success: true, blockedIps }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // Block an IP (requires admin auth)
-          if (path === "/security/block-ip" && method === "POST") {
-            const authContext = await authenticateRequest(req);
-            if (!authContext || authContext.user?.role !== 'super_admin') {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const body = await req.json() as { ip: string; reason: string; duration?: number };
-            if (!body.ip || !body.reason) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Missing ip or reason" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            securityService.blockIp(body.ip, body.reason, body.duration || 3600);
-            return addCors(new Response(
-              JSON.stringify({ success: true, message: `IP ${body.ip} blocked` }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // Unblock an IP (requires admin auth)
-          if (path === "/security/unblock-ip" && method === "POST") {
-            const authContext = await authenticateRequest(req);
-            if (!authContext || authContext.user?.role !== 'super_admin') {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const body = await req.json() as { ip: string };
-            if (!body.ip) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Missing ip" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            securityService.unblockIp(body.ip);
-            return addCors(new Response(
-              JSON.stringify({ success: true, message: `IP ${body.ip} unblocked` }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // Get IP allowlist for a tunnel
-          if (path.startsWith("/security/allowlist/") && method === "GET") {
-            const tunnelId = path.split("/")[3];
-            if (!tunnelId) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Missing tunnel ID" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const allowlist = securityService.getIpAllowlist(tunnelId);
-            return addCors(new Response(
-              JSON.stringify({ success: true, tunnelId, allowlist }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // Set IP allowlist for a tunnel (legacy - kept for backward compatibility)
-          if (path.startsWith("/security/allowlist/") && method === "POST") {
-            const tunnelId = path.split("/")[3];
-            if (!tunnelId) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Missing tunnel ID" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const body = await req.json() as { ips: string[] };
-            if (!body.ips || !Array.isArray(body.ips)) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Missing ips array" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            // Use new persistent security system
-            await securityService.setTunnelAllowlist(tunnelId, body.ips, authContext.user?.id);
-            return addCors(new Response(
-              JSON.stringify({ success: true, message: `Allowlist updated for tunnel ${tunnelId}` }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // ============ New IP Security Endpoints ============
-
-          // GET /security/ip/:tunnelId - Get comprehensive IP security settings
-          if (path.startsWith("/security/ip/") && method === "GET") {
-            const tunnelId = path.split("/")[3];
-            if (!tunnelId) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Missing tunnel ID" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const ipSecurity = securityService.getTunnelIpSecurity(tunnelId);
-            return addCors(new Response(
-              JSON.stringify({ success: true, tunnelId, ipSecurity }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // POST /security/ip/:tunnelId - Set IP security settings
-          if (path.startsWith("/security/ip/") && method === "POST") {
-            const tunnelId = path.split("/")[3];
-            if (!tunnelId) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Missing tunnel ID" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-
-            const body = await req.json() as {
-              mode: 'allow-all' | 'allowlist' | 'blocklist';
-              allowedIps?: string[];
-              blockedIps?: string[];
-            };
-
-            if (!body.mode || !['allow-all', 'allowlist', 'blocklist'].includes(body.mode)) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Invalid mode. Use: 'allow-all', 'allowlist', or 'blocklist'" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-
-            await securityService.setTunnelIpSecurity(tunnelId, {
-              mode: body.mode,
-              allowedIps: body.allowedIps || [],
-              blockedIps: body.blockedIps || [],
-            }, authContext.user?.id);
-
-            return addCors(new Response(
-              JSON.stringify({ success: true, message: `IP security updated for tunnel ${tunnelId}`, mode: body.mode }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // POST /security/ip/:tunnelId/add - Add IP to allowlist or blocklist
-          if (path.match(/^\/security\/ip\/[^\/]+\/add$/) && method === "POST") {
-            const tunnelId = path.split("/")[3];
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-
-            const body = await req.json() as { ip: string; listType: 'allow' | 'block' };
-            if (!body.ip || !body.listType) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Missing ip or listType ('allow' or 'block')" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-
-            await securityService.addIpToTunnelSecurity(tunnelId, body.ip, body.listType, authContext.user?.id);
-            return addCors(new Response(
-              JSON.stringify({ success: true, message: `IP ${body.ip} added to ${body.listType} list` }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // POST /security/ip/:tunnelId/remove - Remove IP from lists
-          if (path.match(/^\/security\/ip\/[^\/]+\/remove$/) && method === "POST") {
-            const tunnelId = path.split("/")[3];
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-
-            const body = await req.json() as { ip: string };
-            if (!body.ip) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Missing ip" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-
-            await securityService.removeIpFromTunnelSecurity(tunnelId, body.ip, authContext.user?.id);
-            return addCors(new Response(
-              JSON.stringify({ success: true, message: `IP ${body.ip} removed from security lists` }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // Get connection logs for a tunnel
-          if (path.startsWith("/security/logs/tunnel/") && method === "GET") {
-            const tunnelId = path.split("/")[4];
-            if (!tunnelId) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Missing tunnel ID" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const urlParams = new URL(req.url).searchParams;
-            const limit = parseInt(urlParams.get("limit") || "100");
-            const offset = parseInt(urlParams.get("offset") || "0");
-            const logs = await securityService.getConnectionLogs(tunnelId, limit, offset);
-            return addCors(new Response(
-              JSON.stringify({ success: true, tunnelId, logs }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // Get bandwidth usage for an organization
-          if (path.startsWith("/security/bandwidth/") && method === "GET") {
-            const organizationId = path.split("/")[3];
-            if (!organizationId) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Missing organization ID" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            const planTier = await getPlanTierForOrg(organizationId);
-            const bandwidth = securityService.checkMonthlyBandwidth(organizationId, planTier);
-            return addCors(new Response(
-              JSON.stringify({ success: true, organizationId, ...bandwidth }),
-              { status: 200, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // Enhanced resource routes
-          if (path === "/tunnels/enhanced" && method === "GET") {
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            return addCors(await statsHandler.handleEnhancedTunnels(req, authContext));
-          }
-
-          if (path === "/agents/enhanced" && method === "GET") {
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            return addCors(await statsHandler.handleEnhancedAgents(req, authContext));
-          }
-
-          if (path === "/domains/enhanced" && method === "GET") {
-            const authContext = await authenticateRequest(req);
-            if (!authContext) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, message: "Unauthorized" }),
-                { status: 401, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-            return addCors(await statsHandler.handleEnhancedDomains(req, authContext));
-          }
-
-          // ============ Tunnel Domain Routing ============
-          // Check if this is a tunnel domain request (extract subdomain or custom domain)
-          // MUST be before auth check to allow public tunnel access
-          const baseDomain = config.baseDomain; // e.g., "tunnel.koompi.cloud"
-
-          // First, check if this is a registered custom domain
-          let tunnelDomain: string | null = null;
-          let isCustomDomainRequest = false;
-
-          // Check for custom domain (not a subdomain of baseDomain and not the baseDomain itself)
-          if (!hostname.endsWith(baseDomain) && hostname !== baseDomain && hostname !== 'localhost') {
-            // This might be a custom domain - check if it's registered
-            const { getCustomDomainByName } = await import("./utils/database");
-            const customDomain = await getCustomDomainByName(hostname);
-
-            if (customDomain && customDomain.active) {
-              // This is a valid custom domain - use the full hostname as the tunnel domain
-              tunnelDomain = hostname;
-              isCustomDomainRequest = true;
-            }
-          } else if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
-            // Extract subdomain (e.g., "demo" from "demo.tunnel.koompi.cloud")
-            tunnelDomain = hostname.replace(`.${baseDomain}`, '');
-          }
-
-          if (tunnelDomain) {
-            const subdomain = tunnelDomain; // For backward compatibility with existing code
-
-            // Check if agent is on this server or needs cross-server routing
-            const routeResult = await crossServerService.findServerForDomain(subdomain);
-
-            // If agent is on another server, proxy the request
-            if (!routeResult.isLocal && routeResult.targetServer) {
-              return crossServerService.forwardRequest(
-                routeResult.targetServer,
-                req,
-                url.pathname + url.search
-              );
-            }
-
-            // Import agentGroupService for load-balanced agent selection
-            const agentGroupService = await import("./services/agentGroupService");
-
-            // Check if this domain has a multi-agent group (load-balanced)
-            const isGroupDomain = await agentGroupService.isGroupedDomain(subdomain);
-
-            // Look up agent - use load balancer for groups, direct lookup for single agents
-            let agent;
-            if (isGroupDomain) {
-              // Use load-balanced selection (round-robin, least-connections, etc.)
-              agent = await agentGroupService.selectAgent(subdomain);
-            } else {
-              // Single agent mode - direct lookup
-              agent = await agentService.getAgentByDomainAsync(subdomain);
-            }
-
-            if (!agent || !agent.active) {
-              // Serve maintenance HTML page instead of JSON error
-              const maintenanceHtmlPath = import.meta.dir + "/../index.html";
-              try {
-                const htmlContent = await Bun.file(maintenanceHtmlPath).text();
-                return addCors(new Response(htmlContent, {
-                  status: 503,
-                  headers: { "Content-Type": "text/html; charset=utf-8" }
-                }));
-              } catch {
-                // Fallback if index.html is not found
-                return addCors(new Response(
-                  JSON.stringify({
-                    success: false,
-                    message: `No active agent found for domain: ${subdomain}. Please ensure the agent is running: jrok --port <port> --domain ${subdomain}`,
-                  }),
-                  { status: 503, headers: { "Content-Type": "application/json" } }
-                ));
-              }
-            }
-
-            // Get agent's WebSocket (local connections only)
-            const agentWs = agentService.getAgentSocket(agent.id);
-            if (!agentWs || agentWs.readyState !== 1) {  // 1 = WebSocket.OPEN
-              // For group mode, try to get another agent if this one is disconnected
-              if (isGroupDomain) {
-                // Mark this agent as unhealthy
-                await agentGroupService.updateMemberHealth(agent.id, false);
-                // Try to get another agent
-                const fallbackAgent = await agentGroupService.selectAgent(subdomain);
-                if (fallbackAgent && fallbackAgent.id !== agent.id) {
-                  const fallbackWs = agentService.getAgentSocket(fallbackAgent.id);
-                  if (fallbackWs && fallbackWs.readyState === 1) {
-                    // Use fallback agent
-                    agent = fallbackAgent;
-                  }
-                }
-              }
-
-              // Re-check after potential fallback
-              const finalWs = agentService.getAgentSocket(agent.id);
-              if (!finalWs || finalWs.readyState !== 1) {
-                return addCors(new Response(
-                  JSON.stringify({
-                    success: false,
-                    message: `Agent for ${subdomain} is not connected (readyState: ${finalWs?.readyState || 'null'}). ${isGroupDomain ? 'All agents in the group are unavailable.' : 'Attempting reconnection...'}`,
-                  }),
-                  { status: 503, headers: { "Content-Type": "application/json" } }
-                ));
-              }
-            }
-
-            // Get the final WebSocket reference
-            const finalAgentWs = agentService.getAgentSocket(agent.id)!;
-
-            // Use cached tunnelId from agent (set when agent connects)
-            // This avoids MongoDB query on EVERY request - massive performance improvement!
-            let tunnelId = agent.tunnelId;
-
-            // Fallback to DB lookup only if not cached (rare)
-            if (!tunnelId) {
-              const { getTunnelByDomain } = await import("./utils/database");
-              const tunnel = await getTunnelByDomain(subdomain);
-              tunnelId = tunnel?.id;
-            }
-
-            // ============ Security Check for HTTP Requests ============
-            const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-              req.headers.get("x-real-ip") ||
-              "unknown";
-
-            // Get User-Agent for layered client identification (differentiates devices on same IP)
-            const userAgent = req.headers.get("user-agent") || undefined;
-
-            // Get plan tier for rate limit calculation (defaults to 'free')
-            const planTier = agent.organizationId ? await getPlanTierForOrg(agent.organizationId) : 'free';
-
-            // Check security limits (rate limits) with layered client identification
-            // This uses Token Bucket algorithm to allow burst while preventing abuse
-            const securityCheck = await securityService.checkHttpRequest(
-              tunnelId || subdomain,
-              agent.organizationId,
-              clientIp,
-              planTier,
-              {
-                userAgent,
-                apiKeyId: agent.apiKeyId,
-              }
-            );
-
-            if (!securityCheck.allowed) {
-              const headers: Record<string, string> = {
-                "Content-Type": "application/json",
-              };
-              if (securityCheck.retryAfter) {
-                headers["Retry-After"] = securityCheck.retryAfter.toString();
-              }
-              return addCors(new Response(
-                JSON.stringify({
-                  success: false,
-                  message: securityCheck.reason || "Rate limit exceeded",
-                }),
-                { status: 429, headers }
-              ));
-            }
-
-            // ============ Bandwidth Limit Check ============
-            // Block requests if organization has exceeded monthly bandwidth
-            if (agent.organizationId) {
-              const bandwidthCheck = securityService.checkMonthlyBandwidth(agent.organizationId, planTier);
-              if (!bandwidthCheck.allowed) {
-                console.warn(`🚫 Bandwidth limit exceeded for org ${agent.organizationId}: ${(bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2)}GB / ${(bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2)}GB`);
-                return addCors(new Response(
-                  JSON.stringify({
-                    success: false,
-                    message: "Monthly bandwidth limit exceeded. Please upgrade your plan.",
-                    usedGb: (bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2),
-                    limitGb: (bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2),
-                    percentUsed: bandwidthCheck.percentUsed.toFixed(1),
-                  }),
-                  { status: 402, headers: { "Content-Type": "application/json" } }
-                ));
-              }
-            }
-
-            // Track HTTP connection
-            securityService.trackHttpConnection(tunnelId || subdomain, true);
-
-            // Check if this is a WebSocket upgrade request
-            if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-              // Handle WebSocket tunneling
-              const response = await handleWebSocketTunnel(req, server, finalAgentWs, agent, subdomain);
-              if (response) {
-                securityService.trackHttpConnection(tunnelId || subdomain, false);
-                // Decrement connection count for load balancing
-                if (isGroupDomain) {
-                  await agentGroupService.decrementMemberConnections(agent.id);
-                }
-                return response;
-              }
-              return undefined; // Handled by upgrade
-            }
-
-            // Forward regular HTTP request to agent via WebSocket (with bandwidth tracking)
-            const response = await forwardRequestToAgent(req, finalAgentWs, agent, tunnelId, clientIp);
-
-            // Track connection close and bandwidth
-            securityService.trackHttpConnection(tunnelId || subdomain, false);
-
-            // Decrement connection count for load balancing
-            if (isGroupDomain) {
-              await agentGroupService.decrementMemberConnections(agent.id);
-            }
-
-            // Track bandwidth usage
-            const responseSize = parseInt(response.headers.get("content-length") || "0");
-            securityService.trackMonthlyBandwidth(agent.organizationId || subdomain, responseSize);
-
-            return response;
-          }
-
-          // ============ Legacy API Routes (require auth) ============
-
-          // Auth check for legacy routes
+          const result = monitoringService.clearConnectionsForIp(ipToClear);
+          return addCors(new Response(
+            JSON.stringify({ success: true, ...result }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // ============ Dashboard Stats & Activity Routes ============
+
+        // Activity routes (require organization context)
+        if (path === "/activity" && method === "GET") {
           const authContext = await authenticateRequest(req);
           if (!authContext) {
             return addCors(new Response(
-              JSON.stringify({
-                success: false,
-                message: "Unauthorized",
-              }),
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await activityHandler.handleListActivity(req, authContext));
+        }
+
+        if (path === "/activity/recent" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await activityHandler.handleRecentActivity(req, authContext));
+        }
+
+        if (path === "/activity/summary" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await activityHandler.handleActivitySummary(req, authContext));
+        }
+
+        // Stats routes
+        if (path === "/stats/dashboard" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleDashboardStats(req, authContext));
+        }
+
+        if (path === "/stats/bandwidth" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleBandwidthStats(req, authContext));
+        }
+
+        // TCP tunnel stats (public endpoint for monitoring)
+        if (path === "/stats/tcp" && method === "GET") {
+          const stats = await tcpService.getTcpStatsGlobal();
+          const allocations = await tcpService.getAllPortAllocationsGlobal();
+          return addCors(new Response(
+            JSON.stringify({
+              success: true,
+              stats,
+              allocations: allocations.map((a: any) => ({
+                port: a.port,
+                tunnelId: a.tunnelId,
+                localPort: a.localPort,
+                localHost: a.localHost,
+                createdAt: a.createdAt,
+                active: a.active,
+                serverId: a.serverId,
+              })),
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // ============ Security Management Endpoints ============
+
+        // Get security stats (requires admin auth)
+        if (path === "/security/stats" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext || authContext.user?.role !== 'super_admin') {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const stats = securityService.getSecurityStats();
+          return addCors(new Response(
+            JSON.stringify({ success: true, stats }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get blocked IPs (requires admin auth)
+        if (path === "/security/blocked-ips" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext || authContext.user?.role !== 'super_admin') {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const blockedIps = securityService.getBlockedIps();
+          return addCors(new Response(
+            JSON.stringify({ success: true, blockedIps }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Block an IP (requires admin auth)
+        if (path === "/security/block-ip" && method === "POST") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext || authContext.user?.role !== 'super_admin') {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const body = await req.json() as { ip: string; reason: string; duration?: number };
+          if (!body.ip || !body.reason) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing ip or reason" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          securityService.blockIp(body.ip, body.reason, body.duration || 3600);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP ${body.ip} blocked` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Unblock an IP (requires admin auth)
+        if (path === "/security/unblock-ip" && method === "POST") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext || authContext.user?.role !== 'super_admin') {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const body = await req.json() as { ip: string };
+          if (!body.ip) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing ip" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          securityService.unblockIp(body.ip);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP ${body.ip} unblocked` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get IP allowlist for a tunnel
+        if (path.startsWith("/security/allowlist/") && method === "GET") {
+          const tunnelId = path.split("/")[3];
+          if (!tunnelId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing tunnel ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const allowlist = securityService.getIpAllowlist(tunnelId);
+          return addCors(new Response(
+            JSON.stringify({ success: true, tunnelId, allowlist }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Set IP allowlist for a tunnel (legacy - kept for backward compatibility)
+        if (path.startsWith("/security/allowlist/") && method === "POST") {
+          const tunnelId = path.split("/")[3];
+          if (!tunnelId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing tunnel ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const body = await req.json() as { ips: string[] };
+          if (!body.ips || !Array.isArray(body.ips)) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing ips array" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          // Use new persistent security system
+          await securityService.setTunnelAllowlist(tunnelId, body.ips, authContext.user?.id);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `Allowlist updated for tunnel ${tunnelId}` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // ============ New IP Security Endpoints ============
+
+        // GET /security/ip/:tunnelId - Get comprehensive IP security settings
+        if (path.startsWith("/security/ip/") && method === "GET") {
+          const tunnelId = path.split("/")[3];
+          if (!tunnelId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing tunnel ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const ipSecurity = securityService.getTunnelIpSecurity(tunnelId);
+          return addCors(new Response(
+            JSON.stringify({ success: true, tunnelId, ipSecurity }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // POST /security/ip/:tunnelId - Set IP security settings
+        if (path.startsWith("/security/ip/") && method === "POST") {
+          const tunnelId = path.split("/")[3];
+          if (!tunnelId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing tunnel ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
               { status: 401, headers: { "Content-Type": "application/json" } }
             ));
           }
 
-          // Tunnel Routes (with auth)
-          if (path === "/tunnels" && method === "POST") {
-            return addCors(await tunnelHandler.handleCreateTunnel(req));
+          const body = await req.json() as {
+            mode: 'allow-all' | 'allowlist' | 'blocklist';
+            allowedIps?: string[];
+            blockedIps?: string[];
+          };
+
+          if (!body.mode || !['allow-all', 'allowlist', 'blocklist'].includes(body.mode)) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Invalid mode. Use: 'allow-all', 'allowlist', or 'blocklist'" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
           }
 
-          if (path === "/tunnels" && method === "GET") {
-            return addCors(await tunnelHandler.handleListTunnels(req));
+          await securityService.setTunnelIpSecurity(tunnelId, {
+            mode: body.mode,
+            allowedIps: body.allowedIps || [],
+            blockedIps: body.blockedIps || [],
+          }, authContext.user?.id);
+
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP security updated for tunnel ${tunnelId}`, mode: body.mode }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // POST /security/ip/:tunnelId/add - Add IP to allowlist or blocklist
+        if (path.match(/^\/security\/ip\/[^\/]+\/add$/) && method === "POST") {
+          const tunnelId = path.split("/")[3];
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
           }
 
-          if (path.startsWith("/tunnels/") && method === "GET") {
-            const id = path.split("/")[2];
-            return addCors(await tunnelHandler.handleGetTunnel(id, req));
+          const body = await req.json() as { ip: string; listType: 'allow' | 'block' };
+          if (!body.ip || !body.listType) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing ip or listType ('allow' or 'block')" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
           }
 
-          if (path.startsWith("/tunnels/") && method === "DELETE") {
-            const id = path.split("/")[2];
-            return addCors(await tunnelHandler.handleDeleteTunnel(id, req));
+          await securityService.addIpToTunnelSecurity(tunnelId, body.ip, body.listType, authContext.user?.id);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP ${body.ip} added to ${body.listType} list` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // POST /security/ip/:tunnelId/remove - Remove IP from lists
+        if (path.match(/^\/security\/ip\/[^\/]+\/remove$/) && method === "POST") {
+          const tunnelId = path.split("/")[3];
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
           }
 
-          if (path === "/agents" && method === "GET") {
-            return await agentHandler.handleListAgents();
+          const body = await req.json() as { ip: string };
+          if (!body.ip) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing ip" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
           }
 
-          // Domain routes
-          if ((path === "/domains" || path === "/domains/") && method === "POST") {
-            return await domainHandler.handleRegisterDomain(req);
+          await securityService.removeIpFromTunnelSecurity(tunnelId, body.ip, authContext.user?.id);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: `IP ${body.ip} removed from security lists` }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get connection logs for a tunnel
+        if (path.startsWith("/security/logs/tunnel/") && method === "GET") {
+          const tunnelId = path.split("/")[4];
+          if (!tunnelId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing tunnel ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const urlParams = new URL(req.url).searchParams;
+          const limit = parseInt(urlParams.get("limit") || "100");
+          const offset = parseInt(urlParams.get("offset") || "0");
+          const logs = await securityService.getConnectionLogs(tunnelId, limit, offset);
+          return addCors(new Response(
+            JSON.stringify({ success: true, tunnelId, logs }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Get bandwidth usage for an organization
+        if (path.startsWith("/security/bandwidth/") && method === "GET") {
+          const organizationId = path.split("/")[3];
+          if (!organizationId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Missing organization ID" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const planTier = await getPlanTierForOrg(organizationId);
+          const bandwidth = securityService.checkMonthlyBandwidth(organizationId, planTier);
+          return addCors(new Response(
+            JSON.stringify({ success: true, organizationId, ...bandwidth }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Enhanced resource routes
+        if (path === "/tunnels/enhanced" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleEnhancedTunnels(req, authContext));
+        }
+
+        if (path === "/agents/enhanced" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleEnhancedAgents(req, authContext));
+        }
+
+        if (path === "/domains/enhanced" && method === "GET") {
+          const authContext = await authenticateRequest(req);
+          if (!authContext) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          return addCors(await statsHandler.handleEnhancedDomains(req, authContext));
+        }
+
+        // ============ Tunnel Domain Routing ============
+        // Check if this is a tunnel domain request (extract subdomain or custom domain)
+        // MUST be before auth check to allow public tunnel access
+        const baseDomain = config.baseDomain; // e.g., "tunnel.koompi.cloud"
+
+        // First, check if this is a registered custom domain
+        let tunnelDomain: string | null = null;
+        let isCustomDomainRequest = false;
+
+        // Check for custom domain (not a subdomain of baseDomain and not the baseDomain itself)
+        if (!hostname.endsWith(baseDomain) && hostname !== baseDomain && hostname !== 'localhost') {
+          // This might be a custom domain - check if it's registered
+          const { getCustomDomainByName } = await import("./utils/database");
+          const customDomain = await getCustomDomainByName(hostname);
+
+          if (customDomain && customDomain.active) {
+            // This is a valid custom domain - use the full hostname as the tunnel domain
+            tunnelDomain = hostname;
+            isCustomDomainRequest = true;
+          }
+        } else if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
+          // Extract subdomain (e.g., "demo" from "demo.tunnel.koompi.cloud")
+          tunnelDomain = hostname.replace(`.${baseDomain}`, '');
+        }
+
+        if (tunnelDomain) {
+          const subdomain = tunnelDomain; // For backward compatibility with existing code
+
+          // Check if agent is on this server or needs cross-server routing
+          const routeResult = await crossServerService.findServerForDomain(subdomain);
+
+          // If agent is on another server, proxy the request
+          if (!routeResult.isLocal && routeResult.targetServer) {
+            return crossServerService.forwardRequest(
+              routeResult.targetServer,
+              req,
+              url.pathname + url.search
+            );
           }
 
-          if (path === "/domains" && method === "GET") {
-            return await domainHandler.handleListDomains();
+          // Import agentGroupService for load-balanced agent selection
+          const agentGroupService = await import("./services/agentGroupService");
+
+          // Check if this domain has a multi-agent group (load-balanced)
+          const isGroupDomain = await agentGroupService.isGroupedDomain(subdomain);
+
+          // Look up agent - use load balancer for groups, direct lookup for single agents
+          let agent;
+          if (isGroupDomain) {
+            // Use load-balanced selection (round-robin, least-connections, etc.)
+            agent = await agentGroupService.selectAgent(subdomain);
+          } else {
+            // Single agent mode - direct lookup
+            agent = await agentService.getAgentByDomainAsync(subdomain);
           }
 
-          // Check CNAME verification status - must be BEFORE generic /domains/:domain GET
-          if (path.startsWith("/domains/") && path.endsWith("/verify-status") && method === "GET") {
-            const domain = path.split("/")[2];
-            return await domainHandler.handleCheckCnameStatus(decodeURIComponent(domain));
-          }
-
-          // Verify CNAME and issue certificate
-          if (path.startsWith("/domains/") && path.endsWith("/verify") && method === "POST") {
-            const domain = path.split("/")[2];
-            return await domainHandler.handleVerifyAndIssueCertificate(decodeURIComponent(domain));
-          }
-
-          if (path.startsWith("/domains/") && path.endsWith("/resync") && method === "POST") {
-            const domain = path.split("/")[2];
-            return await domainHandler.handleResyncDomain(decodeURIComponent(domain));
-          }
-
-          if (path.startsWith("/domains/") && path.endsWith("/transfer") && method === "POST") {
-            const domain = path.split("/")[2];
-            return await domainHandler.handleTransferDomain(decodeURIComponent(domain), req);
-          }
-
-          if (path.startsWith("/domains/") && path.endsWith("/backup") && method === "POST") {
-            const domain = path.split("/")[2];
-            return await domainHandler.handleBackupDomain(decodeURIComponent(domain));
-          }
-
-          if (path.startsWith("/domains/") && path.includes("/backups/") && method === "POST") {
-            const parts = path.split("/");
-            const domain = parts[2];
-            const backupId = parts[4];
-            return await domainHandler.handleRestoreDomain(decodeURIComponent(domain), backupId);
-          }
-
-          if (path.startsWith("/domains/") && path.includes("/backup") && method === "GET") {
-            const domain = path.split("/")[2];
-            return await domainHandler.handleListBackups(decodeURIComponent(domain));
-          }
-
-          // Generic domain GET/DELETE - must be AFTER specific routes
-          if (path.startsWith("/domains/") && method === "GET") {
-            const domain = path.split("/")[2];
-            return await domainHandler.handleGetDomain(decodeURIComponent(domain));
-          }
-
-          if (path.startsWith("/domains/") && method === "DELETE") {
-            const domain = path.split("/")[2];
-            return await domainHandler.handleDeleteDomain(decodeURIComponent(domain));
-          }
-
-          // ============ Certificate Sync API (for multi-server cert distribution) ============
-
-          // Download certificate from MongoDB (VPS servers call this)
-          if (path.startsWith("/certificates/download/") && method === "GET") {
-            const domain = path.split("/")[3];
-            if (!domain) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, error: "Domain is required" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-
+          if (!agent || !agent.active) {
+            // Serve maintenance HTML page instead of JSON error
+            const maintenanceHtmlPath = import.meta.dir + "/../index.html";
             try {
-              const cert = await certSyncService.downloadCertificateFromMongoDB(decodeURIComponent(domain));
-              if (!cert) {
-                return addCors(new Response(
-                  JSON.stringify({ success: false, error: "Certificate not found" }),
-                  { status: 404, headers: { "Content-Type": "application/json" } }
-                ));
-              }
-
+              const htmlContent = await Bun.file(maintenanceHtmlPath).text();
+              return addCors(new Response(htmlContent, {
+                status: 503,
+                headers: { "Content-Type": "text/html; charset=utf-8" }
+              }));
+            } catch {
+              // Fallback if index.html is not found
               return addCors(new Response(
                 JSON.stringify({
-                  success: true,
-                  domain: cert.domain,
-                  cert: cert.cert,
-                  chain: cert.chain,
-                  fullchain: cert.fullchain,
-                  privkey: cert.privkey,
-                  expiry: cert.expiry,
-                  version: cert.version,
-                  uploadedAt: cert.uploadedAt
+                  success: false,
+                  message: `No active agent found for domain: ${subdomain}. Please ensure the agent is running: jrok --port <port> --domain ${subdomain}`,
                 }),
-                { status: 200, headers: { "Content-Type": "application/json" } }
-              ));
-            } catch (error) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, error: String(error) }),
-                { status: 500, headers: { "Content-Type": "application/json" } }
+                { status: 503, headers: { "Content-Type": "application/json" } }
               ));
             }
           }
 
-          // List all certificates
-          if (path === "/certificates/list" && method === "GET") {
-            try {
-              const certs = await certSyncService.listCertificates();
+          // Get agent's WebSocket (local connections only)
+          const agentWs = agentService.getAgentSocket(agent.id);
+          if (!agentWs || agentWs.readyState !== 1) {  // 1 = WebSocket.OPEN
+            // For group mode, try to get another agent if this one is disconnected
+            if (isGroupDomain) {
+              // Mark this agent as unhealthy
+              await agentGroupService.updateMemberHealth(agent.id, false);
+              // Try to get another agent
+              const fallbackAgent = await agentGroupService.selectAgent(subdomain);
+              if (fallbackAgent && fallbackAgent.id !== agent.id) {
+                const fallbackWs = agentService.getAgentSocket(fallbackAgent.id);
+                if (fallbackWs && fallbackWs.readyState === 1) {
+                  // Use fallback agent
+                  agent = fallbackAgent;
+                }
+              }
+            }
+
+            // Re-check after potential fallback
+            const finalWs = agentService.getAgentSocket(agent.id);
+            if (!finalWs || finalWs.readyState !== 1) {
               return addCors(new Response(
-                JSON.stringify({ success: true, certificates: certs }),
-                { status: 200, headers: { "Content-Type": "application/json" } }
-              ));
-            } catch (error) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, error: String(error) }),
-                { status: 500, headers: { "Content-Type": "application/json" } }
+                JSON.stringify({
+                  success: false,
+                  message: `Agent for ${subdomain} is not connected (readyState: ${finalWs?.readyState || 'null'}). ${isGroupDomain ? 'All agents in the group are unavailable.' : 'Attempting reconnection...'}`,
+                }),
+                { status: 503, headers: { "Content-Type": "application/json" } }
               ));
             }
           }
 
-          // Get certificate status
-          if (path.startsWith("/certificates/status/") && method === "GET") {
-            const domain = path.split("/")[3];
-            if (!domain) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, error: "Domain is required" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
+          // Get the final WebSocket reference
+          const finalAgentWs = agentService.getAgentSocket(agent.id)!;
 
-            try {
-              const status = await certSyncService.getCertificateStatus(decodeURIComponent(domain));
+          // Use cached tunnelId from agent (set when agent connects)
+          // This avoids MongoDB query on EVERY request - massive performance improvement!
+          let tunnelId = agent.tunnelId;
+
+          // Fallback to DB lookup only if not cached (rare)
+          if (!tunnelId) {
+            const { getTunnelByDomain } = await import("./utils/database");
+            const tunnel = await getTunnelByDomain(subdomain);
+            tunnelId = tunnel?.id;
+          }
+
+          // ============ Security Check for HTTP Requests ============
+          const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+            req.headers.get("x-real-ip") ||
+            "unknown";
+
+          // Get User-Agent for layered client identification (differentiates devices on same IP)
+          const userAgent = req.headers.get("user-agent") || undefined;
+
+          // Get plan tier for rate limit calculation (defaults to 'free')
+          const planTier = agent.organizationId ? await getPlanTierForOrg(agent.organizationId) : 'free';
+
+          // Check security limits (rate limits) with layered client identification
+          // This uses Token Bucket algorithm to allow burst while preventing abuse
+          const securityCheck = await securityService.checkHttpRequest(
+            tunnelId || subdomain,
+            agent.organizationId,
+            clientIp,
+            planTier,
+            {
+              userAgent,
+              apiKeyId: agent.apiKeyId,
+            }
+          );
+
+          if (!securityCheck.allowed) {
+            const headers: Record<string, string> = {
+              "Content-Type": "application/json",
+            };
+            if (securityCheck.retryAfter) {
+              headers["Retry-After"] = securityCheck.retryAfter.toString();
+            }
+            return addCors(new Response(
+              JSON.stringify({
+                success: false,
+                message: securityCheck.reason || "Rate limit exceeded",
+              }),
+              { status: 429, headers }
+            ));
+          }
+
+          // ============ Bandwidth Limit Check ============
+          // Block requests if organization has exceeded monthly bandwidth
+          if (agent.organizationId) {
+            const bandwidthCheck = securityService.checkMonthlyBandwidth(agent.organizationId, planTier);
+            if (!bandwidthCheck.allowed) {
+              console.warn(`🚫 Bandwidth limit exceeded for org ${agent.organizationId}: ${(bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2)}GB / ${(bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2)}GB`);
               return addCors(new Response(
-                JSON.stringify({ success: true, ...status }),
-                { status: 200, headers: { "Content-Type": "application/json" } }
-              ));
-            } catch (error) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, error: String(error) }),
-                { status: 500, headers: { "Content-Type": "application/json" } }
+                JSON.stringify({
+                  success: false,
+                  message: "Monthly bandwidth limit exceeded. Please upgrade your plan.",
+                  usedGb: (bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2),
+                  limitGb: (bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2),
+                  percentUsed: bandwidthCheck.percentUsed.toFixed(1),
+                }),
+                { status: 402, headers: { "Content-Type": "application/json" } }
               ));
             }
           }
 
-          // Check sync queue (for VPS servers to see pending syncs)
-          if (path === "/certificates/sync-queue" && method === "GET") {
-            try {
-              const { getClient } = await import("./utils/mongodb");
-              const queue = getClient()?.db("jrok").collection("cert_sync_queue");
-              const pending = await queue?.find({ processed: false }).toArray() || [];
+          // Track HTTP connection
+          securityService.trackHttpConnection(tunnelId || subdomain, true);
 
-              return addCors(new Response(
-                JSON.stringify({ success: true, pending }),
-                { status: 200, headers: { "Content-Type": "application/json" } }
-              ));
-            } catch (error) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, error: String(error) }),
-                { status: 500, headers: { "Content-Type": "application/json" } }
-              ));
+          // Check if this is a WebSocket upgrade request
+          if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+            // Handle WebSocket tunneling
+            const response = await handleWebSocketTunnel(req, server, finalAgentWs, agent, subdomain);
+            if (response) {
+              securityService.trackHttpConnection(tunnelId || subdomain, false);
+              // Decrement connection count for load balancing
+              if (isGroupDomain) {
+                await agentGroupService.decrementMemberConnections(agent.id);
+              }
+              return response;
             }
+            return undefined; // Handled by upgrade
           }
 
-          // Mark sync as processed (VPS server confirms it pulled the cert)
-          if (path.startsWith("/certificates/sync-queue/") && method === "POST") {
-            const syncId = path.split("/")[3];
-            if (!syncId) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, error: "Sync ID is required" }),
-                { status: 400, headers: { "Content-Type": "application/json" } }
-              ));
-            }
+          // Forward regular HTTP request to agent via WebSocket (with bandwidth tracking)
+          const response = await forwardRequestToAgent(req, finalAgentWs, agent, tunnelId, clientIp);
 
-            try {
-              const { getClient } = await import("./utils/mongodb");
-              const queue = getClient()?.db("jrok").collection("cert_sync_queue");
-              await queue?.updateOne(
-                { _id: decodeURIComponent(syncId) as any },
-                { $set: { processed: true, processedAt: new Date() } }
-              );
+          // Track connection close and bandwidth
+          securityService.trackHttpConnection(tunnelId || subdomain, false);
 
-              return addCors(new Response(
-                JSON.stringify({ success: true, message: "Sync marked as processed" }),
-                { status: 200, headers: { "Content-Type": "application/json" } }
-              ));
-            } catch (error) {
-              return addCors(new Response(
-                JSON.stringify({ success: false, error: String(error) }),
-                { status: 500, headers: { "Content-Type": "application/json" } }
-              ));
-            }
+          // Decrement connection count for load balancing
+          if (isGroupDomain) {
+            await agentGroupService.decrementMemberConnections(agent.id);
           }
 
-          // 404
+          // Track bandwidth usage
+          const responseSize = parseInt(response.headers.get("content-length") || "0");
+          securityService.trackMonthlyBandwidth(agent.organizationId || subdomain, responseSize);
+
+          return response;
+        }
+
+        // ============ Legacy API Routes (require auth) ============
+
+        // Auth check for legacy routes
+        const authContext = await authenticateRequest(req);
+        if (!authContext) {
           return addCors(new Response(
             JSON.stringify({
               success: false,
-              message: "Not Found",
-              path: path,
+              message: "Unauthorized",
             }),
-            { status: 404, headers: { "Content-Type": "application/json" } }
+            { status: 401, headers: { "Content-Type": "application/json" } }
           ));
-        },
-      });
+        }
+
+        // Tunnel Routes (with auth)
+        if (path === "/tunnels" && method === "POST") {
+          return addCors(await tunnelHandler.handleCreateTunnel(req));
+        }
+
+        if (path === "/tunnels" && method === "GET") {
+          return addCors(await tunnelHandler.handleListTunnels(req));
+        }
+
+        if (path.startsWith("/tunnels/") && method === "GET") {
+          const id = path.split("/")[2];
+          return addCors(await tunnelHandler.handleGetTunnel(id, req));
+        }
+
+        if (path.startsWith("/tunnels/") && method === "DELETE") {
+          const id = path.split("/")[2];
+          return addCors(await tunnelHandler.handleDeleteTunnel(id, req));
+        }
+
+        if (path === "/agents" && method === "GET") {
+          return await agentHandler.handleListAgents();
+        }
+
+        // Domain routes
+        if ((path === "/domains" || path === "/domains/") && method === "POST") {
+          return await domainHandler.handleRegisterDomain(req);
+        }
+
+        if (path === "/domains" && method === "GET") {
+          return await domainHandler.handleListDomains();
+        }
+
+        // Check CNAME verification status - must be BEFORE generic /domains/:domain GET
+        if (path.startsWith("/domains/") && path.endsWith("/verify-status") && method === "GET") {
+          const domain = path.split("/")[2];
+          return await domainHandler.handleCheckCnameStatus(decodeURIComponent(domain));
+        }
+
+        // Verify CNAME and issue certificate
+        if (path.startsWith("/domains/") && path.endsWith("/verify") && method === "POST") {
+          const domain = path.split("/")[2];
+          return await domainHandler.handleVerifyAndIssueCertificate(decodeURIComponent(domain));
+        }
+
+        if (path.startsWith("/domains/") && path.endsWith("/resync") && method === "POST") {
+          const domain = path.split("/")[2];
+          return await domainHandler.handleResyncDomain(decodeURIComponent(domain));
+        }
+
+        if (path.startsWith("/domains/") && path.endsWith("/transfer") && method === "POST") {
+          const domain = path.split("/")[2];
+          return await domainHandler.handleTransferDomain(decodeURIComponent(domain), req);
+        }
+
+        if (path.startsWith("/domains/") && path.endsWith("/backup") && method === "POST") {
+          const domain = path.split("/")[2];
+          return await domainHandler.handleBackupDomain(decodeURIComponent(domain));
+        }
+
+        if (path.startsWith("/domains/") && path.includes("/backups/") && method === "POST") {
+          const parts = path.split("/");
+          const domain = parts[2];
+          const backupId = parts[4];
+          return await domainHandler.handleRestoreDomain(decodeURIComponent(domain), backupId);
+        }
+
+        if (path.startsWith("/domains/") && path.includes("/backup") && method === "GET") {
+          const domain = path.split("/")[2];
+          return await domainHandler.handleListBackups(decodeURIComponent(domain));
+        }
+
+        // Generic domain GET/DELETE - must be AFTER specific routes
+        if (path.startsWith("/domains/") && method === "GET") {
+          const domain = path.split("/")[2];
+          return await domainHandler.handleGetDomain(decodeURIComponent(domain));
+        }
+
+        if (path.startsWith("/domains/") && method === "DELETE") {
+          const domain = path.split("/")[2];
+          return await domainHandler.handleDeleteDomain(decodeURIComponent(domain));
+        }
+
+        // ============ Certificate Sync API (for multi-server cert distribution) ============
+
+        // Download certificate from MongoDB (VPS servers call this)
+        if (path.startsWith("/certificates/download/") && method === "GET") {
+          const domain = path.split("/")[3];
+          if (!domain) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, error: "Domain is required" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+
+          try {
+            const cert = await certSyncService.downloadCertificateFromMongoDB(decodeURIComponent(domain));
+            if (!cert) {
+              return addCors(new Response(
+                JSON.stringify({ success: false, error: "Certificate not found" }),
+                { status: 404, headers: { "Content-Type": "application/json" } }
+              ));
+            }
+
+            return addCors(new Response(
+              JSON.stringify({
+                success: true,
+                domain: cert.domain,
+                cert: cert.cert,
+                chain: cert.chain,
+                fullchain: cert.fullchain,
+                privkey: cert.privkey,
+                expiry: cert.expiry,
+                version: cert.version,
+                uploadedAt: cert.uploadedAt
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } }
+            ));
+          } catch (error) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, error: String(error) }),
+              { status: 500, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+        }
+
+        // List all certificates
+        if (path === "/certificates/list" && method === "GET") {
+          try {
+            const certs = await certSyncService.listCertificates();
+            return addCors(new Response(
+              JSON.stringify({ success: true, certificates: certs }),
+              { status: 200, headers: { "Content-Type": "application/json" } }
+            ));
+          } catch (error) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, error: String(error) }),
+              { status: 500, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+        }
+
+        // Get certificate status
+        if (path.startsWith("/certificates/status/") && method === "GET") {
+          const domain = path.split("/")[3];
+          if (!domain) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, error: "Domain is required" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+
+          try {
+            const status = await certSyncService.getCertificateStatus(decodeURIComponent(domain));
+            return addCors(new Response(
+              JSON.stringify({ success: true, ...status }),
+              { status: 200, headers: { "Content-Type": "application/json" } }
+            ));
+          } catch (error) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, error: String(error) }),
+              { status: 500, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+        }
+
+        // Check sync queue (for VPS servers to see pending syncs)
+        if (path === "/certificates/sync-queue" && method === "GET") {
+          try {
+            const { getClient } = await import("./utils/mongodb");
+            const queue = getClient()?.db("jrok").collection("cert_sync_queue");
+            const pending = await queue?.find({ processed: false }).toArray() || [];
+
+            return addCors(new Response(
+              JSON.stringify({ success: true, pending }),
+              { status: 200, headers: { "Content-Type": "application/json" } }
+            ));
+          } catch (error) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, error: String(error) }),
+              { status: 500, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+        }
+
+        // Mark sync as processed (VPS server confirms it pulled the cert)
+        if (path.startsWith("/certificates/sync-queue/") && method === "POST") {
+          const syncId = path.split("/")[3];
+          if (!syncId) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, error: "Sync ID is required" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+
+          try {
+            const { getClient } = await import("./utils/mongodb");
+            const queue = getClient()?.db("jrok").collection("cert_sync_queue");
+            await queue?.updateOne(
+              { _id: decodeURIComponent(syncId) as any },
+              { $set: { processed: true, processedAt: new Date() } }
+            );
+
+            return addCors(new Response(
+              JSON.stringify({ success: true, message: "Sync marked as processed" }),
+              { status: 200, headers: { "Content-Type": "application/json" } }
+            ));
+          } catch (error) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, error: String(error) }),
+              { status: 500, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+        }
+
+        // 404
+        return addCors(new Response(
+          JSON.stringify({
+            success: false,
+            message: "Not Found",
+            path: path,
+          }),
+          { status: 404, headers: { "Content-Type": "application/json" } }
+        ));
+      },
+    });
 
     console.log(`🚀 Server running at http://localhost:${server.port}`);
     console.log(`📝 Base domain: ${config.baseDomain}`);
