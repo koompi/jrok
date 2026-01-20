@@ -12,7 +12,8 @@ ENV VITE_API_URL=https://tunnel.koompi.cloud
 COPY package.json package-lock.json ./
 
 # Install project dependencies
-RUN npm install
+# Use npm ci for reproducible builds, then reinstall rollup to get correct platform binaries
+RUN npm ci --omit=optional && npm install rollup @rollup/rollup-linux-x64-musl --save-optional
 
 # Copy the rest of the project files to the container
 COPY . .
