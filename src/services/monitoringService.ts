@@ -108,18 +108,18 @@ let metricsInterval: Timer | null = null;
 export function canAcceptAgentConnection(clientIp: string): { allowed: boolean; reason?: string } {
   // Check per-server limit
   if (agentConnectionCount >= MAX_AGENT_CONNECTIONS_PER_SERVER) {
-    return { 
-      allowed: false, 
-      reason: `Server agent connection limit reached (${MAX_AGENT_CONNECTIONS_PER_SERVER})` 
+    return {
+      allowed: false,
+      reason: `Server agent connection limit reached (${MAX_AGENT_CONNECTIONS_PER_SERVER})`
     };
   }
 
   // Check per-IP limit
   const ipConnections = connectionsPerIp.get(clientIp) || 0;
   if (ipConnections >= MAX_CONNECTIONS_PER_IP) {
-    return { 
-      allowed: false, 
-      reason: `Per-IP connection limit reached (${MAX_CONNECTIONS_PER_IP})` 
+    return {
+      allowed: false,
+      reason: `Per-IP connection limit reached (${MAX_CONNECTIONS_PER_IP})`
     };
   }
 
@@ -132,18 +132,18 @@ export function canAcceptAgentConnection(clientIp: string): { allowed: boolean; 
 export function canAcceptClientConnection(clientIp: string): { allowed: boolean; reason?: string } {
   // Check per-server limit
   if (clientConnectionCount >= MAX_CLIENT_CONNECTIONS_PER_SERVER) {
-    return { 
-      allowed: false, 
-      reason: `Server client connection limit reached (${MAX_CLIENT_CONNECTIONS_PER_SERVER})` 
+    return {
+      allowed: false,
+      reason: `Server client connection limit reached (${MAX_CLIENT_CONNECTIONS_PER_SERVER})`
     };
   }
 
   // Check per-IP limit
   const ipConnections = connectionsPerIp.get(clientIp) || 0;
   if (ipConnections >= MAX_CONNECTIONS_PER_IP) {
-    return { 
-      allowed: false, 
-      reason: `Per-IP connection limit reached (${MAX_CONNECTIONS_PER_IP})` 
+    return {
+      allowed: false,
+      reason: `Per-IP connection limit reached (${MAX_CONNECTIONS_PER_IP})`
     };
   }
 
@@ -194,6 +194,27 @@ export function unregisterClientConnection(clientIp: string): void {
   }
 }
 
+/**
+ * Clear all connection tracking for a specific IP (admin use for stuck counters)
+ */
+export function clearConnectionsForIp(clientIp: string): { cleared: boolean; previousCount: number } {
+  const previousCount = connectionsPerIp.get(clientIp) || 0;
+  if (previousCount > 0) {
+    connectionsPerIp.delete(clientIp);
+    agentConnectionCount = Math.max(0, agentConnectionCount - previousCount);
+    addLog('info', 'connections', `Cleared stuck connection counter for IP ${clientIp}`, { previousCount });
+    return { cleared: true, previousCount };
+  }
+  return { cleared: false, previousCount: 0 };
+}
+
+/**
+ * Get all tracked IP connection counts (admin debugging)
+ */
+export function getConnectionsPerIpDetails(): Array<{ ip: string; count: number }> {
+  return Array.from(connectionsPerIp.entries()).map(([ip, count]) => ({ ip, count }));
+}
+
 // ============ Rate Limit Tracking ============
 
 /**
@@ -206,11 +227,11 @@ export function trackRateLimitHit(endpoint: string, blocked: boolean): void {
     blocked: 0,
     lastHit: 0,
   };
-  
+
   stats.hits++;
   if (blocked) stats.blocked++;
   stats.lastHit = Date.now();
-  
+
   rateLimitStats.set(endpoint, stats);
 }
 
@@ -231,7 +252,7 @@ export function trackAuthAttempt(success: boolean, identifier?: string): void {
     authMetrics.successCount++;
   } else {
     authMetrics.failureCount++;
-    
+
     if (identifier) {
       const existing = authMetrics.failedAttempts.get(identifier) || { count: 0, lastAttempt: 0 };
       existing.count++;
@@ -252,13 +273,13 @@ export function getAuthMetrics(): {
 } {
   const total = authMetrics.successCount + authMetrics.failureCount;
   const failureRate = total > 0 ? authMetrics.failureCount / total : 0;
-  
+
   // Get top 10 failed identifiers
   const failedArray = Array.from(authMetrics.failedAttempts.entries())
     .map(([identifier, data]) => ({ identifier, ...data }))
     .sort((a, b) => b.count - a.count)
     .slice(0, 10);
-  
+
   return {
     successCount: authMetrics.successCount,
     failureCount: authMetrics.failureCount,
@@ -274,7 +295,7 @@ export function getAuthMetrics(): {
  */
 export function trackCertRenewal(success: boolean, error?: string): void {
   certMetrics.renewalAttempts++;
-  
+
   if (success) {
     certMetrics.renewalSuccesses++;
     certMetrics.lastRenewal = Date.now();
@@ -299,7 +320,7 @@ export function getCertMetrics(): CertMetrics {
 export function collectSystemMetrics(): SystemMetricsSnapshot {
   const memUsage = process.memoryUsage();
   const cpuUsage = process.cpuUsage();
-  
+
   return {
     timestamp: Date.now(),
     memory: {
@@ -359,16 +380,16 @@ export function getSystemHealth(): {
   const freeMem = os.freemem();
   const usedMem = totalMem - freeMem;
   const memPercentage = (usedMem / totalMem) * 100;
-  
+
   // Determine health status
   let status: 'healthy' | 'degraded' | 'critical' = 'healthy';
-  
+
   if (memPercentage > 90 || agentConnectionCount > MAX_AGENT_CONNECTIONS_PER_SERVER * 0.9) {
     status = 'critical';
   } else if (memPercentage > 80 || agentConnectionCount > MAX_AGENT_CONNECTIONS_PER_SERVER * 0.7) {
     status = 'degraded';
   }
-  
+
   return {
     status,
     uptime: process.uptime(),
@@ -436,14 +457,14 @@ export function addLog(
     message,
     metadata,
   };
-  
+
   recentLogs.unshift(log);
-  
+
   // Trim to max size
   if (recentLogs.length > MAX_LOGS) {
     recentLogs.length = MAX_LOGS;
   }
-  
+
   // Also store critical logs in MongoDB
   if (level === 'error' || level === 'warn') {
     storeLogToDb(log).catch(console.error);
@@ -454,7 +475,7 @@ async function storeLogToDb(log: SystemLog): Promise<void> {
   try {
     const db = getClient()?.db("jrok");
     if (!db) return;
-    
+
     await db.collection("system_logs").insertOne({
       ...log,
       serverId: process.env.VPS_ID || "unknown",
@@ -474,15 +495,15 @@ export function getRecentLogs(
   category?: string
 ): SystemLog[] {
   let filtered = recentLogs;
-  
+
   if (level) {
     filtered = filtered.filter(l => l.level === level);
   }
-  
+
   if (category) {
     filtered = filtered.filter(l => l.category === category);
   }
-  
+
   return filtered.slice(0, count);
 }
 
@@ -549,9 +570,9 @@ export async function getSystemConfig(): Promise<SystemConfig> {
   try {
     const db = getClient()?.db("jrok");
     if (!db) throw new Error("Database not connected");
-    
+
     const config = await db.collection("system_config").findOne({ configId: "main" });
-    
+
     // Return defaults merged with stored config
     return {
       maxAgentConnections: config?.maxAgentConnections || MAX_AGENT_CONNECTIONS_PER_SERVER,
@@ -598,20 +619,20 @@ export async function updateSystemConfig(updates: Partial<SystemConfig>): Promis
   try {
     const db = getClient()?.db("jrok");
     if (!db) throw new Error("Database not connected");
-    
+
     await db.collection("system_config").updateOne(
       { configId: "main" },
-      { 
-        $set: { 
+      {
+        $set: {
           ...updates,
           updatedAt: new Date(),
-        } 
+        }
       },
       { upsert: true }
     );
-    
+
     addLog('info', 'config', 'System configuration updated', updates);
-    
+
     return getSystemConfig();
   } catch (error) {
     addLog('error', 'config', 'Failed to update system configuration', { error: String(error) });
@@ -631,26 +652,26 @@ export function initMonitoringService(
   // Store map references for size tracking
   pendingRequestsMapRef = pendingRequestsMap || null;
   orgPlanCacheMapRef = orgPlanCacheMap || null;
-  
+
   // Start metrics collection
   metricsInterval = setInterval(() => {
     const snapshot = collectSystemMetrics();
     metricsHistory.push(snapshot);
-    
+
     // Trim history
     while (metricsHistory.length > MAX_HISTORY_SIZE) {
       metricsHistory.shift();
     }
   }, METRICS_COLLECTION_INTERVAL);
-  
+
   // Create indexes for system_logs collection
   createMonitoringIndexes().catch(console.error);
-  
+
   addLog('info', 'monitoring', 'Monitoring service initialized', {
     maxAgentConnections: MAX_AGENT_CONNECTIONS_PER_SERVER,
     maxClientConnections: MAX_CLIENT_CONNECTIONS_PER_SERVER,
   });
-  
+
   console.log("✅ Monitoring service initialized");
 }
 
@@ -658,7 +679,7 @@ async function createMonitoringIndexes(): Promise<void> {
   try {
     const db = getClient()?.db("jrok");
     if (!db) return;
-    
+
     // System logs indexes
     await db.collection("system_logs").createIndex({ timestamp: -1 });
     await db.collection("system_logs").createIndex({ level: 1, timestamp: -1 });
@@ -667,7 +688,7 @@ async function createMonitoringIndexes(): Promise<void> {
       { createdAt: 1 },
       { expireAfterSeconds: METRICS_RETENTION_DAYS * 24 * 60 * 60 }
     );
-    
+
     console.log("✅ Monitoring indexes created");
   } catch (error) {
     console.error("Failed to create monitoring indexes:", error);
@@ -682,6 +703,6 @@ export function shutdownMonitoringService(): void {
     clearInterval(metricsInterval);
     metricsInterval = null;
   }
-  
+
   addLog('info', 'monitoring', 'Monitoring service shutdown');
 }
