@@ -95,6 +95,10 @@ export interface CustomDomain {
   cnameVerified?: boolean; // True if CNAME has been verified
   cnameVerifiedAt?: number; // When CNAME was verified
   organizationId?: string; // Owner organization
+  // TXT record verification (for apex domains)
+  verificationToken?: string; // Unique token for TXT record verification, e.g., "jrok-verify-abc123xyz"
+  txtVerified?: boolean; // True if TXT record has been verified
+  txtVerifiedAt?: number; // When TXT record was verified
 }
 
 export interface Tunnel {
@@ -231,9 +235,9 @@ export interface ApiKey {
   isActive: boolean;
 }
 
-export type ApiKeyPermission = 
-  | "tunnels:read" 
-  | "tunnels:write" 
+export type ApiKeyPermission =
+  | "tunnels:read"
+  | "tunnels:write"
   | "tunnels:delete"
   | "tunnel:create"
   | "domains:read"
@@ -377,20 +381,20 @@ export interface AuthContext {
 
 // ============ Activity & Stats Types ============
 
-export type ActivityCategory = 
-  | "tunnels" 
-  | "domains" 
-  | "api_keys" 
-  | "agents" 
-  | "organization" 
+export type ActivityCategory =
+  | "tunnels"
+  | "domains"
+  | "api_keys"
+  | "agents"
+  | "organization"
   | "auth"
   | "billing";
 
-export type ActivityAction = 
-  | "created" 
-  | "updated" 
-  | "deleted" 
-  | "connected" 
+export type ActivityAction =
+  | "created"
+  | "updated"
+  | "deleted"
+  | "connected"
   | "disconnected"
   | "renewed"
   | "expired"

@@ -1097,10 +1097,31 @@ async function registerCustomDomain(
 
     const data = await response.json();
     const domain = data.domain || data;
+    const cnameTarget = domain.cnameTarget || domain.targetSubdomain + '.tunnel.koompi.cloud';
+    const verificationToken = domain.verificationToken;
+
+    // Check if this is an apex domain (e.g., example.com vs www.example.com)
+    const parts = domainName.split('.');
+    const isApex = parts.length <= 2 || (parts.length === 3 && parts[1].length <= 3);
 
     console.log(`\n✅ Custom domain registered: ${domainName}\n`);
-    console.log(`📝 NEXT STEP: Add a CNAME record to your DNS:\n`);
-    console.log(`   ${domainName}  CNAME  ${domain.cnameTarget || domain.targetSubdomain + '.tunnel.koompi.cloud'}\n`);
+
+    if (isApex) {
+      console.log(`📝 APEX DOMAIN DETECTED - TXT record verification required\n`);
+      console.log(`   Add these DNS records:\n`);
+      console.log(`   1. TXT record (for verification):`);
+      console.log(`      ${domainName}  TXT  jrok-verify=${verificationToken}\n`);
+      console.log(`   2. A record (for traffic - get IP from your tunnel server):\n`);
+    } else {
+      console.log(`📝 NEXT STEP: Add one of these DNS records:\n`);
+      if (verificationToken) {
+        console.log(`   Option A - TXT record (recommended):`);
+        console.log(`      ${domainName}  TXT  jrok-verify=${verificationToken}\n`);
+      }
+      console.log(`   Option B - CNAME record:`);
+      console.log(`      ${domainName}  CNAME  ${cnameTarget}\n`);
+    }
+
     console.log(`After adding the DNS record, verify with:`);
     console.log(`   jrok domain status --name ${domainName}`);
     console.log(`   jrok domain verify --name ${domainName}`);
@@ -1126,19 +1147,42 @@ async function checkDomainStatus(serverUrl: string, authToken: string, domainNam
 
     const data = await response.json();
 
-    console.log(`\n📋 CNAME Status for ${domainName}:\n`);
-    console.log(`   Expected CNAME: ${data.cnameTarget}`);
-    console.log(`   Actual CNAME:   ${data.actualCname || '(none found)'}`);
-    console.log(`   Verified:       ${data.verified ? '✅ Yes' : '❌ No'}`);
+    console.log(`\n📋 Verification Status for ${domainName}:\n`);
 
-    if (!data.verified) {
-      console.log(`\n💡 Add this CNAME record to your DNS:`);
-      console.log(`   ${domainName}  CNAME  ${data.cnameTarget}\n`);
+    // TXT Status
+    if (data.txtVerified !== undefined || data.verificationToken) {
+      console.log(`   TXT Record:`);
+      console.log(`     Expected: jrok-verify=${data.verificationToken || '(token)'}`);
+      console.log(`     Verified: ${data.txtVerified ? '✅ Yes' : '❌ No'}`);
+    }
+
+    // CNAME Status
+    console.log(`   CNAME Record:`);
+    console.log(`     Expected: ${data.cnameTarget}`);
+    console.log(`     Actual:   ${data.actualCname || '(none found)'}`);
+    console.log(`     Verified: ${data.cnameVerified || data.verified ? '✅ Yes' : '❌ No'}`);
+
+    const isVerified = data.txtVerified || data.cnameVerified || data.verified;
+
+    if (!isVerified) {
+      // Check if apex domain
+      const parts = domainName.split('.');
+      const isApex = parts.length <= 2 || (parts.length === 3 && parts[1].length <= 3);
+
+      console.log(`\n💡 Add one of these DNS records:`);
+      if (data.verificationToken) {
+        console.log(`\n   TXT record${isApex ? ' (required for apex domains)' : ''}:`);
+        console.log(`      ${domainName}  TXT  jrok-verify=${data.verificationToken}`);
+      }
+      if (!isApex) {
+        console.log(`\n   CNAME record (subdomains only):`);
+        console.log(`      ${domainName}  CNAME  ${data.cnameTarget}`);
+      }
       if (data.error) {
-        console.log(`   Error: ${data.error}`);
+        console.log(`\n   Error: ${data.error}`);
       }
     } else {
-      console.log(`\n🎉 CNAME is correctly configured!`);
+      console.log(`\n🎉 Domain verification passed!`);
       console.log(`   Run: jrok domain verify --name ${domainName}`);
     }
   } catch (error) {
@@ -1149,7 +1193,7 @@ async function checkDomainStatus(serverUrl: string, authToken: string, domainNam
 
 async function verifyCustomDomain(serverUrl: string, authToken: string, domainName: string): Promise<void> {
   try {
-    console.log(`\n🔍 Verifying CNAME for ${domainName}...`);
+    console.log(`\n🔍 Verifying domain ${domainName}...`);
 
     const response = await fetch(`${serverUrl}/domains/${encodeURIComponent(domainName)}/verify`, {
       method: 'POST',

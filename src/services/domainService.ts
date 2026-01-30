@@ -52,6 +52,82 @@ export async function verifyCname(domain: string, expectedTarget: string): Promi
   }
 }
 
+/**
+ * Verify that a domain's TXT record contains the expected verification token
+ * Used for apex/root domain verification where CNAME is not allowed
+ * Uses Google's DNS (8.8.8.8) for reliable resolution
+ */
+export async function verifyTxt(
+  domain: string,
+  expectedToken: string
+): Promise<{ verified: boolean; foundToken?: string; error?: string }> {
+  try {
+    const resolver = new dns.Resolver();
+    resolver.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
+
+    const records = await resolver.resolveTxt(domain);
+    const expectedValue = `jrok-verify=${expectedToken}`;
+
+    for (const record of records) {
+      // TXT records can be split into chunks, join them
+      const txt = record.join('');
+      if (txt === expectedValue) {
+        console.log(`[DNS] TXT record verified for ${domain}: ${expectedValue}`);
+        return { verified: true, foundToken: expectedToken };
+      }
+    }
+
+    // Check if any jrok-verify token exists (might be from different org)
+    for (const record of records) {
+      const txt = record.join('');
+      if (txt.startsWith('jrok-verify=')) {
+        const foundToken = txt.replace('jrok-verify=', '');
+        return {
+          verified: false,
+          foundToken,
+          error: `TXT record exists but token mismatch. Found: ${foundToken.substring(0, 8)}...`
+        };
+      }
+    }
+
+    return { verified: false, error: `No jrok-verify TXT record found for ${domain}` };
+  } catch (error: any) {
+    if (error.code === 'ENODATA' || error.code === 'ENOTFOUND') {
+      return { verified: false, error: `No TXT records found for ${domain}` };
+    }
+    return { verified: false, error: `TXT lookup failed: ${error.message}` };
+  }
+}
+
+/**
+ * Check if a domain is an apex/root domain (e.g., example.com)
+ * vs a subdomain (e.g., www.example.com, app.example.com)
+ */
+export function isApexDomain(domain: string): boolean {
+  const parts = domain.split('.');
+  // Common country-code TLDs with 2-part second-level domains
+  const ccTlds = ['co.uk', 'com.au', 'co.nz', 'co.jp', 'com.br', 'co.kr', 'com.cn', 'co.in'];
+
+  // Check for country-code TLD patterns (e.g., example.co.uk)
+  if (parts.length === 3) {
+    const lastTwo = `${parts[1]}.${parts[2]}`;
+    if (ccTlds.includes(lastTwo)) {
+      return true; // example.co.uk is an apex domain
+    }
+  }
+
+  // Standard apex: exactly 2 parts (e.g., example.com)
+  return parts.length === 2;
+}
+
+/**
+ * Generate a unique verification token for TXT record verification
+ * Format: random alphanumeric string (URL-safe)
+ */
+export function generateVerificationToken(): string {
+  return generateId() + generateShortSuffix();
+}
+
 
 /**
  * Generate a unique subdomain for a custom domain
@@ -117,6 +193,9 @@ export async function registerCustomDomain(
   const targetSubdomain = await generateUniqueSubdomain(baseSubdomain);
   const cnameTarget = `${targetSubdomain}.${BASE_DOMAIN}`;
 
+  // Generate unique verification token for TXT record verification
+  const verificationToken = generateVerificationToken();
+
   const domain: CustomDomain = {
     id: generateId(),
     domain: request.domain,
@@ -126,10 +205,13 @@ export async function registerCustomDomain(
     createdAt: Date.now(),
     active: false, // Will be true once cert is issued
     synced: false,
-    // New verification fields
+    // CNAME verification fields
     targetSubdomain,
     cnameTarget,
     cnameVerified: false,
+    // TXT verification fields (for apex domains)
+    verificationToken,
+    txtVerified: false,
     organizationId: request.organizationId,
   };
 
@@ -142,7 +224,8 @@ export async function registerCustomDomain(
 }
 
 /**
- * Verify CNAME and issue certificate if verification passes
+ * Verify domain ownership using TXT record (for apex) or CNAME (for subdomains)
+ * and issue certificate if verification passes
  */
 export async function verifyAndIssueCertificate(domainName: string): Promise<CustomDomain> {
   const domain = await db.getCustomDomainByName(domainName);
@@ -158,19 +241,70 @@ export async function verifyAndIssueCertificate(domainName: string): Promise<Cus
     throw new Error(`Domain ${domainName} has no CNAME target configured`);
   }
 
-  // Verify CNAME
-  const verification = await verifyCname(domain.domain, domain.cnameTarget);
-  if (!verification.verified) {
-    throw new Error(`CNAME verification failed: ${verification.error}. Please add a CNAME record: ${domain.domain} -> ${domain.cnameTarget}`);
+  // Multi-method verification strategy:
+  // 1. For apex domains: TXT record is required (CNAME not possible per RFC)
+  // 2. For subdomains: Try TXT first, then fall back to CNAME
+  const isApex = isApexDomain(domain.domain);
+  let verified = false;
+  let verificationMethod = '';
+  let verificationError = '';
+
+  // Try TXT verification first (works for both apex and subdomains)
+  if (domain.verificationToken) {
+    const txtResult = await verifyTxt(domain.domain, domain.verificationToken);
+    if (txtResult.verified) {
+      verified = true;
+      verificationMethod = 'TXT';
+      console.log(`✅ TXT record verified for ${domain.domain}`);
+
+      // Update TXT verification status
+      await db.updateCustomDomainByName(domainName, {
+        txtVerified: true,
+        txtVerifiedAt: Date.now(),
+      });
+    } else {
+      verificationError = txtResult.error || 'TXT verification failed';
+    }
   }
 
-  console.log(`✅ CNAME verified for ${domain.domain} -> ${verification.actualCname}`);
+  // For subdomains, try CNAME if TXT failed
+  if (!verified && !isApex) {
+    const cnameResult = await verifyCname(domain.domain, domain.cnameTarget);
+    if (cnameResult.verified) {
+      verified = true;
+      verificationMethod = 'CNAME';
+      console.log(`✅ CNAME record verified for ${domain.domain} -> ${cnameResult.actualCname}`);
+    } else {
+      // Combine errors for better feedback
+      verificationError = `TXT: ${verificationError}. CNAME: ${cnameResult.error}`;
+    }
+  }
 
-  // Update verification status
-  await db.updateCustomDomainByName(domainName, {
-    cnameVerified: true,
-    cnameVerifiedAt: Date.now(),
-  });
+  if (!verified) {
+    if (isApex) {
+      throw new Error(
+        `Apex domain verification failed: ${verificationError}. ` +
+        `Please add a TXT record: ${domain.domain} -> jrok-verify=${domain.verificationToken}`
+      );
+    } else {
+      throw new Error(
+        `Domain verification failed: ${verificationError}. ` +
+        `Please add either:\n` +
+        `  - TXT record: ${domain.domain} -> jrok-verify=${domain.verificationToken}\n` +
+        `  - CNAME record: ${domain.domain} -> ${domain.cnameTarget}`
+      );
+    }
+  }
+
+  console.log(`✅ Domain ${domain.domain} verified via ${verificationMethod}`);
+
+  // Update CNAME verification status if verified via CNAME
+  if (verificationMethod === 'CNAME') {
+    await db.updateCustomDomainByName(domainName, {
+      cnameVerified: true,
+      cnameVerifiedAt: Date.now(),
+    });
+  }
 
   try {
     // Issue wildcard certificate for this domain
@@ -236,14 +370,23 @@ export async function verifyAndIssueCertificate(domainName: string): Promise<Cus
 }
 
 /**
- * Check CNAME verification status without issuing certificate
+ * Check domain verification status (both TXT and CNAME methods)
+ * Returns status without issuing certificate - useful for polling/UI feedback
  */
 export async function checkCnameStatus(domainName: string): Promise<{
   domain: string;
   cnameTarget: string;
   verified: boolean;
+  verificationMethod?: 'TXT' | 'CNAME' | null;
+  isApex: boolean;
+  // TXT verification details
+  txtVerified: boolean;
+  verificationToken?: string;
+  txtError?: string;
+  // CNAME verification details
+  cnameVerified: boolean;
   actualCname?: string;
-  error?: string;
+  cnameError?: string;
 }> {
   const domain = await db.getCustomDomainByName(domainName);
   if (!domain) {
@@ -254,14 +397,44 @@ export async function checkCnameStatus(domainName: string): Promise<{
     throw new Error(`Domain ${domainName} has no CNAME target configured`);
   }
 
-  const verification = await verifyCname(domain.domain, domain.cnameTarget);
+  const isApex = isApexDomain(domain.domain);
+  let txtVerified = false;
+  let txtError: string | undefined;
+  let cnameVerified = false;
+  let actualCname: string | undefined;
+  let cnameError: string | undefined;
+
+  // Check TXT record
+  if (domain.verificationToken) {
+    const txtResult = await verifyTxt(domain.domain, domain.verificationToken);
+    txtVerified = txtResult.verified;
+    txtError = txtResult.error;
+  }
+
+  // Check CNAME record (only for subdomains)
+  if (!isApex) {
+    const cnameResult = await verifyCname(domain.domain, domain.cnameTarget);
+    cnameVerified = cnameResult.verified;
+    actualCname = cnameResult.actualCname;
+    cnameError = cnameResult.error;
+  }
+
+  // Overall verification status
+  const verified = txtVerified || cnameVerified;
+  const verificationMethod = txtVerified ? 'TXT' : cnameVerified ? 'CNAME' : null;
 
   return {
     domain: domain.domain,
     cnameTarget: domain.cnameTarget,
-    verified: verification.verified,
-    actualCname: verification.actualCname,
-    error: verification.error,
+    verified,
+    verificationMethod,
+    isApex,
+    txtVerified,
+    verificationToken: domain.verificationToken,
+    txtError,
+    cnameVerified,
+    actualCname,
+    cnameError,
   };
 }
 
