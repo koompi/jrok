@@ -745,9 +745,18 @@ async function startServer() {
           "Referrer-Policy": "strict-origin-when-cross-origin",
         };
 
-        // Handle preflight OPTIONS request
+        // Handle preflight OPTIONS request — only for Jrok management API
+        // Tunnel domain traffic should pass through so the backend app handles CORS itself
         if (method === "OPTIONS") {
-          return new Response(null, { status: 204, headers: corsHeaders });
+          const baseDomain = config.baseDomain;
+          const isTunnelSubdomain = hostname.endsWith(baseDomain) && hostname !== baseDomain;
+          const isCustomDomain = !hostname.endsWith(baseDomain) && hostname !== baseDomain && hostname !== 'localhost';
+
+          if (!isTunnelSubdomain && !isCustomDomain) {
+            // Management API — Jrok handles CORS
+            return new Response(null, { status: 204, headers: corsHeaders });
+          }
+          // Tunnel/custom domain — let it fall through to be forwarded to the agent
         }
 
         // Helper to add CORS and security headers to response
