@@ -2001,9 +2001,11 @@ async function startServer() {
     console.log(`🔐 Auth enabled with API key`);
     console.log(`🔌 WebSocket agent endpoint: ws://localhost:${server.port}/ws/agent`);
 
-    // Cleanup stale agents every 30 seconds (disconnect if no heartbeat for 90 seconds)
+    // Cleanup stale agents every 30 seconds
+    // Disconnect if no heartbeat for 150 seconds (allows 10 missed 15s heartbeats)
+    // This provides better resilience for long-running idle tunnels
     setInterval(() => {
-      agentService.disconnectStaleAgents(90000);
+      agentService.disconnectStaleAgents(150000);
     }, 30000);
 
     // Cleanup expired tunnels every 5 minutes

@@ -671,8 +671,12 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   }
   console.log(`\n${config.serverUrl}\n`);
 
-  const ws = new WebSocket(wsUrl.toString());
+  const ws = new WebSocket(wsUrl.toString(), {
+    // Enable WebSocket-level ping/pong for better connection stability
+    // This helps keep connections alive through proxies and load balancers
+  });
   let heartbeatInterval: NodeJS.Timeout;
+  let pingInterval: NodeJS.Timeout;
   let reconnectAttempts = 0;
 
   // Store TCP port when received from server
@@ -688,10 +692,19 @@ async function connectAgent(config: ClientConfig): Promise<void> {
       console.log(`🔌 TCP tunnel connecting... (port will be assigned)`);
     }
 
-    // Send heartbeat every 30 seconds
+    // Send heartbeat every 15 seconds (more frequent to prevent idle disconnects)
+    // This gives better resilience against network issues and idle connection drops
     heartbeatInterval = setInterval(() => {
       if (ws.readyState === 1) {  // WebSocket.OPEN = 1
         ws.send(JSON.stringify({ type: "heartbeat" }));
+      }
+    }, 15000);
+
+    // Send WebSocket ping every 30 seconds for connection keepalive
+    // This helps with proxies that drop idle WebSocket connections
+    pingInterval = setInterval(() => {
+      if (ws.readyState === 1) {  // WebSocket.OPEN = 1
+        ws.ping();
       }
     }, 30000);
   };
@@ -782,6 +795,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
 
   ws.onclose = () => {
     clearInterval(heartbeatInterval);
+    clearInterval(pingInterval);
     reconnectAttempts++;
     const delay = Math.min(5000 * reconnectAttempts, 30000); // Max 30s delay
 

@@ -688,8 +688,14 @@ export async function isAgentConnected(id: string): Promise<boolean> {
 
 /**
  * Clean up stale agent connections (run periodically)
+ *
+ * TIMING RELATIONSHIP (important for stability):
+ * - Client sends heartbeat every 15 seconds
+ * - Server cleanup runs every 30 seconds
+ * - Default maxAgeMs should be 150000ms (150 seconds) to allow 10 missed heartbeats
+ * - This provides resilience against network latency and temporary packet loss
  */
-export async function cleanupStaleAgents(maxAgeMs: number = 120000): Promise<number> {
+export async function cleanupStaleAgents(maxAgeMs: number = 150000): Promise<number> {
   const collections = getCollections();
   const cutoff = new Date(Date.now() - maxAgeMs);
 
@@ -708,8 +714,9 @@ export async function cleanupStaleAgents(maxAgeMs: number = 120000): Promise<num
 
 /**
  * Disconnect stale agents - backward compat wrapper
+ * Default: 150 seconds (allows 10 missed 15s heartbeats)
  */
-export function disconnectStaleAgents(maxAge: number = 30000): void {
+export function disconnectStaleAgents(maxAge: number = 150000): void {
   cleanupStaleAgents(maxAge).catch(err => {
     console.error("Failed to cleanup stale agents:", err);
   });
