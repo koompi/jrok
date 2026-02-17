@@ -8,6 +8,7 @@ export interface Agent {
   active: boolean;
   clientIp?: string;
   organizationId?: string;
+  apiKeyOrgId?: string; // The API key's org (for plan limits) - separate from impersonated org
   apiKeyId?: string;
   tunnelId?: string; // Cached for performance - avoids MongoDB lookup per request
   protocol?: TunnelProtocol; // 'http' or 'tcp'

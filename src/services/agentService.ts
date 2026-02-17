@@ -35,6 +35,7 @@ interface AgentConnection {
   serverPort: number;
   serverRegion: string;
   organizationId?: string;
+  apiKeyOrgId?: string; // API key's org for plan limits
   apiKeyId?: string;
   clientIp?: string;
   connectedAt: Date;
@@ -54,6 +55,7 @@ export interface RegisterAgentOptions {
   localHost: string;
   clientIp?: string;
   organizationId?: string;
+  apiKeyOrgId?: string; // API key's org for plan limits (separate from impersonated org)
   apiKeyId?: string;
   protocol?: TunnelProtocol;
   forceNew?: boolean;
@@ -155,6 +157,7 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     localHost,
     clientIp,
     organizationId,
+    apiKeyOrgId,
     apiKeyId,
     protocol = 'http',
     forceNew = false,
@@ -275,6 +278,7 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     serverPort: SERVER_PORT,
     serverRegion: SERVER_REGION,
     organizationId,
+    apiKeyOrgId,
     apiKeyId,
     clientIp,
     connectedAt: now,
@@ -322,6 +326,7 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     active: true,
     clientIp,
     organizationId,
+    apiKeyOrgId,
     apiKeyId,
     protocol,
     serverId: SERVER_ID,

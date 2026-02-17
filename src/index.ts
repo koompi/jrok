@@ -423,6 +423,7 @@ async function startServer() {
           const localHost = ws.data?.localHost;
           const clientIp = ws.data?.clientIp;
           const organizationId = ws.data?.organizationId;
+          const apiKeyOrgId = ws.data?.apiKeyOrgId; // API key's org for plan limits
           const apiKeyId = ws.data?.apiKeyId;
           const protocol: TunnelProtocol = ws.data?.protocol || 'http';
           const forceNew = ws.data?.forceNew || false;
@@ -441,6 +442,7 @@ async function startServer() {
             localHost,
             clientIp,
             organizationId,
+            apiKeyOrgId,
             apiKeyId,
             protocol,
             forceNew,
@@ -1670,7 +1672,8 @@ async function startServer() {
           const userAgent = req.headers.get("user-agent") || undefined;
 
           // Get plan tier for rate limit calculation (defaults to 'free')
-          const planTier = agent.organizationId ? await getPlanTierForOrg(agent.organizationId) : 'free';
+          // Use API key's org (apiKeyOrgId) for plan limits, not the tunnel owner's org
+          const planTier = agent.apiKeyOrgId ? await getPlanTierForOrg(agent.apiKeyOrgId) : 'free';
 
           // Check security limits (rate limits) with layered client identification
           // This uses Token Bucket algorithm to allow burst while preventing abuse
@@ -1703,10 +1706,12 @@ async function startServer() {
 
           // ============ Bandwidth Limit Check ============
           // Block requests if organization has exceeded monthly bandwidth
-          if (agent.organizationId) {
-            const bandwidthCheck = securityService.checkMonthlyBandwidth(agent.organizationId, planTier);
+          // Use API key's org (apiKeyOrgId) for plan limits
+          if (agent.apiKeyOrgId || agent.organizationId) {
+            const bandwidthCheckOrgId = agent.apiKeyOrgId || agent.organizationId;
+            const bandwidthCheck = securityService.checkMonthlyBandwidth(bandwidthCheckOrgId!, planTier);
             if (!bandwidthCheck.allowed) {
-              console.warn(`🚫 Bandwidth limit exceeded for org ${agent.organizationId}: ${(bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2)}GB / ${(bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2)}GB`);
+              console.warn(`🚫 Bandwidth limit exceeded for org ${bandwidthCheckOrgId}: ${(bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2)}GB / ${(bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2)}GB`);
               return addCors(new Response(
                 JSON.stringify({
                   success: false,
@@ -1749,9 +1754,9 @@ async function startServer() {
             await agentGroupService.decrementMemberConnections(agent.id);
           }
 
-          // Track bandwidth usage
+          // Track bandwidth usage against API key's org (for quota limits)
           const responseSize = parseInt(response.headers.get("content-length") || "0");
-          securityService.trackMonthlyBandwidth(agent.organizationId || subdomain, responseSize);
+          securityService.trackMonthlyBandwidth(agent.apiKeyOrgId || agent.organizationId || subdomain, responseSize);
 
           return response;
         }

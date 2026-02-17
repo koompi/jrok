@@ -188,6 +188,7 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
       localHost,
       clientIp,
       organizationId: effectiveOrgId,
+      apiKeyOrgId: authResult.organizationId, // API key's org for plan limits (Enterprise)
       apiKeyId: authResult.apiKeyId,
       protocol,
       forceNew,
