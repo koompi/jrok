@@ -1501,8 +1501,8 @@ async function startServer() {
           const customDomain = await getCustomDomainByName(hostname);
 
           if (customDomain && customDomain.active) {
-            // This is a valid custom domain - use the target subdomain or fallback to hostname
-            tunnelDomain = customDomain.targetSubdomain || hostname;
+            // This is a valid custom domain
+            tunnelDomain = hostname;
             isCustomDomainRequest = true;
           }
         } else if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
