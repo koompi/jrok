@@ -23,6 +23,7 @@ import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { initTelegram } from "./services/notificationService";
 import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
+import * as planLimitService from "./services/planLimitService";
 
 // Store pending requests waiting for agent responses
 const pendingRequests = new Map<string, {
@@ -197,64 +198,7 @@ setConfig(config);
 // Initialize Telegram notifications
 initTelegram();
 
-// Cache for organization plan tiers (avoid DB lookup on every request)
-const orgPlanCache = new Map<string, { tier: string; timestamp: number }>();
-const PLAN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-const MAX_PLAN_CACHE_SIZE = 10000; // Prevent unbounded growth
-
-// Periodic cleanup of expired plan cache entries
-setInterval(() => {
-  const now = Date.now();
-  let cleanedCount = 0;
-  for (const [key, value] of orgPlanCache.entries()) {
-    if (now - value.timestamp > PLAN_CACHE_TTL) {
-      orgPlanCache.delete(key);
-      cleanedCount++;
-    }
-  }
-  if (cleanedCount > 0) {
-    console.log(`🧹 Plan cache cleanup: ${cleanedCount} expired entries removed`);
-  }
-}, 10 * 60 * 1000); // Run every 10 minutes
-
-async function getPlanTierForOrg(organizationId: string): Promise<string> {
-  // Check cache first
-  const cached = orgPlanCache.get(organizationId);
-  if (cached && Date.now() - cached.timestamp < PLAN_CACHE_TTL) {
-    return cached.tier;
-  }
-
-  // Memory safety: Prevent unbounded cache growth
-  if (orgPlanCache.size >= MAX_PLAN_CACHE_SIZE) {
-    // Remove oldest entry
-    const firstKey = orgPlanCache.keys().next().value;
-    if (firstKey) {
-      orgPlanCache.delete(firstKey);
-    }
-  }
-
-  try {
-    const { getCollections } = await import("./utils/mongodb");
-    const collections = getCollections();
-
-    const subscription = await collections.subscriptions.findOne({ organizationId });
-    if (!subscription) {
-      console.log(`📊 Rate limit: org=${organizationId} has NO subscription, using 'free' tier`);
-      orgPlanCache.set(organizationId, { tier: 'free', timestamp: Date.now() });
-      return 'free';
-    }
-
-    const plan = await collections.plans.findOne({ id: subscription.planId });
-    const tier = plan?.tier || 'free';
-
-    console.log(`📊 Rate limit: org=${organizationId} subscription=${subscription.planId} tier=${tier} (multiplier: ${tier === 'enterprise' ? 100 : tier === 'pro' ? 20 : tier === 'starter' ? 5 : 1}x)`);
-    orgPlanCache.set(organizationId, { tier, timestamp: Date.now() });
-    return tier;
-  } catch (error) {
-    console.error(`📊 Rate limit lookup error for org=${organizationId}:`, error);
-    return 'free';
-  }
-}
+// Legacy Auth middleware (for backward compatibility)
 
 // Legacy Auth middleware (for backward compatibility)
 const isLegacyAuthenticated = createBasicAuthMiddleware(config.apiKey);
@@ -390,7 +334,7 @@ async function startServer() {
     console.log("✅ TCP tunnels restored");
 
     // Initialize monitoring service with map references for size tracking
-    monitoringService.initMonitoringService(pendingRequests, orgPlanCache);
+    monitoringService.initMonitoringService(pendingRequests);
 
     // Register current VPS server if running on a VPS with SSH
     await registerLocalVpsServer();
@@ -1499,7 +1443,7 @@ async function startServer() {
               { status: 401, headers: { "Content-Type": "application/json" } }
             ));
           }
-          const planTier = await getPlanTierForOrg(organizationId);
+          const { tier: planTier } = await planLimitService.getOrganizationPlan(organizationId);
           const bandwidth = securityService.checkMonthlyBandwidth(organizationId, planTier);
           return addCors(new Response(
             JSON.stringify({ success: true, organizationId, ...bandwidth }),
@@ -1557,8 +1501,8 @@ async function startServer() {
           const customDomain = await getCustomDomainByName(hostname);
 
           if (customDomain && customDomain.active) {
-            // This is a valid custom domain - use the full hostname as the tunnel domain
-            tunnelDomain = hostname;
+            // This is a valid custom domain - use the target subdomain or fallback to hostname
+            tunnelDomain = customDomain.targetSubdomain || hostname;
             isCustomDomainRequest = true;
           }
         } else if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
@@ -1673,7 +1617,7 @@ async function startServer() {
 
           // Get plan tier for rate limit calculation (defaults to 'free')
           // Use API key's org (apiKeyOrgId) for plan limits, not the tunnel owner's org
-          const planTier = agent.apiKeyOrgId ? await getPlanTierForOrg(agent.apiKeyOrgId) : 'free';
+          const planTier = agent.apiKeyOrgId ? (await planLimitService.getOrganizationPlan(agent.apiKeyOrgId)).tier : 'free';
 
           // Check security limits (rate limits) with layered client identification
           // This uses Token Bucket algorithm to allow burst while preventing abuse
