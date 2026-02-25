@@ -26,8 +26,8 @@ const DEFAULT_FREE_LIMITS: PlanLimits = {
   prioritySupport: false,
   maxHttpRequestsPerMinute: 100,
   maxHttpRequestsPerHour: 3000,
-  maxTcpConnectionsPerTunnel: 10,
-  maxTcpConnectionsPerOrg: 20,
+  maxTcpConnectionsPerTunnel: 5000,
+  maxTcpConnectionsPerOrg: 20000,
   maxTcpBandwidthMbPerMinute: 10,
 };
 

@@ -19,8 +19,8 @@ const DEFAULT_LIMITS = {
   maxHttpConnectionsPerTunnel: 200,  // Concurrent connections per tunnel (was 100)
 
   // TCP Limits - Increased for database connections like MongoDB, PostgreSQL
-  maxTcpConnectionsPerTunnel: 50,    // Concurrent TCP connections per tunnel (was 10)
-  maxTcpConnectionsPerOrg: 200,      // Total TCP connections for org (was 50)
+  maxTcpConnectionsPerTunnel: 5000,    // Concurrent TCP connections per tunnel (was 10)
+  maxTcpConnectionsPerOrg: 20000,      // Total TCP connections for org (was 50)
   maxTcpBytesPerMinute: 100 * 1024 * 1024, // 100MB per minute per tunnel (was 10MB)
   maxTcpBytesPerHour: 1000 * 1024 * 1024,  // 1GB per hour per tunnel (was 100MB)
 

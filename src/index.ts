@@ -1654,6 +1654,12 @@ async function startServer() {
           if (agent.apiKeyOrgId || agent.organizationId) {
             const bandwidthCheckOrgId = agent.apiKeyOrgId || agent.organizationId;
             const bandwidthCheck = securityService.checkMonthlyBandwidth(bandwidthCheckOrgId!, planTier);
+
+            // Custom domains have unlimited bandwidth
+            if (isCustomDomainRequest) {
+              bandwidthCheck.allowed = true;
+            }
+
             if (!bandwidthCheck.allowed) {
               console.warn(`🚫 Bandwidth limit exceeded for org ${bandwidthCheckOrgId}: ${(bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2)}GB / ${(bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2)}GB`);
               return addCors(new Response(
