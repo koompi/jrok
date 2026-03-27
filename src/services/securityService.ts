@@ -72,6 +72,9 @@ const ipSecurityCache = new Map<string, TunnelIpSecurity>();
 const ipAllowlists = new Map<string, Set<string>>();
 
 // Connection logs (stored in memory, periodically flushed to DB)
+// Feature flag: Set ENABLE_CONNECTION_LOGS=true to enable (default: disabled)
+const ENABLE_CONNECTION_LOGS = process.env.ENABLE_CONNECTION_LOGS === 'true';
+
 interface ConnectionLog {
   id: string;
   tunnelId: string;
@@ -1116,6 +1119,15 @@ function logConnection(params: {
   bytesOut?: number;
   duration?: number;
 }): void {
+  // Feature flag: Skip logging if disabled
+  if (!ENABLE_CONNECTION_LOGS) {
+    // Still log to console for security events (blocked/rate_limited)
+    if (params.status !== 'allowed') {
+      console.log(`🛡️ [${params.type.toUpperCase()}] ${params.status}: ${params.remoteIp} -> ${params.tunnelId} (${params.reason})`);
+    }
+    return;
+  }
+
   const log: ConnectionLog = {
     id: generateLogId(),
     tunnelId: params.tunnelId,
@@ -1148,6 +1160,9 @@ function logConnection(params: {
  * Flush connection logs to database
  */
 export async function flushConnectionLogs(): Promise<void> {
+  // Feature flag: Skip flushing if logging disabled
+  if (!ENABLE_CONNECTION_LOGS) return;
+
   if (connectionLogBuffer.length === 0) return;
 
   const logsToFlush = connectionLogBuffer.splice(0, connectionLogBuffer.length);
@@ -1399,10 +1414,13 @@ export function initSecurityService(): void {
   // Cleanup every 5 minutes
   cleanupInterval = setInterval(cleanupExpiredEntries, 5 * 60 * 1000);
 
-  // Flush logs every minute
-  flushInterval = setInterval(flushConnectionLogs, LOG_FLUSH_INTERVAL);
-
-  console.log('🛡️ Security service initialized');
+  // Flush logs every minute (only if logging enabled)
+  if (ENABLE_CONNECTION_LOGS) {
+    flushInterval = setInterval(flushConnectionLogs, LOG_FLUSH_INTERVAL);
+    console.log('🛡️ Security service initialized (connection logging: ENABLED)');
+  } else {
+    console.log('🛡️ Security service initialized (connection logging: DISABLED)');
+  }
 }
 
 /**

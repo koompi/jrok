@@ -161,12 +161,17 @@ async function createSaaSIndexes(): Promise<void> {
 }
 
 async function createSecurityIndexes(): Promise<void> {
-  // Connection logs indexes
-  await collections.connectionLogs.createIndex({ tunnelId: 1, timestamp: -1 });
-  await collections.connectionLogs.createIndex({ organizationId: 1, timestamp: -1 });
-  await collections.connectionLogs.createIndex({ remoteIp: 1, timestamp: -1 });
-  await collections.connectionLogs.createIndex({ status: 1 });
-  await collections.connectionLogs.createIndex({ timestamp: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 }); // 30 days TTL
+  // Connection logs indexes (only if logging is enabled)
+  if (process.env.ENABLE_CONNECTION_LOGS === 'true') {
+    await collections.connectionLogs.createIndex({ tunnelId: 1, timestamp: -1 });
+    await collections.connectionLogs.createIndex({ organizationId: 1, timestamp: -1 });
+    await collections.connectionLogs.createIndex({ remoteIp: 1, timestamp: -1 });
+    await collections.connectionLogs.createIndex({ status: 1 });
+    await collections.connectionLogs.createIndex({ timestamp: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 }); // 30 days TTL
+    console.log('✅ Connection logs indexes created (logging enabled)');
+  } else {
+    console.log('⏭️  Connection logs indexes skipped (logging disabled via ENABLE_CONNECTION_LOGS)');
+  }
 
   // Blocked IPs indexes
   await collections.blockedIps.createIndex({ ip: 1 }, { unique: true });
