@@ -29,6 +29,11 @@ import * as planLimitService from "./services/planLimitService";
 // Module-level constants — created once, never re-allocated per request
 const WS_SKIP_HEADERS = new Set(['upgrade', 'connection', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions']);
 
+// HTTP tunnel timeout: how long the server waits for the agent (CLI) to respond.
+// 10s is too short for real backends (DB queries, file uploads, report generation).
+// Default 30s; set TUNNEL_REQUEST_TIMEOUT_MS in env for heavier workloads (e.g. 60000).
+const TUNNEL_REQUEST_TIMEOUT_MS = parseInt(process.env.TUNNEL_REQUEST_TIMEOUT_MS || '30000');
+
 // Store pending requests waiting for agent responses
 const pendingRequests = new Map<string, {
   resolve: (response: Response) => void;
@@ -109,11 +114,11 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
       resolve(new Response(
         JSON.stringify({
           success: false,
-          message: "Agent timeout - no response within 10 seconds"
+          message: `Agent timeout - no response within ${TUNNEL_REQUEST_TIMEOUT_MS / 1000} seconds`
         }),
         { status: 504, headers: { "Content-Type": "application/json" } }
       ));
-    }, 10000); // 10 second timeout
+    }, TUNNEL_REQUEST_TIMEOUT_MS);
 
     // Prepare request data to send to agent
     const headers: Record<string, string> = {};

@@ -362,13 +362,20 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
       }
     }
 
-    // Forward request to local service
+    // Forward request to local service.
+    // Timeout matches the server-side TUNNEL_REQUEST_TIMEOUT_MS (default 30s) minus a small
+    // buffer so the CLI sends a clean 502 before the server gives up and sends a 504.
+    const localFetchTimeout = parseInt(process.env.TUNNEL_REQUEST_TIMEOUT_MS || '30000') - 2000;
+    const abortController = new AbortController();
+    const localFetchTimer = setTimeout(() => abortController.abort(), localFetchTimeout);
+
     const localResponse = await fetch(localUrl, {
       method,
       headers: forwardHeaders,
       body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
       redirect: 'manual', // Don't follow redirects automatically
-    });
+      signal: abortController.signal,
+    }).finally(() => clearTimeout(localFetchTimer));
 
     // Read response - use ArrayBuffer for binary content
     const responseBuffer = await localResponse.arrayBuffer();
@@ -524,6 +531,10 @@ async function handleTcpConnect(message: any, serverWs: WebSocket, config: Clien
       host: localHost || config.localHost,
       port: localPort || config.port,
     });
+
+    // Enable TCP keepalive — prevents idle connections (SSH, Mongo Compass) from being
+    // silently dropped by NAT/routers. Probe fires after 60s of idle.
+    localSocket.setKeepAlive(true, 60000);
 
     localSocket.on('connect', () => {
       console.log(`✅ TCP Connected: ${localHost}:${localPort} [${connectionId}]`);

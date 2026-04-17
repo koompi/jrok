@@ -389,6 +389,10 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
     // Track connection
     securityService.trackTcpConnection(allocation.tunnelId, allocation.organizationId, true);
 
+    // Enable TCP keepalive so idle connections (SSH, Mongo Compass) are not silently
+    // dropped by NAT/firewalls. 60s probe interval is well within typical 2-5 min timeouts.
+    clientSocket.setKeepAlive(true, 60000);
+
     const agentWs = agentConnections.get(allocation.agentId);
     if (!agentWs || agentWs.readyState !== 1) {
       console.error(`❌ Agent ${allocation.agentId} not connected for TCP tunnel`);
