@@ -21,10 +21,20 @@ const realtimeStats = new Map<string, {
   lastUpdated: number;
 }>();
 
+// Pending flush metadata: key → hour bucket + agentId for the next DB write
+const pendingFlushMeta = new Map<string, {
+  organizationId: string;
+  tunnelId?: string;
+  agentId?: string;
+  hourKey: string;
+}>();
+
 /**
- * Record bandwidth usage for a tunnel/agent
+ * Record bandwidth usage for a tunnel/agent.
+ * Accumulates in-memory and flushes to MongoDB in a background batch every 30 seconds.
+ * This reduces MongoDB writes by up to 1000x at high traffic.
  */
-export async function recordBandwidth(params: {
+export function recordBandwidth(params: {
   organizationId: string;
   tunnelId?: string;
   agentId?: string;
@@ -33,8 +43,8 @@ export async function recordBandwidth(params: {
   requests?: number;
 }): Promise<void> {
   const key = `${params.organizationId}:${params.tunnelId || 'global'}`;
-  
-  // Update in-memory stats
+
+  // Accumulate in-memory
   const current = realtimeStats.get(key) || { bytesIn: 0, bytesOut: 0, requests: 0, lastUpdated: Date.now() };
   current.bytesIn += params.bytesIn;
   current.bytesOut += params.bytesOut;
@@ -42,36 +52,80 @@ export async function recordBandwidth(params: {
   current.lastUpdated = Date.now();
   realtimeStats.set(key, current);
 
-  // Persist hourly aggregates
-  const now = new Date();
-  const hourKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}`;
-  
-  const db = await getDatabase();
-  const collection = db.collection(BANDWIDTH_COLLECTION);
-  
-  await collection.updateOne(
-    {
+  // Track metadata needed at flush time
+  if (!pendingFlushMeta.has(key)) {
+    const now = new Date();
+    const hourKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}`;
+    pendingFlushMeta.set(key, {
       organizationId: params.organizationId,
       tunnelId: params.tunnelId,
-      periodKey: hourKey,
-      period: "hour",
-    },
-    {
-      $inc: {
-        bytesIn: params.bytesIn,
-        bytesOut: params.bytesOut,
-        requests: params.requests || 1,
+      agentId: params.agentId,
+      hourKey,
+    });
+  }
+
+  // Return resolved promise to keep call sites unchanged
+  return Promise.resolve();
+}
+
+/**
+ * Flush all accumulated bandwidth stats to MongoDB.
+ * Called automatically every 30 seconds by the background interval.
+ */
+export async function flushBandwidthToMongo(): Promise<void> {
+  if (pendingFlushMeta.size === 0) return;
+
+  const db = await getDatabase();
+  const collection = db.collection(BANDWIDTH_COLLECTION);
+
+  // Snapshot and clear pending entries atomically
+  const entries = Array.from(pendingFlushMeta.entries());
+  pendingFlushMeta.clear();
+
+  // Snapshot current stats for each key and reset the accumulators so the
+  // next 30s window starts fresh (avoids double-counting on every flush).
+  const statsSnapshot = new Map<string, { bytesIn: number; bytesOut: number; requests: number }>();
+  for (const [key] of entries) {
+    const s = realtimeStats.get(key);
+    if (s) {
+      statsSnapshot.set(key, { bytesIn: s.bytesIn, bytesOut: s.bytesOut, requests: s.requests });
+      s.bytesIn = 0;
+      s.bytesOut = 0;
+      s.requests = 0;
+    }
+  }
+
+  const ops = entries.map(([key, meta]) => {
+    const stats = statsSnapshot.get(key);
+    if (!stats || (stats.bytesIn === 0 && stats.bytesOut === 0 && stats.requests === 0)) return null;
+    return {
+      updateOne: {
+        filter: {
+          organizationId: meta.organizationId,
+          tunnelId: meta.tunnelId,
+          periodKey: meta.hourKey,
+          period: "hour",
+        },
+        update: {
+          $inc: {
+            bytesIn: stats.bytesIn,
+            bytesOut: stats.bytesOut,
+            requests: stats.requests,
+          },
+          $set: {
+            agentId: meta.agentId,
+            timestamp: Date.now(),
+          },
+          $setOnInsert: { id: generateId() },
+        },
+        upsert: true,
       },
-      $set: {
-        agentId: params.agentId,
-        timestamp: Date.now(),
-      },
-      $setOnInsert: {
-        id: generateId(),
-      },
-    },
-    { upsert: true }
-  );
+    };
+  }).filter(Boolean);
+
+  if (ops.length > 0) {
+    await collection.bulkWrite(ops as any[], { ordered: false });
+  }
 }
 
 /**

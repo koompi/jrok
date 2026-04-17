@@ -25,6 +25,9 @@ import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
 import * as planLimitService from "./services/planLimitService";
 
+// Module-level constants — created once, never re-allocated per request
+const WS_SKIP_HEADERS = new Set(['upgrade', 'connection', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions']);
+
 // Store pending requests waiting for agent responses
 const pendingRequests = new Map<string, {
   resolve: (response: Response) => void;
@@ -70,8 +73,7 @@ async function handleWebSocketTunnel(
   const headers: Record<string, string> = {};
   req.headers.forEach((value, key) => {
     // Forward relevant headers (exclude hop-by-hop headers)
-    const skipHeaders = new Set(['upgrade', 'connection', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions']);
-    if (!skipHeaders.has(key.toLowerCase())) {
+    if (!WS_SKIP_HEADERS.has(key.toLowerCase())) {
       headers[key] = value;
     }
   });
@@ -130,13 +132,16 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
       // Store pending request with bandwidth tracking info
       pendingRequests.set(requestId, { resolve, timeout, bytesIn, agent, tunnelId });
 
+      // Parse URL once to avoid redundant allocations
+      const reqUrl = new URL(req.url);
+
       // Send request to agent
       agentWs.send(JSON.stringify({
         type: "http_request",
         requestId,
         method: req.method,
-        path: new URL(req.url).pathname,
-        query: new URL(req.url).search,
+        path: reqUrl.pathname,
+        query: reqUrl.search,
         headers,
         body,
         clientIp: clientIp || "unknown",
@@ -524,17 +529,16 @@ async function startServer() {
                 clearTimeout(pending.timeout);
                 pendingRequests.delete(message.requestId);
 
-                // Decode body if it's base64 encoded
-                let responseBody: string | ArrayBuffer = message.body || "";
+                // Decode body if it's base64 encoded — decode once, reuse for both body and size
+                let responseBody: string | Buffer = message.body || "";
+                let bytesOut: number;
                 if (message.isBase64 && typeof message.body === 'string') {
                   responseBody = Buffer.from(message.body, 'base64');
+                  bytesOut = responseBody.length; // reuse decoded buffer, no second decode
+                } else {
+                  bytesOut = new TextEncoder().encode(message.body || "").length +
+                    new TextEncoder().encode(JSON.stringify(message.headers || {})).length;
                 }
-
-                // Calculate response size (bytes out)
-                const bytesOut = message.isBase64 && typeof message.body === 'string'
-                  ? Buffer.from(message.body, 'base64').length
-                  : new TextEncoder().encode(message.body || "").length +
-                  new TextEncoder().encode(JSON.stringify(message.headers || {})).length;
 
                 // Record bandwidth usage
                 if (pending.agent.organizationId) {
@@ -1537,8 +1541,10 @@ async function startServer() {
             // Use load-balanced selection (round-robin, least-connections, etc.)
             agent = await agentGroupService.selectAgent(subdomain);
           } else {
-            // Single agent mode - direct lookup
-            agent = await agentService.getAgentByDomainAsync(subdomain);
+            // Single agent mode — check local cache first (O(1)), fall back to MongoDB
+            // This avoids a duplicate agentConnections query since findServerForDomain
+            // already confirmed this agent is on this server.
+            agent = agentService.getAgentByDomainLocal(subdomain) ?? await agentService.getAgentByDomainAsync(subdomain);
           }
 
           if (!agent || !agent.active) {
@@ -1956,6 +1962,15 @@ async function startServer() {
     console.log(`🔐 Auth enabled with API key`);
     console.log(`🔌 WebSocket agent endpoint: ws://localhost:${server.port}/ws/agent`);
 
+    // Flush accumulated bandwidth stats to MongoDB every 30 seconds (batched writes)
+    setInterval(async () => {
+      try {
+        await statsService.flushBandwidthToMongo();
+      } catch (error) {
+        console.error("Bandwidth flush error:", error);
+      }
+    }, 30_000);
+
     // Cleanup stale agents every 30 seconds
     // Disconnect if no heartbeat for 150 seconds (allows 10 missed 15s heartbeats)
     // This provides better resilience for long-running idle tunnels
@@ -2044,6 +2059,9 @@ async function startServer() {
     // Graceful shutdown
     process.on("SIGINT", async () => {
       console.log("\n🛑 Shutting down...");
+
+      // Flush pending bandwidth stats before exit so no data is lost
+      await statsService.flushBandwidthToMongo().catch(() => {});
 
       // Shutdown services
       await crossServerService.shutdownCrossServerRouting();

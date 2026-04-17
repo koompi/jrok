@@ -17,6 +17,18 @@ const TUNNEL_CACHE_TTL = 60_000; // 60 seconds cache TTL
 // Cache for tunnel lookups by ID
 const tunnelIdCache = new Map<string, CacheEntry<Tunnel | null>>();
 
+// Cache for custom domain lookups by hostname (most critical for per-request savings)
+const customDomainNameCache = new Map<string, CacheEntry<CustomDomain | null>>();
+const CUSTOM_DOMAIN_CACHE_TTL = 60_000; // 60 seconds
+
+export function invalidateCustomDomainCache(domain?: string): void {
+  if (domain) {
+    customDomainNameCache.delete(domain);
+  } else {
+    customDomainNameCache.clear();
+  }
+}
+
 export function invalidateTunnelCache(domain?: string, id?: string): void {
   if (domain) tunnelDomainCache.delete(domain);
   if (id) tunnelIdCache.delete(id);
@@ -105,8 +117,17 @@ export async function getCustomDomain(id: string): Promise<CustomDomain | null> 
 }
 
 export async function getCustomDomainByName(domain: string): Promise<CustomDomain | null> {
+  // Check cache first — avoids MongoDB query on every request for custom domain hostnames
+  const cached = customDomainNameCache.get(domain);
+  if (cached && Date.now() - cached.timestamp < CUSTOM_DOMAIN_CACHE_TTL) {
+    return cached.data;
+  }
+
   const collections = getCollections();
-  return await collections.customDomains.findOne({ domain });
+  const result = await collections.customDomains.findOne({ domain }) as CustomDomain | null;
+
+  customDomainNameCache.set(domain, { data: result, timestamp: Date.now() });
+  return result;
 }
 
 export async function getAllCustomDomains(): Promise<CustomDomain[]> {
@@ -125,6 +146,8 @@ export async function createCustomDomain(domain: CustomDomain): Promise<void> {
     ...domain,
     _id: new ObjectId(),
   });
+  // Invalidate cache so next request sees the new domain
+  invalidateCustomDomainCache(domain.domain);
 }
 
 export async function updateCustomDomain(id: string, updates: Partial<CustomDomain>): Promise<void> {
@@ -141,6 +164,7 @@ export async function updateCustomDomainByName(domain: string, updates: Partial<
     { domain },
     { $set: updates }
   );
+  invalidateCustomDomainCache(domain);
 }
 
 export async function deleteCustomDomainById(id: string): Promise<void> {
@@ -160,4 +184,5 @@ export async function deleteCustomDomainByName(domainName: string): Promise<void
   if (result.deletedCount === 0) {
     throw new Error(`Domain ${domainName} not found in database`);
   }
+  invalidateCustomDomainCache(domainName);
 }

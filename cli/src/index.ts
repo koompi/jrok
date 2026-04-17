@@ -334,6 +334,13 @@ function validateBasicConfig(config: Partial<ClientConfig>): void {
   }
 }
 
+// Module-level constant — created once, not on every HTTP request
+const HOP_BY_HOP_HEADERS = new Set([
+  'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+  'te', 'trailers', 'transfer-encoding', 'upgrade',
+  'content-length', // Let fetch handle this
+]);
+
 // Handle incoming HTTP request from server and proxy to local service
 async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConfig): Promise<void> {
   try {
@@ -346,15 +353,10 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
 
     // Filter out hop-by-hop headers that shouldn't be forwarded
     const forwardHeaders: Record<string, string> = {};
-    const hopByHopHeaders = new Set([
-      'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
-      'te', 'trailers', 'transfer-encoding', 'upgrade',
-      'content-length', // Let fetch handle this
-    ]);
 
     if (headers) {
       for (const [key, value] of Object.entries(headers)) {
-        if (!hopByHopHeaders.has(key.toLowerCase())) {
+        if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
           forwardHeaders[key] = value as string;
         }
       }

@@ -13,6 +13,11 @@ import * as agentService from "./agentService";
 // Local cache for round-robin counters (per group)
 const roundRobinCounters = new Map<string, number>();
 
+// Short-lived cache for isGroupedDomain checks — eliminates MongoDB query on every request.
+// TTL is intentionally short (5s) so that newly created/deleted groups are picked up quickly.
+const groupedDomainCache = new Map<string, { result: boolean; expires: number }>();
+const GROUP_DOMAIN_CACHE_TTL = 5_000; // 5 seconds
+
 // =============================================================================
 // GROUP MANAGEMENT
 // =============================================================================
@@ -49,6 +54,7 @@ export async function getOrCreateGroup(
   };
 
   await collections.agentGroups.insertOne(group);
+  groupedDomainCache.delete(domain); // invalidate so next request sees the new group
   console.log(`✅ Created agent group for domain: ${domain}`);
 
   return group;
@@ -76,9 +82,18 @@ export async function getGroupById(groupId: string): Promise<AgentGroup | null> 
  * Check if a domain has a multi-agent group
  */
 export async function isGroupedDomain(domain: string): Promise<boolean> {
+  // Check short-lived cache first to avoid MongoDB query on every request
+  const cached = groupedDomainCache.get(domain);
+  if (cached && Date.now() < cached.expires) {
+    return cached.result;
+  }
+
   const collections = getCollections();
   const group = await collections.agentGroups.findOne({ domain });
-  return !!group && (group.agentIds?.length > 0 || group.activeAgentCount > 0);
+  const result = !!group && (group.agentIds?.length > 0 || group.activeAgentCount > 0);
+
+  groupedDomainCache.set(domain, { result, expires: Date.now() + GROUP_DOMAIN_CACHE_TTL });
+  return result;
 }
 
 /**
@@ -87,14 +102,20 @@ export async function isGroupedDomain(domain: string): Promise<boolean> {
 export async function deleteGroup(groupId: string): Promise<void> {
   const collections = getCollections();
 
+  // Fetch domain before deleting (needed for cache invalidation)
+  const group = await collections.agentGroups.findOne({ id: groupId });
+
   // Remove all members first
   await collections.agentGroupMembers.deleteMany({ groupId });
 
   // Remove the group
   await collections.agentGroups.deleteOne({ id: groupId });
 
-  // Clean up local cache
+  // Clean up local caches
   roundRobinCounters.delete(groupId);
+  if (group?.domain) {
+    groupedDomainCache.delete(group.domain);
+  }
 
   console.log(`🗑️ Deleted agent group: ${groupId}`);
 }

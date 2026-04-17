@@ -23,6 +23,11 @@ const SERVER_REGION = process.env.VPS_REGION || "default";
 // These MUST be local since WebSocket connections can't be shared
 const localSockets = new Map<string, WebSocket>();
 
+// Domain → Agent cache (in-memory, LOCAL agents only).
+// Eliminates MongoDB query on every tunneled HTTP request.
+// Populated on registerAgent, cleared on unregisterAgent.
+const localDomainCache = new Map<string, Agent>();
+
 // Agent connection record stored in MongoDB
 interface AgentConnection {
   agentId: string;
@@ -336,6 +341,9 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     groupMode,
   };
 
+  // Populate domain cache for fast O(1) lookup on every request
+  localDomainCache.set(finalDomain, agent);
+
   // Create or update tunnel
   createTunnelForAgent(agent, agentId, organizationId).catch((error) => {
     console.error(`Failed to create tunnel for agent ${agentId}:`, error);
@@ -553,6 +561,11 @@ export async function unregisterAgent(id: string): Promise<void> {
 
   // Remove local socket reference
   localSockets.delete(id);
+
+  // Remove from domain cache
+  if (connection) {
+    localDomainCache.delete(connection.domain);
+  }
 }
 
 // =============================================================================
@@ -585,9 +598,22 @@ export function getAgent(id: string): Agent | null {
 }
 
 /**
+ * Get local agent by domain from in-memory cache (O(1), no MongoDB).
+ * Only returns agents connected to THIS server.
+ * Use this on the hot path after confirming the request is local.
+ */
+export function getAgentByDomainLocal(domain: string): Agent | null {
+  return localDomainCache.get(domain) || null;
+}
+
+/**
  * Get agent by domain from MongoDB
  */
 export async function getAgentByDomainAsync(domain: string): Promise<Agent | null> {
+  // Check local cache first — avoids MongoDB query for locally-connected agents
+  const cached = localDomainCache.get(domain);
+  if (cached) return cached;
+
   const collections = getCollections();
   const connection = await collections.agentConnections.findOne({ domain, active: true });
 
