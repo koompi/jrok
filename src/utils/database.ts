@@ -29,6 +29,25 @@ export function invalidateCustomDomainCache(domain?: string): void {
   }
 }
 
+/**
+ * Purge expired entries from all caches.
+ * Call periodically (e.g. every 5 minutes) to prevent unbounded Map growth.
+ * Especially important for customDomainNameCache which can accumulate entries
+ * for every unique hostname that hits the server (bots, scanners, etc).
+ */
+export function purgeExpiredCaches(): void {
+  const now = Date.now();
+  for (const [key, entry] of tunnelDomainCache.entries()) {
+    if (now - entry.timestamp > TUNNEL_CACHE_TTL) tunnelDomainCache.delete(key);
+  }
+  for (const [key, entry] of tunnelIdCache.entries()) {
+    if (now - entry.timestamp > TUNNEL_CACHE_TTL) tunnelIdCache.delete(key);
+  }
+  for (const [key, entry] of customDomainNameCache.entries()) {
+    if (now - entry.timestamp > CUSTOM_DOMAIN_CACHE_TTL) customDomainNameCache.delete(key);
+  }
+}
+
 export function invalidateTunnelCache(domain?: string, id?: string): void {
   if (domain) tunnelDomainCache.delete(domain);
   if (id) tunnelIdCache.delete(id);

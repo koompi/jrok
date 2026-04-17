@@ -89,9 +89,9 @@ export async function flushBandwidthToMongo(): Promise<void> {
     const s = realtimeStats.get(key);
     if (s) {
       statsSnapshot.set(key, { bytesIn: s.bytesIn, bytesOut: s.bytesOut, requests: s.requests });
-      s.bytesIn = 0;
-      s.bytesOut = 0;
-      s.requests = 0;
+      // Delete the entry entirely after snapshot — it gets re-created on next activity.
+      // This prevents realtimeStats from accumulating stale zero-value entries forever.
+      realtimeStats.delete(key);
     }
   }
 

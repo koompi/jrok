@@ -20,6 +20,7 @@ import * as certSyncService from "./services/certificateSyncService";
 import * as monitoringService from "./services/monitoringService";
 import { connectDatabase, closeDatabase, createDistributedStateIndexes, cleanupStaleConnectionsOnStartup } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
+import { purgeExpiredCaches } from "./utils/database";
 import { initTelegram } from "./services/notificationService";
 import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
@@ -1987,10 +1988,12 @@ async function startServer() {
       }
     }, 5 * 60 * 1000);
 
-    // Cleanup expired rate limit entries every 10 minutes
+    // Cleanup expired rate limit entries and caches every 5 minutes
+    // (was 10 min — reduced to prevent token bucket Maps from growing too large)
     setInterval(() => {
       cleanupExpiredLimits();
-    }, 10 * 60 * 1000);
+      purgeExpiredCaches();
+    }, 5 * 60 * 1000);
 
     // Aggregate daily stats at midnight (run every hour, only processes yesterday)
     setInterval(async () => {

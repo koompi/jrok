@@ -1366,6 +1366,10 @@ export function getSecurityStats(): SecurityStats {
 
 // ============ Cleanup ============
 
+// Hard cap on token bucket maps to prevent unbounded growth
+// (1 tunnelId × many unique IPs = many entries)
+const MAX_TOKEN_BUCKET_ENTRIES = 50_000;
+
 /**
  * Cleanup expired entries (call periodically)
  */
@@ -1389,6 +1393,49 @@ export function cleanupExpiredEntries(): void {
     if (now - entry.windowStart > 3600000) tcpBytesPerHour.delete(key);
   }
 
+  // =========================================================
+  // PRIMARY MEMORY LEAK FIX: Token bucket cleanup
+  // These Maps grow for every unique IP/client that ever
+  // hit a tunnel and were NEVER cleaned up previously.
+  // Evict any bucket that is fully refilled (client has been
+  // quiet) and hasn't been touched in the last 5 minutes.
+  // =========================================================
+  const BUCKET_IDLE_TTL = 5 * 60 * 1000; // 5 minutes idle = evict
+  for (const [key, bucket] of httpTokenBuckets.entries()) {
+    if (bucket.tokens >= bucket.maxTokens && now - bucket.lastRefill > BUCKET_IDLE_TTL) {
+      httpTokenBuckets.delete(key);
+    }
+  }
+  for (const [key, bucket] of tcpTokenBuckets.entries()) {
+    if (bucket.tokens >= bucket.maxTokens && now - bucket.lastRefill > BUCKET_IDLE_TTL) {
+      tcpTokenBuckets.delete(key);
+    }
+  }
+
+  // Hard cap: if we somehow still have too many entries (very high traffic),
+  // evict the oldest-inserted half to keep memory bounded.
+  if (httpTokenBuckets.size > MAX_TOKEN_BUCKET_ENTRIES) {
+    const toDelete = httpTokenBuckets.size - MAX_TOKEN_BUCKET_ENTRIES;
+    let deleted = 0;
+    for (const key of httpTokenBuckets.keys()) {
+      if (deleted++ >= toDelete) break;
+      httpTokenBuckets.delete(key);
+    }
+  }
+  if (tcpTokenBuckets.size > MAX_TOKEN_BUCKET_ENTRIES) {
+    const toDelete = tcpTokenBuckets.size - MAX_TOKEN_BUCKET_ENTRIES;
+    let deleted = 0;
+    for (const key of tcpTokenBuckets.keys()) {
+      if (deleted++ >= toDelete) break;
+      tcpTokenBuckets.delete(key);
+    }
+  }
+
+  // Cleanup expired tunnel-level request count windows
+  for (const [key, entry] of tunnelRequestCounts.entries()) {
+    if (now - entry.windowStart > 60000) tunnelRequestCounts.delete(key);
+  }
+
   // Cleanup expired blocked IPs
   for (const [ip, entry] of blockedIps.entries()) {
     if (entry.expiresAt <= now) blockedIps.delete(ip);
@@ -1399,7 +1446,7 @@ export function cleanupExpiredEntries(): void {
     if (now - entry.firstSeen > 5 * 60 * 1000) suspiciousPatterns.delete(key);
   }
 
-  console.log('🧹 Security service cleanup completed');
+  console.log(`🧹 Security cleanup: httpBuckets=${httpTokenBuckets.size} tcpBuckets=${tcpTokenBuckets.size} blocked=${blockedIps.size}`);
 }
 
 // ============ Initialization ============
