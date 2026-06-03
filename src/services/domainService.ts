@@ -269,10 +269,17 @@ export async function getCustomDomain(domainName: string): Promise<CustomDomain 
 }
 
 /**
- * List all custom domains
+ * List all custom domains (super-admin / internal use only — not org-scoped).
  */
 export async function listCustomDomains(): Promise<CustomDomain[]> {
   return await db.getAllCustomDomains();
+}
+
+/**
+ * List custom domains owned by a specific organization.
+ */
+export async function listCustomDomainsByOrganization(organizationId: string): Promise<CustomDomain[]> {
+  return await db.getCustomDomainsByOrganization(organizationId);
 }
 
 /**

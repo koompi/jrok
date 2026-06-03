@@ -114,6 +114,11 @@ export async function getAllCustomDomains(): Promise<CustomDomain[]> {
   return await collections.customDomains.find({}).toArray() as CustomDomain[];
 }
 
+export async function getCustomDomainsByOrganization(organizationId: string): Promise<CustomDomain[]> {
+  const collections = getCollections();
+  return await collections.customDomains.find({ organizationId }).toArray() as CustomDomain[];
+}
+
 export async function getActiveDomains(): Promise<CustomDomain[]> {
   const collections = getCollections();
   return await collections.customDomains.find({ active: true }).toArray() as CustomDomain[];

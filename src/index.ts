@@ -185,6 +185,17 @@ if (process.env.NODE_ENV === "production") {
     console.error("   Generate a secure secret: openssl rand -base64 64");
     process.exit(1);
   }
+
+  // The /_gossip mesh is exposed on the public listener and is authenticated ONLY by
+  // GOSSIP_SECRET. Without it, verifyToken() allows any host that can reach the port to
+  // connect and inject routing entries (traffic hijack / SSRF). Require it in production.
+  if ((process.env.GOSSIP_SECRET || "").length < 16) {
+    console.error("❌ CRITICAL: GOSSIP_SECRET must be set (>= 16 chars) in production!");
+    console.error("   Without it, the /_gossip routing mesh is unauthenticated and anyone");
+    console.error("   who can reach this node's port can hijack traffic for any domain.");
+    console.error("   Generate once and set the SAME value on every node: openssl rand -base64 32");
+    process.exit(1);
+  }
 }
 
 // Initialize tunnel service with config
@@ -928,6 +939,24 @@ async function startServer() {
 
         // ============ Monitoring API Routes (Super Admin Only) ============
 
+        // Gate the entire monitoring surface: these endpoints expose system health,
+        // logs, metrics and a mutable config (PUT). Require an authenticated super admin.
+        if (path.startsWith("/admin/monitoring")) {
+          const monCtx = await authenticateRequest(req);
+          if (!monCtx) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Unauthorized" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          if (monCtx.user?.role !== "super_admin") {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Forbidden: super admin access required" }),
+              { status: 403, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+        }
+
         // Get full monitoring dashboard data
         if (path === "/admin/monitoring" && method === "GET") {
           return addCors(new Response(
@@ -1623,35 +1652,35 @@ async function startServer() {
     }
 
     if (path === "/domains" && method === "GET") {
-      return await domainHandler.handleListDomains();
+      return await domainHandler.handleListDomains(req);
     }
 
     // Check CNAME verification status - must be BEFORE generic /domains/:domain GET
     if (path.startsWith("/domains/") && path.endsWith("/verify-status") && method === "GET") {
       const domain = path.split("/")[2];
-      return await domainHandler.handleCheckCnameStatus(decodeURIComponent(domain));
+      return await domainHandler.handleCheckCnameStatus(decodeURIComponent(domain), req);
     }
 
     // Verify CNAME and issue certificate
     if (path.startsWith("/domains/") && path.endsWith("/verify") && method === "POST") {
       const domain = path.split("/")[2];
-      return await domainHandler.handleVerifyAndIssueCertificate(decodeURIComponent(domain));
+      return await domainHandler.handleVerifyAndIssueCertificate(decodeURIComponent(domain), req);
     }
 
     if (path.startsWith("/domains/") && path.endsWith("/resync") && method === "POST") {
       const domain = path.split("/")[2];
-      return await domainHandler.handleResyncDomain(decodeURIComponent(domain));
+      return await domainHandler.handleResyncDomain(decodeURIComponent(domain), req);
     }
 
     // Generic domain GET/DELETE - must be AFTER specific routes
     if (path.startsWith("/domains/") && method === "GET") {
       const domain = path.split("/")[2];
-      return await domainHandler.handleGetDomain(decodeURIComponent(domain));
+      return await domainHandler.handleGetDomain(decodeURIComponent(domain), req);
     }
 
     if (path.startsWith("/domains/") && method === "DELETE") {
       const domain = path.split("/")[2];
-      return await domainHandler.handleDeleteDomain(decodeURIComponent(domain));
+      return await domainHandler.handleDeleteDomain(decodeURIComponent(domain), req);
     }
 
     // NOTE: the /certificates/* sync API was removed. Edge TLS is handled by

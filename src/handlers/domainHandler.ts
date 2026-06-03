@@ -19,6 +19,36 @@ export interface ListDomainsResponse {
   total: number;
 }
 
+function jsonError(status: number, message: string): Response {
+  return new Response(
+    JSON.stringify({ success: false, message } as DomainResponse),
+    { status, headers: { "Content-Type": "application/json" } }
+  );
+}
+
+/**
+ * Authenticate the request and confirm the caller's organization owns `domainName`.
+ * Super admins bypass the ownership check. A domain that exists but is owned by a
+ * different organization is reported as 404 (not 403) so callers can't enumerate or
+ * probe other tenants' domains by name.
+ */
+async function authorizeDomain(
+  req: Request,
+  domainName: string
+): Promise<{ ok: true; domain: CustomDomain } | { ok: false; response: Response }> {
+  const authContext = await authService.authenticateRequest(req);
+  if (!authContext) {
+    return { ok: false, response: jsonError(401, "Unauthorized") };
+  }
+  const domain = await domainService.getCustomDomain(domainName);
+  const isSuperAdmin = authContext.user?.role === "super_admin";
+  const orgId = authContext.organization?.id;
+  if (!domain || (!isSuperAdmin && (!orgId || domain.organizationId !== orgId))) {
+    return { ok: false, response: jsonError(404, "Domain not found") };
+  }
+  return { ok: true, domain };
+}
+
 export async function handleRegisterDomain(req: Request): Promise<Response> {
   try {
     // Check global rate limit
@@ -52,25 +82,18 @@ export async function handleRegisterDomain(req: Request): Promise<Response> {
 
     // Validate input
     if (!body.domain || !contactEmail) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Missing required fields: domain and a contact email",
-        } as DomainResponse),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return jsonError(400, "Missing required fields: domain and a contact email");
     }
     body.certbotEmail = contactEmail;
 
     // Validate domain format (basic validation)
     if (!isValidDomain(body.domain)) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Invalid domain format",
-        } as DomainResponse),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return jsonError(400, "Invalid domain format");
+    }
+
+    // Validate the contact email format (it is persisted and surfaced in the UI).
+    if (!isValidEmail(contactEmail)) {
+      return jsonError(400, "Invalid contact email format");
     }
 
     // Check per-domain rate limit
@@ -94,11 +117,27 @@ export async function handleRegisterDomain(req: Request): Promise<Response> {
       );
     }
 
-    // ====== PLAN LIMIT CHECK: Domain Count ======
-    // Get organization from auth context
+    // ====== AUTH + ORGANIZATION BINDING ======
+    // Bind the domain to the caller's authenticated organization. NEVER trust an
+    // organizationId supplied in the request body — that would let any user register
+    // a domain under another organization. Super admins may target a specific org.
     const authContext = await authService.authenticateRequest(req);
-    if (authContext?.organization?.id) {
-      const domainLimitCheck = await planLimitService.checkDomainLimit(authContext.organization.id);
+    if (!authContext) {
+      return jsonError(401, "Unauthorized");
+    }
+    const callerOrgId = authContext.organization?.id;
+    if (authContext.user?.role === "super_admin") {
+      body.organizationId = body.organizationId || callerOrgId;
+    } else {
+      if (!callerOrgId) {
+        return jsonError(403, "No organization context for this request");
+      }
+      body.organizationId = callerOrgId;
+    }
+
+    // ====== PLAN LIMIT CHECK: Domain Count ======
+    if (body.organizationId) {
+      const domainLimitCheck = await planLimitService.checkDomainLimit(body.organizationId);
       if (!domainLimitCheck.allowed) {
         return new Response(
           JSON.stringify({
@@ -137,34 +176,19 @@ export async function handleRegisterDomain(req: Request): Promise<Response> {
   }
 }
 
-export async function handleGetDomain(domain: string): Promise<Response> {
+export async function handleGetDomain(domain: string, req: Request): Promise<Response> {
   try {
     if (!domain) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Domain name is required",
-        } as DomainResponse),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return jsonError(400, "Domain name is required");
     }
 
-    const customDomain = await domainService.getCustomDomain(domain);
-
-    if (!customDomain) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Domain not found",
-        } as DomainResponse),
-        { status: 404, headers: { "Content-Type": "application/json" } }
-      );
-    }
+    const auth = await authorizeDomain(req, domain);
+    if (!auth.ok) return auth.response;
 
     return new Response(
       JSON.stringify({
         success: true,
-        domain: customDomain,
+        domain: auth.domain,
       } as DomainResponse),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
@@ -181,9 +205,23 @@ export async function handleGetDomain(domain: string): Promise<Response> {
   }
 }
 
-export async function handleListDomains(): Promise<Response> {
+export async function handleListDomains(req: Request): Promise<Response> {
   try {
-    const domains = await domainService.listCustomDomains();
+    const authContext = await authService.authenticateRequest(req);
+    if (!authContext) {
+      return jsonError(401, "Unauthorized");
+    }
+
+    // Only ever return the caller's own organization's domains. Super admins may
+    // list everything.
+    let domains: CustomDomain[];
+    if (authContext.user?.role === "super_admin") {
+      domains = await domainService.listCustomDomains();
+    } else if (authContext.organization?.id) {
+      domains = await domainService.listCustomDomainsByOrganization(authContext.organization.id);
+    } else {
+      domains = [];
+    }
 
     return new Response(
       JSON.stringify({
@@ -206,29 +244,14 @@ export async function handleListDomains(): Promise<Response> {
   }
 }
 
-export async function handleDeleteDomain(domain: string): Promise<Response> {
+export async function handleDeleteDomain(domain: string, req: Request): Promise<Response> {
   try {
     if (!domain) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Domain name is required",
-        } as DomainResponse),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return jsonError(400, "Domain name is required");
     }
 
-    // Check if domain exists
-    const existingDomain = await domainService.getCustomDomain(domain);
-    if (!existingDomain) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Domain not found",
-        } as DomainResponse),
-        { status: 404, headers: { "Content-Type": "application/json" } }
-      );
-    }
+    const auth = await authorizeDomain(req, domain);
+    if (!auth.ok) return auth.response;
 
     await domainService.deleteCustomDomain(domain);
 
@@ -252,17 +275,14 @@ export async function handleDeleteDomain(domain: string): Promise<Response> {
   }
 }
 
-export async function handleResyncDomain(domain: string): Promise<Response> {
+export async function handleResyncDomain(domain: string, req: Request): Promise<Response> {
   try {
     if (!domain) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Domain name is required",
-        } as DomainResponse),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return jsonError(400, "Domain name is required");
     }
+
+    const auth = await authorizeDomain(req, domain);
+    if (!auth.ok) return auth.response;
 
     const customDomain = await domainService.resyncCertificate(domain);
 
@@ -330,20 +350,24 @@ function isValidDomain(domain: string): boolean {
 }
 
 /**
+ * Basic contact-email validation (single address, reasonable length).
+ */
+function isValidEmail(email: string): boolean {
+  return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+/**
  * Check CNAME verification status for a domain
  * GET /domains/:domain/verify-status
  */
-export async function handleCheckCnameStatus(domain: string): Promise<Response> {
+export async function handleCheckCnameStatus(domain: string, req: Request): Promise<Response> {
   try {
     if (!domain) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Domain name is required",
-        }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return jsonError(400, "Domain name is required");
     }
+
+    const auth = await authorizeDomain(req, domain);
+    if (!auth.ok) return auth.response;
 
     const status = await domainService.checkCnameStatus(domain);
 
@@ -370,17 +394,14 @@ export async function handleCheckCnameStatus(domain: string): Promise<Response> 
  * Verify CNAME and issue certificate
  * POST /domains/:domain/verify
  */
-export async function handleVerifyAndIssueCertificate(domain: string): Promise<Response> {
+export async function handleVerifyAndIssueCertificate(domain: string, req: Request): Promise<Response> {
   try {
     if (!domain) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Domain name is required",
-        }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return jsonError(400, "Domain name is required");
     }
+
+    const auth = await authorizeDomain(req, domain);
+    if (!auth.ok) return auth.response;
 
     const updatedDomain = await domainService.verifyAndIssueCertificate(domain);
 

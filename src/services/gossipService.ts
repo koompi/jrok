@@ -87,6 +87,7 @@ const ANTI_ENTROPY_INTERVAL_MS = 30_000; // push full state to peers
 const TOMBSTONE_TTL_MS = 5 * 60_000;     // keep tombstones this long before GC
 const STALE_ROUTE_TTL_MS = 90_000;       // evict remote routes whose node is gone & older than this
 const WHOHAS_TIMEOUT_MS = 300;           // how long to wait for a whoHas reply
+const MAX_ENTRIES_PER_MSG = 10_000;      // cap entries processed from one peer message (anti-DoS)
 
 let started = false;
 let discoveryTimer: any = null;
@@ -96,6 +97,24 @@ let gcTimer: any = null;
 // =============================================================================
 // CONFLICT RESOLUTION
 // =============================================================================
+
+/**
+ * Defensive shape check for entries received from peers. Peers are authenticated by
+ * GOSSIP_SECRET but are otherwise untrusted input; reject anything malformed so a
+ * single bad/compromised peer can't inject garbage routes or crash the merge.
+ */
+function isValidEntry(e: any): e is RouteEntry {
+  return (
+    e !== null && typeof e === "object" &&
+    typeof e.domain === "string" && e.domain.length > 0 && e.domain.length <= 253 &&
+    typeof e.agentId === "string" &&
+    typeof e.serverId === "string" && e.serverId.length > 0 && e.serverId.length <= 128 &&
+    typeof e.serverHost === "string" && e.serverHost.length > 0 && e.serverHost.length <= 253 &&
+    typeof e.serverPort === "number" && Number.isInteger(e.serverPort) && e.serverPort > 0 && e.serverPort <= 65535 &&
+    typeof e.active === "boolean" &&
+    typeof e.ts === "number" && Number.isFinite(e.ts)
+  );
+}
 
 /** Merge an incoming entry. Returns true if it changed our local state. */
 function mergeEntry(incoming: RouteEntry): boolean {
@@ -263,9 +282,10 @@ function handleMessage(ws: WebSocket, raw: string | Buffer): void {
     }
 
     case "delta": {
+      const entries = Array.isArray(msg.entries) ? msg.entries.slice(0, MAX_ENTRIES_PER_MSG) : [];
       const changed: RouteEntry[] = [];
-      for (const e of msg.entries) {
-        if (mergeEntry(e)) changed.push(e);
+      for (const e of entries) {
+        if (isValidEntry(e) && mergeEntry(e)) changed.push(e);
       }
       // Relay only what actually changed, to dampen storms (epidemic spread).
       if (changed.length) broadcast({ t: "delta", entries: changed }, ws);
@@ -273,11 +293,13 @@ function handleMessage(ws: WebSocket, raw: string | Buffer): void {
     }
 
     case "sync": {
-      for (const e of msg.entries) mergeEntry(e);
+      const entries = Array.isArray(msg.entries) ? msg.entries.slice(0, MAX_ENTRIES_PER_MSG) : [];
+      for (const e of entries) if (isValidEntry(e)) mergeEntry(e);
       break;
     }
 
     case "whohas": {
+      if (typeof msg.domain !== "string" || typeof msg.from !== "string" || typeof msg.rid !== "string") break;
       const e = routes.get(msg.domain);
       const entry = e && e.active ? e : null;
       // Only answer if we actually know it (reduces noise; askers tolerate silence).
@@ -291,12 +313,14 @@ function handleMessage(ws: WebSocket, raw: string | Buffer): void {
     }
 
     case "ihave": {
+      if (typeof msg.rid !== "string") break;
       const waiter = whoHasWaiters.get(msg.rid);
       if (waiter) {
-        if (msg.entry) mergeEntry(msg.entry);
+        const entry = msg.entry && isValidEntry(msg.entry) ? msg.entry : null;
+        if (entry) mergeEntry(entry);
         clearTimeout(waiter.timeout);
         whoHasWaiters.delete(msg.rid);
-        waiter.resolve(msg.entry && msg.entry.active ? msg.entry : null);
+        waiter.resolve(entry && entry.active ? entry : null);
       }
       break;
     }
