@@ -1554,13 +1554,17 @@ async function startServer() {
           }
 
           if (!agent || !agent.active) {
-            // Serve maintenance HTML page instead of JSON error
+            // Serve maintenance HTML page instead of JSON error.
+            // X-Jrok-Tunnel: down is a distinctive marker so the deploy worker's
+            // health monitor can tell "jrok has no agent for this domain" apart
+            // from a user app that merely returns its own 503, and restart the
+            // tunnel only in the former case.
             const maintenanceHtmlPath = import.meta.dir + "/../index.html";
             try {
               const htmlContent = await Bun.file(maintenanceHtmlPath).text();
               return addCors(new Response(htmlContent, {
                 status: 503,
-                headers: { "Content-Type": "text/html; charset=utf-8" }
+                headers: { "Content-Type": "text/html; charset=utf-8", "X-Jrok-Tunnel": "down" }
               }));
             } catch {
               // Fallback if index.html is not found
@@ -1569,7 +1573,7 @@ async function startServer() {
                   success: false,
                   message: `No active agent found for domain: ${subdomain}. Please ensure the agent is running: jrok --port <port> --domain ${subdomain}`,
                 }),
-                { status: 503, headers: { "Content-Type": "application/json" } }
+                { status: 503, headers: { "Content-Type": "application/json", "X-Jrok-Tunnel": "down" } }
               ));
             }
           }
@@ -1600,7 +1604,7 @@ async function startServer() {
                   success: false,
                   message: `Agent for ${subdomain} is not connected (readyState: ${finalWs?.readyState || 'null'}). ${isGroupDomain ? 'All agents in the group are unavailable.' : 'Attempting reconnection...'}`,
                 }),
-                { status: 503, headers: { "Content-Type": "application/json" } }
+                { status: 503, headers: { "Content-Type": "application/json", "X-Jrok-Tunnel": "down" } }
               ));
             }
           }
