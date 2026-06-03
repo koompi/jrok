@@ -1,19 +1,25 @@
 {
   "name": "kproxy",
-  "version": "2.3.0",
+  "version": "3.0.0",
   "description": "Expose local services (ports, Docker, Kubernetes) to the internet via secure reverse proxy with WebSocket and TCP tunnel support",
   "main": "dist/index.js",
   "bin": {
     "kproxy": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/index.js --minify",
-    "build:dev": "bun build src/index.ts --outdir dist --target node",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/index.js --minify --banner:js='#!/usr/bin/env node'",
+    "build:dev": "esbuild src/index.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/index.js --sourcemap --banner:js='#!/usr/bin/env node'",
     "bundle": "bun build src/index.ts --compile --outfile bin/kproxy-standalone",
     "bundle:all": "npm run build && npx @yao-pkg/pkg dist/index.js --targets node18-linux-x64,node18-macos-x64,node18-win-x64 --output bin/kproxy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "dev": "bun run src/index.ts",
     "prepare": "npm run build",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build && npm run typecheck"
   },
   "pkg": {
     "targets": [
@@ -48,10 +54,16 @@
   },
   "homepage": "https://github.com/koompi/jrok#readme",
   "dependencies": {
-    "ws": "^8.17.0"
+    "commander": "^12.1.0",
+    "picocolors": "^1.1.1",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.10",
     "@yao-pkg/pkg": "^6.11.0",
-    "esbuild": "^0.27.2"
+    "esbuild": "^0.27.2",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
   }
 }
