@@ -1,6 +1,11 @@
 # Self-Hosting Guide
 
-Deploy your own Jrok server for complete control over your tunnel infrastructure. This guide covers everything from zero to production.
+Deploy your own KProxy server for complete control over your tunnel infrastructure. This guide covers everything from zero to production.
+
+KProxy puts **Cloudflare** in front of every node for edge TLS and load balancing, and routes
+across nodes with an in-memory **gossip mesh**. There is **no nginx and no Certbot/Let's Encrypt** —
+Cloudflare owns every public certificate. For the full picture see [Architecture](../getting-started/architecture.md)
+and [Cloudflare Setup](../configuration/cloudflare.md).
 
 ## 🚀 Quick Deploy (Recommended)
 
@@ -14,13 +19,13 @@ cd jrok
 
 The script will interactively guide you through:
 - Creating VPS servers on DigitalOcean (via Terraform)
-- Configuring DNS and SSL certificates
+- Configuring proxied Cloudflare DNS and the Load Balancer origin pool
 - Deploying the application (via Ansible)
 - Verifying the deployment
 
 **Required credentials for automated deploy:**
 - DigitalOcean API Token
-- Cloudflare API Token
+- Cloudflare API Token (with **SSL and Certificates: Edit** for custom hostnames) and Zone ID
 - MongoDB Atlas Connection String
 - KOOMPI ID OAuth Credentials (Client ID & Secret)
 
@@ -36,7 +41,7 @@ Before you begin, you'll need:
 |-------------|-----------------|
 | Domain name | Any domain registrar |
 | DigitalOcean account | [digitalocean.com](https://cloud.digitalocean.com) |
-| Cloudflare account | [cloudflare.com](https://dash.cloudflare.com) |
+| Cloudflare account (zone added) | [cloudflare.com](https://dash.cloudflare.com) |
 | MongoDB Atlas account | [mongodb.com/atlas](https://cloud.mongodb.com) (free tier) |
 | KOOMPI ID developer account | [dash.koompi.org](https://dash.koompi.org) |
 | SSH key pair | Generate with `ssh-keygen -t rsa -b 4096` |
@@ -47,11 +52,9 @@ Before you begin, you'll need:
 |--------|----------|------|
 | **[Automated Script](#automated-deployment)** | Most users | ~10 min |
 | **[Manual Setup](#manual-deployment)** | Custom configurations | ~30 min |
-| **[Docker](#docker-deployment)** | Container environments | ~15 min |
+| **[Docker](./docker.md)** | Container environments | ~15 min |
 
 ---
-
-## Step 1: Get Required Credentials
 
 ## Step 1: Get Required Credentials
 
@@ -60,29 +63,31 @@ Before you begin, you'll need:
 1. Log in to [DigitalOcean](https://cloud.digitalocean.com)
 2. Go to **API** → **Tokens**
 3. Click **Generate New Token**
-4. Name it (e.g., "jrok-terraform")
+4. Name it (e.g., "kproxy-terraform")
 5. Select **Read & Write** scope
 6. Copy and save the token securely
 
-### 1.2 Cloudflare API Token
+### 1.2 Cloudflare API Token + Zone ID
 
 1. Log in to [Cloudflare Dashboard](https://dash.cloudflare.com)
 2. Go to your domain → **Overview**
-3. Copy your **Zone ID** (right sidebar)
-4. Go to **My Profile** → **API Tokens**
-5. Click **Create Token**
-6. Use **Edit zone DNS** template
-7. Select your specific zone
-8. Create token and copy it
+3. Copy your **Zone ID** (right sidebar) — this is `CF_ZONE_ID`
+4. Go to **My Profile** → **API Tokens** → **Create Token**
+5. Grant **SSL and Certificates: Edit** (and **Zone: Read**) scoped to your zone — this is `CF_API_TOKEN`
+6. Create the token and copy it
+
+> The Cloudflare token here is used by KProxy at runtime to register **Custom Hostnames**
+> (Cloudflare for SaaS) for customer custom domains. There is no Certbot/DNS-01 challenge anymore.
 
 ### 1.3 MongoDB Atlas Connection String
 
 1. Log in to [MongoDB Atlas](https://cloud.mongodb.com)
 2. Create a free cluster (or use existing)
 3. Go to **Database Access** → Create a database user
-4. Go to **Network Access** → Add IP `0.0.0.0/0` (allow all)
+4. Go to **Network Access** → Add your VPS IPs (or `0.0.0.0/0` for dynamic IPs)
 5. Go to **Database** → **Connect** → **Connect your application**
-6. Copy the connection string (replace `<password>` with your password)
+6. Copy the connection string (replace `<password>` with your password). MongoDB holds only
+   cold/durable state — it is **off the request hot path**.
 
 ### 1.4 KOOMPI ID OAuth Credentials
 
@@ -90,7 +95,7 @@ Before you begin, you'll need:
 2. Create a new project/application
 3. Set the OAuth redirect URI:
    ```
-   https://tunnel.yourdomain.com/auth/callback
+   https://live.yourdomain.com/auth/callback
    ```
 4. Copy **Client ID** and **Client Secret**
 
@@ -118,13 +123,39 @@ git clone https://github.com/koompi/jrok.git
 cd jrok
 ```
 
+### 2.3 Deploy Infrastructure
+
+```bash
+# Initialize Terraform
+tofu init
+
+# Preview changes
+tofu plan -out=tfplan
+
+# Apply changes
+tofu apply tfplan
+```
+
+**Output:**
+```
+vps_servers = [
+  {
+    "ip_address" = "152.42.226.37"
+    "name"       = "kproxy-1"
+    "region"     = "sgp1"
+  }
+]
+```
+
+Save the IP address(es) for the next steps.
+
 ---
 
 ## Automated Deployment
 
 ### Using the Deploy Script
 
-The easiest way to deploy Jrok is using our automated script:
+The easiest way to deploy KProxy is using our automated script:
 
 ```bash
 ./scripts/deploy.sh
@@ -132,36 +163,38 @@ The easiest way to deploy Jrok is using our automated script:
 
 #### What the Script Does
 
-1. **Prompts for configuration** - Domain, credentials, etc.
-2. **Saves configuration** - To `.deploy.env` for future runs
-3. **Creates VPS servers** - Using Terraform/OpenTofu
-4. **Syncs application code** - Via rsync to staging directory
-5. **Configures servers** - Using Ansible playbooks
-6. **Issues SSL certificates** - Via Certbot + Cloudflare DNS
-7. **Starts services** - Jrok server + Nginx
+1. **Prompts for configuration** — Domain, credentials, etc.
+2. **Saves configuration** — To `.deploy.env` for future runs
+3. **Creates VPS servers** — Using Terraform/OpenTofu
+4. **Syncs application code** — Via rsync to a staging directory
+5. **Configures servers** — Using Ansible (`docker` + `app` roles)
+6. **Starts services** — The `kproxy` systemd service on each node
+
+Edge TLS, the Load Balancer, and customer-domain certificates are all handled by **Cloudflare**
+(see [Cloudflare Setup](../configuration/cloudflare.md)); there is no Certbot or nginx to install.
 
 #### Interactive Prompts
 
 ```
 ╔════════════════════════════════════════╗
-║  jrok Deployment Script                ║
+║  kproxy Deployment Script                ║
 ╚════════════════════════════════════════╝
 
 Step 1: Configuration
 
-Domain name (e.g., example.com): tunnel.yourdomain.com
-Admin email (for Let's Encrypt): admin@yourdomain.com
-Cloudflare API token: xxxxxx
-Cloudflare email address: admin@yourdomain.com
-MongoDB Atlas URI: mongodb+srv://user:pass@cluster.mongodb.net/jrok
+Base domain (e.g., live.yourdomain.com): live.yourdomain.com
+Cloudflare API token (SSL and Certificates: Edit): xxxxxx
+Cloudflare Zone ID: xxxxxx
+Cloudflare for SaaS fallback hostname [live.yourdomain.com]:
+MongoDB Atlas URI: mongodb+srv://user:pass@cluster.mongodb.net/kproxy
 
 --- KOOMPI OAuth Configuration ---
 Please go to https://dash.koompi.org to create an account and project.
 
 KOOMPI Client ID: koompi_xxxxx
 KOOMPI Client Secret: secret_xxxxx
-KOOMPI Redirect URI [https://tunnel.yourdomain.com/auth/callback]: 
-Dashboard URL [https://tunnel.yourdomain.com]: 
+KOOMPI Redirect URI [https://live.yourdomain.com/auth/callback]:
+Dashboard URL [https://live.yourdomain.com]:
 
 ✓ Configuration saved
 
@@ -188,24 +221,25 @@ Use saved configuration? (yes/no): yes
 
 #### Selective Deployment
 
-The script lets you choose which components to deploy:
+The script lets you choose which Ansible roles to run:
 
 ```
 Select which roles to configure:
   1) All roles (recommended for fresh servers)
   2) Docker only
-  3) Certbot only
-  4) Nginx only
-  5) App only
+  3) App only
 
-Select option (1-5) [1]: 
+Select option (1-3) [1]:
 ```
+
+> Only the `docker` and `app` roles exist. The old `certbot` and `nginx` roles were removed when
+> TLS moved to Cloudflare and routing moved to the gossip mesh.
 
 ---
 
 ## Manual Deployment
 
-If you prefer manual control, follow these steps:
+If you prefer manual control, follow these steps.
 
 ### Step 2.1: Create terraform.tfvars
 
@@ -218,57 +252,40 @@ vps_count = 1                           # Number of VPS servers
 regions   = ["sgp1"]                    # DigitalOcean regions
 ```
 
-### 2.3 Deploy Infrastructure
+Then `tofu init && tofu apply` as in Step 2.3 above.
 
-```bash
-# Initialize Terraform
-tofu init
+## Step 3: Configure Cloudflare DNS + Load Balancer
 
-# Preview changes
-tofu plan -out=tfplan
-
-# Apply changes
-tofu apply tfplan
-```
-
-**Output:**
-```
-vps_servers = [
-  {
-    "ip_address" = "152.42.226.37"
-    "name"       = "jrok-1"
-    "region"     = "sgp1"
-  }
-]
-```
-
-Save the IP address for the next steps.
-
-## Step 3: Configure DNS
-
-### 3.1 Add DNS Records in Cloudflare
+### 3.1 Add DNS Records in Cloudflare (proxied)
 
 1. Go to your domain in Cloudflare → **DNS**
-2. Add these records:
+2. Add these records as **Proxied (orange cloud)** so the edge terminates TLS:
 
 | Type | Name | Content | Proxy |
 |------|------|---------|-------|
-| A | tunnel | `YOUR_VPS_IP` | DNS only (gray cloud) |
-| A | *.tunnel | `YOUR_VPS_IP` | DNS only (gray cloud) |
+| A / CNAME | `live` | your LB / node | **Proxied (orange)** |
+| A / CNAME | `*.live` | your LB / node | **Proxied (orange)** |
 
-> ⚠️ **Important**: Disable Cloudflare proxy (orange cloud) for wildcard SSL to work with Let's Encrypt.
+Universal SSL automatically covers `live.yourdomain.com` and one wildcard level
+`*.live.yourdomain.com` — auto-renewed, zero work.
 
-### 3.2 Verify DNS Propagation
+### 3.2 Origin TLS + Load Balancer
+
+- Install **one Cloudflare Origin CA certificate** on each node (or run `cloudflared` for zero certs).
+- Create a **Load Balancer origin pool** containing every node with a `GET /health` check.
+- Lock origins to **Cloudflare IPs** so nobody bypasses the edge.
+
+Full steps are in [Cloudflare Setup](../configuration/cloudflare.md).
+
+### 3.3 Verify DNS Propagation
 
 ```bash
 # Check main domain
-dig tunnel.yourdomain.com +short
+dig live.yourdomain.com +short
 
 # Check wildcard
-dig test.tunnel.yourdomain.com +short
+dig test.live.yourdomain.com +short
 ```
-
-Both should return your VPS IP address.
 
 ## Step 4: Deploy with Ansible
 
@@ -290,37 +307,49 @@ ansible --version
 Edit `ansible/inventory.ini`:
 
 ```ini
-[jrok_servers]
+[kproxy_servers]
 vps-1 ansible_host=YOUR_VPS_IP ansible_user=root ansible_ssh_private_key_file=~/.ssh/id_rsa
 
-[jrok_servers:vars]
+[kproxy_servers:vars]
 # Domain configuration
-domain_name=tunnel.yourdomain.com
-certbot_email=your-email@example.com
+base_domain=live.yourdomain.com
 
-# Cloudflare (for wildcard SSL)
-cloudflare_token=YOUR_CLOUDFLARE_TOKEN
+# Cloudflare for SaaS (customer custom domains)
+cf_api_token=YOUR_CLOUDFLARE_API_TOKEN     # SSL and Certificates: Edit
+cf_zone_id=YOUR_CLOUDFLARE_ZONE_ID
+cf_saas_fallback_hostname=live.yourdomain.com
 
-# MongoDB
-mongodb_uri=mongodb+srv://user:pass@cluster.mongodb.net/jrok?retryWrites=true&w=majority
+# Gossip routing mesh (same secret on every node)
+gossip_secret=YOUR_SHARED_GOSSIP_SECRET
 
-# KOOMPI OAuth
-koompi_client_id=YOUR_CLIENT_ID
-koompi_client_secret=YOUR_CLIENT_SECRET
-koompi_redirect_uri=https://tunnel.yourdomain.com/auth/callback
+# Per-node identity (unique VPS_ID, reachable VPS_HOST for /_gossip)
+vps_id=node-a
+vps_host=10.0.0.11
+vps_name=kproxy-1
+vps_region=sgp1
+
+# MongoDB (cold/durable state)
+mongodb_uri=mongodb+srv://user:password@cluster.mongodb.net/kproxy?retryWrites=true&w=majority
+
+# KOOMPI OAuth (dashboard login)
+koompi_client_id=YOUR_KOOMPI_CLIENT_ID
+koompi_client_secret=YOUR_KOOMPI_CLIENT_SECRET
+koompi_redirect_uri=https://live.yourdomain.com/auth/callback
 
 # Dashboard URL
-dashboard_url=https://tunnel.yourdomain.com
+dashboard_url=https://live.yourdomain.com
 
-# Security
+# Security secret (generate with: openssl rand -base64 64)
 jwt_secret=generate-a-secure-64-char-random-string
-cert_sync_api_key=generate-another-secure-string
 
-# Application
+# Repository settings
 repo_url=https://github.com/koompi/jrok.git
 repo_branch=main
-app_dir=/opt/jrok
+app_dir=/opt/kproxy
 ```
+
+> For multi-node deployments, give **each node a unique `vps_id`/`vps_host`** and the **same
+> `gossip_secret`**. See [Multi-Server Deployment](./multi-server.md).
 
 ### 4.3 Generate Secure Secrets
 
@@ -328,7 +357,7 @@ app_dir=/opt/jrok
 # Generate JWT secret
 openssl rand -base64 64
 
-# Generate API key
+# Generate gossip secret
 openssl rand -hex 32
 ```
 
@@ -343,8 +372,8 @@ ansible -i inventory.ini all -m ping
 # Run full deployment
 ansible-playbook -i inventory.ini playbook.yml
 
-# Or run specific tasks
-ansible-playbook -i inventory.ini playbook.yml --tags "certbot,nginx,app"
+# Or run specific roles
+ansible-playbook -i inventory.ini playbook.yml --tags "docker,app"
 ```
 
 ### 4.5 Verify Deployment
@@ -354,41 +383,31 @@ ansible-playbook -i inventory.ini playbook.yml --tags "certbot,nginx,app"
 ssh root@YOUR_VPS_IP
 
 # Check service status
-systemctl status jrok
+systemctl status kproxy
 
-# Check logs
-journalctl -u jrok -f
-
-# Check nginx
-nginx -t
-systemctl status nginx
-
-# Check certificate
-certbot certificates
+# Check logs (look for "gossip: connected to peer" in multi-node setups)
+journalctl -u kproxy -f
 ```
 
 ## Step 5: Deploy Dashboard (Optional)
 
-If you want to host the dashboard on the same server:
+The dashboard is a static Vite build. Host it on Cloudflare Pages, an object store, or any
+static host, and point it at your KProxy API:
 
 ```bash
 # On your local machine
 cd dashboard
 npm install
 npm run build
-
-# Copy build to server
-scp -r dist/* root@YOUR_VPS_IP:/var/www/dashboard/
+# Deploy ./dist to your static host of choice
 ```
-
-Update Nginx to serve the dashboard at the root domain.
 
 ## Step 6: Test Your Deployment
 
 ### 6.1 Test API Health
 
 ```bash
-curl https://tunnel.yourdomain.com/health
+curl https://live.yourdomain.com/health
 ```
 
 Expected response:
@@ -400,44 +419,52 @@ Expected response:
 
 ```bash
 # Install CLI
-npm install -g @koompi/jrok
+npm install -g kproxy
 
 # Configure
-jrok config --server https://tunnel.yourdomain.com --auth YOUR_API_KEY
+kproxy config --server https://live.yourdomain.com --auth YOUR_API_KEY
 
 # Connect a service
-jrok --port 3000
+kproxy --port 3000
 ```
 
 ---
 
 ## Troubleshooting
 
-### SSL Certificate Issues
+### TLS / Certificate Issues
+
+Certificates are managed by Cloudflare, not on the node:
+
+- **Your subdomains** → check **SSL/TLS → Edge Certificates** (Universal SSL) in the dashboard.
+- **Customer custom domains** → check **SSL/TLS → Custom Hostnames** for the hostname status.
+- Confirm SSL/TLS mode is **Full (strict)** and the Origin CA cert (or `cloudflared`) is in place.
 
 ```bash
-# Check certificate
-sudo certbot certificates
-
-# Force renewal
-sudo certbot renew --force-renewal
-
-# Check Cloudflare token
-cat /etc/letsencrypt/secrets/cloudflare.ini
+# Edge cert is live (browser ⇄ Cloudflare)
+curl -I https://live.yourdomain.com/health        # HTTP/2 200
 ```
 
 ### Connection Refused
 
 ```bash
 # Check if service is running
-systemctl status jrok
+systemctl status kproxy
 
-# Check firewall
+# Check firewall (allow :443 from Cloudflare IPs, plus your TCP tunnel range)
 sudo ufw status
-sudo ufw allow 3000
 
-# Check if port is listening
+# Check if the app port is listening
 ss -tlnp | grep 3000
+```
+
+### Gossip Peers Not Connecting (multi-node)
+
+```bash
+# Confirm VPS_HOST:PORT/_gossip is reachable node-to-node (private network)
+# Confirm GOSSIP_SECRET is identical on every node (mismatch → 403 on /_gossip)
+# Confirm each VPS_ID is unique
+journalctl -u kproxy | grep gossip
 ```
 
 ### MongoDB Connection Failed
@@ -446,14 +473,13 @@ ss -tlnp | grep 3000
 # Test MongoDB connection
 mongosh "YOUR_CONNECTION_STRING"
 
-# Check if IP is whitelisted in Atlas
-# Network Access → Add Current IP Address
+# Check if your VPS IP is whitelisted in Atlas (Network Access)
 ```
 
 ---
 
 ## Next Steps
 
-- [Environment Variables](../configuration/environment.md) - All configuration options
-- [Multi-Server Setup](../advanced/multi-server.md) - High availability
-- [Custom Domains](../advanced/custom-domains.md) - User-provided domains
+- [Cloudflare Setup](../configuration/cloudflare.md) — edge TLS, Load Balancer, Cloudflare for SaaS
+- [Environment Variables](../configuration/environment.md) — all configuration options
+- [Multi-Server Deployment](./multi-server.md) — the gossip mesh and scaling

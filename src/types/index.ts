@@ -40,24 +40,34 @@ export interface AgentMessage {
   payload?: unknown;
 }
 
+// DNS record a customer must add to prove ownership of a custom hostname
+// (returned by Cloudflare for SaaS during validation).
+export interface CustomHostnameOwnership {
+  type?: string;  // e.g. "txt"
+  name?: string;  // record name to add
+  value?: string; // record value
+}
+
 export interface CustomDomain {
   id: string;
   domain: string; // e.g., client1.com
-  baseDomain: boolean; // true if tunnel.example.com, false if custom
-  certPath?: string; // /etc/letsencrypt/live/client1.com/
-  certExpiry?: number; // timestamp when cert expires
-  cloudflareToken?: string; // encrypted for auto-renewal
-  certbotEmail: string;
+  baseDomain: boolean; // true if live.example.com, false if custom
+  certExpiry?: number; // timestamp when cert expires (Cloudflare-managed; informational)
+  certbotEmail: string; // retained as contact email (no longer used for issuance)
   createdAt: number;
   active: boolean;
-  synced: boolean; // true if cert synced to all VPS servers
+  synced: boolean; // true once Cloudflare reports the edge cert active
   lastSyncedAt?: number;
   // CNAME verification fields
-  targetSubdomain?: string; // The jrok subdomain to point to, e.g., "jersen-app"
-  cnameTarget?: string; // Full CNAME target, e.g., "jersen-app.tunnel.koompi.cloud"
+  targetSubdomain?: string; // internal reference subdomain
+  cnameTarget?: string; // Cloudflare-for-SaaS fallback hostname the customer CNAMEs to (DNS only)
   cnameVerified?: boolean; // True if CNAME has been verified
   cnameVerifiedAt?: number; // When CNAME was verified
   organizationId?: string; // Owner organization
+  // Cloudflare for SaaS (Custom Hostnames) — replaces Certbot/Let's Encrypt
+  cfHostnameId?: string; // Cloudflare custom hostname id
+  sslStatus?: string; // CF SSL status: pending | pending_validation | active | ...
+  ownershipVerification?: CustomHostnameOwnership; // TXT record for ownership validation
 }
 
 export interface Tunnel {
@@ -93,10 +103,7 @@ export interface TunnelIpSecurity {
 
 export interface TunnelConfig {
   vpsHost: string;
-  vpsUser: string;
-  vpsPort?: number; // SSH port, defaults to 22
-  nginxConfPath: string; // e.g., /etc/nginx/sites-available
-  baseDomain: string; // e.g., tunnel.example.com
+  baseDomain: string; // e.g., live.example.com
   apiKey: string; // for auth
 }
 

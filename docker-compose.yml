@@ -1,36 +1,37 @@
 version: '3.8'
 
 services:
-  # Bun jrok application
-  jrok:
+  # Bun kproxy application — terminates HTTP directly (no nginx),
+  # TLS handled by Cloudflare at the edge, routing via the in-memory gossip mesh.
+  kproxy:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: jrok-app
+    container_name: kproxy-app
     restart: always
     ports:
       - "3000:3000"
     volumes:
-      # Mount Let's Encrypt certificates (read-only)
-      - /etc/letsencrypt:/etc/letsencrypt:ro
-      # Mount Nginx config directory (writable)
-      - /etc/nginx:/etc/nginx
-      # Mount app data directory
+      # App data and logs (no /etc/nginx or /etc/letsencrypt mounts — Cloudflare owns TLS)
       - ./data:/app/data
-      # Mount logs
       - ./logs:/app/logs
     environment:
-      # Application settings
       - NODE_ENV=production
-      - MONGODB_URI=${MONGODB_URI:-mongodb+srv://user:pass@cluster.mongodb.net/jrok}
-      - CERT_SYNC_API_KEY=${CERT_SYNC_API_KEY:-change-me-32-chars}
-      - SERVER_ID=${SERVER_ID:-control-1}
-      - LOG_LEVEL=info
-      # Database settings (if using local MongoDB)
-      # - MONGODB_HOST=mongodb
-      # - MONGODB_PORT=27017
+      - PORT=3000
+      - MONGODB_URI=${MONGODB_URI:-mongodb+srv://user:pass@cluster.mongodb.net/kproxy}
+      - JWT_SECRET=${JWT_SECRET:-}
+      - API_KEY=${API_KEY:-}
+      - BASE_DOMAIN=${BASE_DOMAIN:-live.example.com}
+      # Cloudflare for SaaS (custom-domain certs) — replaces Certbot/Let's Encrypt
+      - CF_API_TOKEN=${CF_API_TOKEN:-}
+      - CF_ZONE_ID=${CF_ZONE_ID:-}
+      - CF_SAAS_FALLBACK_HOSTNAME=${CF_SAAS_FALLBACK_HOSTNAME:-}
+      # Gossip routing mesh (replaces per-tunnel nginx vhosts)
+      - GOSSIP_SECRET=${GOSSIP_SECRET:-}
+      - VPS_ID=${VPS_ID:-control-1}
+      - VPS_HOST=${VPS_HOST:-127.0.0.1}
     networks:
-      - jrok-net
+      - kproxy-net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
       interval: 30s
@@ -41,18 +42,15 @@ services:
   # Optional: Local MongoDB (use MongoDB Atlas free tier instead)
   # mongodb:
   #   image: mongo:latest
-  #   container_name: jrok-mongodb
+  #   container_name: kproxy-mongodb
   #   restart: always
   #   ports:
   #     - "27017:27017"
   #   volumes:
   #     - mongodb_data:/data/db
-  #   environment:
-  #     - MONGO_INITDB_ROOT_USERNAME=admin
-  #     - MONGO_INITDB_ROOT_PASSWORD=password
   #   networks:
-  #     - jrok-net
+  #     - kproxy-net
 
 networks:
-  jrok-net:
+  kproxy-net:
     driver: bridge

@@ -1,3 +1,5 @@
+> ⚠️ HISTORICAL — describes the pre-kproxy nginx + Certbot/Let's Encrypt (leader-based) design that was removed. See ../docs/getting-started/architecture.md for the current architecture.
+
 # Documentation Index: Leader-Based MongoDB Certificate Architecture
 
 ## 📚 Complete Documentation Suite

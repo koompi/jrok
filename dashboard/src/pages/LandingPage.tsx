@@ -9,7 +9,7 @@ import { api, Plan } from '@/lib/api';
 import { ModeToggle } from '@/components/mode-toggle';
 import { GLSLHills } from '@/components/ui/glsl-hills';
 import { TerminalDemo } from '@/components/TerminalDemo';
-import jrokLogo from '@/public/jrok-logo.png';
+import logo from '@/public/kproxy-logo.png';
 import { 
   Server, 
   Check, 
@@ -121,8 +121,8 @@ export default function LandingPage() {
       <header className="border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-50">
         <div className="container flex h-16 items-center justify-between">
           <div className="flex items-center gap-2">
-            <img src={jrokLogo} alt="Jrok Logo" className="h-12 w-12" />
-            <span className="text-xl font-bold">Jrok</span>
+            <img src={logo} alt="KProxy Logo" className="h-12 w-12" />
+            <span className="text-xl font-bold">KProxy</span>
           </div>
           <nav className="flex items-center gap-4">
             <ModeToggle />
@@ -182,7 +182,7 @@ export default function LandingPage() {
           <div className="space-y-8">
             <h2 className="text-3xl font-bold">Quick Start</h2>
             <p className="text-xl text-muted-foreground">
-              Get started with Jrok in minutes
+              Get started with KProxy in minutes
             </p>
             
             <div className="space-y-6">
@@ -217,7 +217,7 @@ export default function LandingPage() {
                 <div className="space-y-1">
                   <h3 className="font-semibold">Start a Tunnel</h3>
                   <code className="relative rounded bg-muted px-[0.3rem] py-[0.2rem] font-mono text-sm">
-                    jrok --port 3000
+                    kproxy --port 3000
                   </code>
                 </div>
               </div>
@@ -292,11 +292,11 @@ export default function LandingPage() {
       <footer className="border-t py-8">
         <div className="container flex flex-col md:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-2">
-            <img src={jrokLogo} alt="Jrok Logo" className="h-8 w-8 grayscale opacity-70" />
-            <span className="text-muted-foreground">Jrok</span>
+            <img src={logo} alt="KProxy Logo" className="h-8 w-8 grayscale opacity-70" />
+            <span className="text-muted-foreground">KProxy</span>
           </div>
           <p className="text-sm text-muted-foreground">
-            © {new Date().getFullYear()} Jrok. All rights reserved.
+            © {new Date().getFullYear()} KProxy. All rights reserved.
           </p>
         </div>
       </footer>

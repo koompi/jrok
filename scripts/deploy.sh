@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Deploy script for jrok
+# Deploy script for kproxy
 # Usage: ./scripts/deploy.sh
 #
 # This script automates the complete deployment:
@@ -8,6 +8,9 @@
 # 2. Runs Terraform to create VPS servers
 # 3. Runs Ansible to configure all servers
 # 4. Verifies deployment
+#
+# TLS is handled by Cloudflare at the edge (no nginx/certbot on the host).
+# Customer custom domains use Cloudflare for SaaS custom hostnames.
 #
 
 set -euo pipefail
@@ -24,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║  jrok Deployment Script         ║${NC}"
+echo -e "${BLUE}║  kproxy Deployment Script       ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -91,20 +94,41 @@ if [ -f "$PROJECT_ROOT/.deploy.env" ]; then
         if [ -z "${JWT_SECRET:-}" ]; then
             JWT_SECRET=$(openssl rand -hex 32)
         fi
+
+        # Generate new GOSSIP_SECRET if not present
+        if [ -z "${GOSSIP_SECRET:-}" ]; then
+            GOSSIP_SECRET=$(openssl rand -hex 32)
+        fi
+
+        # Check for missing Cloudflare for SaaS config in saved file
+        if [ -z "${CF_TOKEN:-}" ] || [ -z "${CF_ZONE_ID:-}" ] || [ -z "${CF_SAAS_FALLBACK_HOSTNAME:-}" ]; then
+            echo ""
+            echo -e "${YELLOW}Missing Cloudflare for SaaS configuration in saved file.${NC}"
+            echo -e "${BLUE}--- Cloudflare for SaaS (edge TLS) ---${NC}"
+            CF_TOKEN=$(prompt_input "Cloudflare API token (CF_API_TOKEN)")
+            CF_ZONE_ID=$(prompt_input "Cloudflare Zone ID (CF_ZONE_ID)")
+            CF_SAAS_FALLBACK_HOSTNAME=$(prompt_input "Cloudflare for SaaS fallback hostname" "tunnels.$DOMAIN")
+        fi
     else
         # Get new configuration
         DOMAIN=$(prompt_input "Domain name (e.g., example.com)")
-        EMAIL=$(prompt_input "Admin email (for Let's Encrypt)")
-        CF_TOKEN=$(prompt_input "Cloudflare API token")
-        CF_EMAIL=$(prompt_input "Cloudflare email address")
         MONGODB_URI=$(prompt_input "MongoDB Atlas URI" "mongodb+srv://user:password@cluster.mongodb.net/jrok")
-        API_KEY=$(prompt_input "Certificate sync API key" "$(openssl rand -hex 32)")
+        API_KEY=$(prompt_input "API key" "$(openssl rand -hex 32)")
+
+        # Cloudflare for SaaS Configuration (edge TLS + custom hostnames)
+        echo ""
+        echo -e "${BLUE}--- Cloudflare for SaaS (edge TLS) ---${NC}"
+        echo "Public TLS is terminated by Cloudflare; no certbot/nginx on the host."
+        CF_TOKEN=$(prompt_input "Cloudflare API token (CF_API_TOKEN)")
+        CF_ZONE_ID=$(prompt_input "Cloudflare Zone ID (CF_ZONE_ID)")
+        CF_SAAS_FALLBACK_HOSTNAME=$(prompt_input "Cloudflare for SaaS fallback hostname" "tunnels.$DOMAIN")
+        GOSSIP_SECRET=$(openssl rand -hex 32)
 
         # KOOMPI OAuth Configuration
         echo ""
         echo -e "${BLUE}--- KOOMPI OAuth Configuration ---${NC}"
         echo "Please go to https://dash.koompi.org to create an account and project."
-        
+
         KOOMPI_CLIENT_ID=$(prompt_input "KOOMPI Client ID")
         KOOMPI_CLIENT_SECRET=$(prompt_input "KOOMPI Client Secret")
         KOOMPI_REDIRECT_URI=$(prompt_input "KOOMPI Redirect URI" "https://$DOMAIN/auth/callback")
@@ -114,11 +138,20 @@ if [ -f "$PROJECT_ROOT/.deploy.env" ]; then
 else
     # Get deployment configuration
     DOMAIN=$(prompt_input "Domain name (e.g., example.com)")
-    EMAIL=$(prompt_input "Admin email (for Let's Encrypt)")
-    CF_TOKEN=$(prompt_input "Cloudflare API token")
-    CF_EMAIL=$(prompt_input "Cloudflare email address")
     MONGODB_URI=$(prompt_input "MongoDB Atlas URI" "mongodb+srv://user:password@cluster.mongodb.net/jrok")
-    API_KEY=$(prompt_input "Certificate sync API key" "$(openssl rand -hex 32)")
+    API_KEY=$(prompt_input "API key" "$(openssl rand -hex 32)")
+
+    # Cloudflare for SaaS Configuration (edge TLS + custom hostnames)
+    echo ""
+    echo -e "${BLUE}--- Cloudflare for SaaS (edge TLS) ---${NC}"
+    echo "Public TLS is terminated by Cloudflare; no certbot/nginx on the host."
+    echo "Customer custom domains CNAME (DNS-only) to the fallback hostname and"
+    echo "Cloudflare issues the edge certificate automatically."
+    echo ""
+    CF_TOKEN=$(prompt_input "Cloudflare API token (CF_API_TOKEN)")
+    CF_ZONE_ID=$(prompt_input "Cloudflare Zone ID (CF_ZONE_ID)")
+    CF_SAAS_FALLBACK_HOSTNAME=$(prompt_input "Cloudflare for SaaS fallback hostname" "tunnels.$DOMAIN")
+    GOSSIP_SECRET=$(openssl rand -hex 32)
 
     # KOOMPI OAuth Configuration
     echo ""
@@ -126,7 +159,7 @@ else
     echo "Please go to https://dash.koompi.org to create an account and project."
     echo "Create an OAuth application to get your Client ID and Secret."
     echo ""
-    
+
     KOOMPI_CLIENT_ID=$(prompt_input "KOOMPI Client ID")
     KOOMPI_CLIENT_SECRET=$(prompt_input "KOOMPI Client Secret")
     KOOMPI_REDIRECT_URI=$(prompt_input "KOOMPI Redirect URI" "https://$DOMAIN/api/auth/callback")
@@ -137,9 +170,10 @@ fi
 # Save configuration
 cat > "$PROJECT_ROOT/.deploy.env" <<EOF
 DOMAIN=$DOMAIN
-EMAIL=$EMAIL
 CF_TOKEN=$CF_TOKEN
-CF_EMAIL=$CF_EMAIL
+CF_ZONE_ID=$CF_ZONE_ID
+CF_SAAS_FALLBACK_HOSTNAME=$CF_SAAS_FALLBACK_HOSTNAME
+GOSSIP_SECRET=$GOSSIP_SECRET
 MONGODB_URI=$MONGODB_URI
 API_KEY=$API_KEY
 JWT_SECRET=$JWT_SECRET
@@ -213,32 +247,34 @@ if prompt_yesno "Run Terraform to create VPS servers?"; then
         PORT_START=10000
         
         cat > "$PROJECT_ROOT/ansible/inventory.ini.new" <<EOF
-# Ansible Inventory for jrok VPS deployment (auto-generated)
+# Ansible Inventory for kproxy VPS deployment (auto-generated)
 # Generated: $(date)
 
 [jrok_servers]
 EOF
-        
+
         for ((i=0; i<VPS_COUNT; i++)); do
             PORT_MIN=$((PORT_START + (i * PORTS_PER_SERVER)))
             PORT_MAX=$((PORT_MIN + PORTS_PER_SERVER - 1))
             REGION=${REGION_LIST[$((i % ${#REGION_LIST[@]}))]}
             VPS_ID="vps-$(printf '%03d' $((i+1)))"
-            
+
             echo "# Server $((i+1)): Replace YOUR_IP_$((i+1)) with actual IP" >> "$PROJECT_ROOT/ansible/inventory.ini.new"
-            echo "$VPS_ID ansible_host=YOUR_IP_$((i+1)) ansible_user=root vps_id=$VPS_ID vps_region=$REGION tcp_port_min=$PORT_MIN tcp_port_max=$PORT_MAX" >> "$PROJECT_ROOT/ansible/inventory.ini.new"
+            echo "$VPS_ID ansible_host=YOUR_IP_$((i+1)) ansible_user=root vps_id=$VPS_ID vps_host=YOUR_IP_$((i+1)) vps_region=$REGION tcp_port_min=$PORT_MIN tcp_port_max=$PORT_MAX" >> "$PROJECT_ROOT/ansible/inventory.ini.new"
             echo "" >> "$PROJECT_ROOT/ansible/inventory.ini.new"
         done
-        
+
         cat >> "$PROJECT_ROOT/ansible/inventory.ini.new" <<EOF
 [jrok_servers:vars]
 ansible_ssh_private_key_file=~/.ssh/id_rsa
 domain_name=$DOMAIN
-certbot_email=$EMAIL
-cloudflare_token=$CF_TOKEN
-cloudflare_email=$CF_EMAIL
+# Cloudflare for SaaS (edge TLS + custom hostnames)
+cf_api_token=$CF_TOKEN
+cf_zone_id=$CF_ZONE_ID
+cf_saas_fallback_hostname=$CF_SAAS_FALLBACK_HOSTNAME
+# Gossip mesh shared secret (cross-node routing)
+gossip_secret=$GOSSIP_SECRET
 mongodb_uri=$MONGODB_URI
-cert_sync_api_key=$API_KEY
 api_key=$API_KEY
 EOF
         
@@ -286,27 +322,19 @@ if prompt_yesno "Run Ansible to configure VPS servers?"; then
     echo "Select which roles to configure:"
     echo "  1) All roles (recommended for fresh servers)"
     echo "  2) Docker only"
-    echo "  3) Certbot only"
-    echo "  4) Nginx only"
-    echo "  5) App only"
+    echo "  3) App only"
     echo ""
-    
-    ROLE_CHOICE=$(prompt_input "Select option (1-5)" "1")
-    
+
+    ROLE_CHOICE=$(prompt_input "Select option (1-3)" "1")
+
     case "$ROLE_CHOICE" in
         1)
-            TAGS="always,basic,docker,certbot,nginx,app,firewall,verify"
+            TAGS="always,basic,docker,app,firewall,verify"
             ;;
         2)
             TAGS="always,docker"
             ;;
         3)
-            TAGS="always,certbot"
-            ;;
-        4)
-            TAGS="always,nginx"
-            ;;
-        5)
             TAGS="always,app"
             ;;
         *)
@@ -318,7 +346,6 @@ if prompt_yesno "Run Ansible to configure VPS servers?"; then
     echo ""
     echo -e "${BLUE}Running Ansible playbook...${NC}"
     echo "Domain: $DOMAIN"
-    echo "Email: $EMAIL"
     echo "Servers: $VPS_COUNT"
     echo "Tags: $TAGS"
     echo ""
@@ -381,11 +408,12 @@ if prompt_yesno "Run Ansible to configure VPS servers?"; then
         -i "$PROJECT_ROOT/ansible/inventory.ini" \
         --tags="$TAGS" \
         -e "domain_name=$DOMAIN" \
-        -e "certbot_email=$EMAIL" \
-        -e "cloudflare_token=$CF_TOKEN" \
-        -e "cloudflare_email=$CF_EMAIL" \
+        -e "cf_api_token=$CF_TOKEN" \
+        -e "cf_zone_id=$CF_ZONE_ID" \
+        -e "cf_saas_fallback_hostname=$CF_SAAS_FALLBACK_HOSTNAME" \
+        -e "gossip_secret=$GOSSIP_SECRET" \
         -e "mongodb_uri=$MONGODB_URI" \
-        -e "cert_sync_api_key=$API_KEY" \
+        -e "api_key=$API_KEY" \
         -e "jwt_secret=$JWT_SECRET" \
         -e "koompi_client_id=$KOOMPI_CLIENT_ID" \
         -e "koompi_client_secret=$KOOMPI_CLIENT_SECRET" \
@@ -409,24 +437,27 @@ echo "Playbook location: $PROJECT_ROOT/ansible/playbook.yml"
 echo ""
 echo "Next steps:"
 echo "  1. Verify all services are running:"
-echo "     ansible all -i ansible/inventory.ini -m command -a 'systemctl status jrok'"
+echo "     ansible all -i ansible/inventory.ini -m command -a 'systemctl status kproxy'"
 echo ""
-echo "  2. Check certificate status:"
-echo "     ansible all -i ansible/inventory.ini -m command -a 'sudo certbot certificates'"
-echo ""
-echo "  3. Test HTTPS access:"
+echo "  2. Test HTTPS access (TLS terminated by Cloudflare at the edge):"
 echo "     curl -v https://$DOMAIN/health"
 echo ""
-echo "  4. Check cluster status (multi-server):"
+echo "  3. Check cluster status (multi-server):"
 echo "     curl https://$DOMAIN/cluster/stats"
 echo ""
-echo "  5. View logs on a server:"
-echo "     ssh root@VPS_IP 'journalctl -u jrok -f'"
+echo "  4. View logs on a server:"
+echo "     ssh root@VPS_IP 'journalctl -u kproxy -f'"
+echo ""
+echo -e "${BLUE}TLS / Certificates:${NC}"
+echo "  - Public TLS is handled by Cloudflare at the edge (no certbot/nginx on host)."
+echo "  - Set CF_API_TOKEN, CF_ZONE_ID and CF_SAAS_FALLBACK_HOSTNAME for the app."
+echo "  - Customer custom domains CNAME (DNS-only) to $CF_SAAS_FALLBACK_HOSTNAME;"
+echo "    Cloudflare for SaaS issues and renews the edge certificate automatically."
 echo ""
 echo -e "${BLUE}Multi-Server Configuration:${NC}"
-echo "  - Each server has unique VPS_ID and TCP port range"
+echo "  - Each server has unique VPS_ID, VPS_HOST and TCP port range"
 echo "  - Port ranges are set in ansible/inventory.ini"
-echo "  - Nginx uses consistent hashing for session affinity"
+echo "  - Routing uses an in-memory gossip mesh (shared GOSSIP_SECRET)"
 echo "  - MongoDB stores distributed state for cross-server routing"
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"

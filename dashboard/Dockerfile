@@ -6,7 +6,7 @@ WORKDIR /app
 
 # Set them as Environment Variables for the build process
 ENV VITE_ALLOWED_HOSTS=jrok.koompi.cloud
-ENV VITE_API_URL=https://tunnel.koompi.cloud
+ENV VITE_API_URL=https://live.koompi.cloud
 
 # Copy the package.json and package-lock.json files to the container
 COPY package.json package-lock.json ./

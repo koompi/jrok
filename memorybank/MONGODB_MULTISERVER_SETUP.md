@@ -1,3 +1,5 @@
+> ⚠️ HISTORICAL — describes the pre-kproxy nginx + Certbot/Let's Encrypt (leader-based) design that was removed. See ../docs/getting-started/architecture.md for the current architecture.
+
 # Jrok - Multi-Server Setup Guide
 
 Complete guide to setting up Jrok with MongoDB Atlas and 3-5 VPS servers.

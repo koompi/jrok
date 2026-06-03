@@ -99,16 +99,16 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   let customDomainRecord = null;
   
   if (domain.includes('.')) {
-    // This looks like a custom domain (e.g., jrok.jersen.app)
+    // This looks like a custom domain (e.g., kproxy.jersen.app)
     // Validate it's a registered and active custom domain
     customDomainRecord = await db.getCustomDomainByName(domain);
     
     if (!customDomainRecord) {
-      return new Response(`Custom domain '${domain}' is not registered. Use 'jrok domain register' first.`, { status: 400 });
+      return new Response(`Custom domain '${domain}' is not registered. Use 'kproxy domain register' first.`, { status: 400 });
     }
     
     if (!customDomainRecord.active) {
-      return new Response(`Custom domain '${domain}' is not verified. Use 'jrok domain verify' to issue SSL certificate.`, { status: 400 });
+      return new Response(`Custom domain '${domain}' is not verified. Use 'kproxy domain verify' to issue SSL certificate.`, { status: 400 });
     }
     
     // SECURITY: Verify the user has permission to use this custom domain

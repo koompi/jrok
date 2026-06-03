@@ -1,6 +1,8 @@
 # MongoDB Setup
 
-Configure MongoDB as the database for Jrok.
+Configure MongoDB as the **cold/durable** store for kproxy (users, orgs, API keys, tunnel & custom-domain records). It is **not** on the request hot path — live routing is held in the in-memory gossip mesh — so a brief MongoDB outage does not drop live traffic.
+
+> **Database name:** defaults to `kproxy` (`MONGO_DB_NAME`). Migrating an existing `jrok` deployment? Either set `MONGO_DB_NAME=jrok` or migrate the data (`mongodump --db jrok` → `mongorestore --nsFrom 'jrok.*' --nsTo 'kproxy.*'`).
 
 ## Options
 
@@ -22,7 +24,7 @@ Configure MongoDB as the database for Jrok.
 3. Choose your cloud provider and region:
    - **AWS** → Pick region closest to your VPS
    - **Google Cloud** or **Azure** work too
-4. Name your cluster (e.g., `jrok-cluster`)
+4. Name your cluster (e.g., `kproxy-cluster`)
 5. Click **"Create Cluster"**
 
 ### Step 3: Create Database User
@@ -31,7 +33,7 @@ Configure MongoDB as the database for Jrok.
 2. Click **"Add New Database User"**
 3. Choose **"Password"** authentication
 4. Enter username and password:
-   - Username: `jrokuser`
+   - Username: `kproxyuser`
    - Password: Generate a secure password
 5. Set **"Built-in Role"** to **"Read and write to any database"**
 6. Click **"Add User"**
@@ -59,16 +61,19 @@ Configure MongoDB as the database for Jrok.
 
 It looks like:
 ```
-mongodb+srv://jrokuser:<password>@jrok-cluster.xxxxx.mongodb.net/?retryWrites=true&w=majority
+mongodb+srv://kproxyuser:<password>@kproxy-cluster.xxxxx.mongodb.net/?retryWrites=true&w=majority
 ```
 
 ### Step 6: Configure Connection String
 
-Replace `<password>` and add database name:
+Replace `<password>` and add the database name (default `kproxy`):
 
 ```bash
-MONGODB_URI=mongodb+srv://jrokuser:YOUR_PASSWORD@jrok-cluster.xxxxx.mongodb.net/jrok?retryWrites=true&w=majority
+MONGODB_URI=mongodb+srv://kproxyuser:YOUR_PASSWORD@kproxy-cluster.xxxxx.mongodb.net/kproxy?retryWrites=true&w=majority
 ```
+
+> Migrating an existing **`jrok`** database? Keep pointing at it by setting `MONGO_DB_NAME=jrok`
+> (or migrate the data). Otherwise the default database name is `kproxy`.
 
 ## Self-Hosted MongoDB
 
@@ -79,7 +84,7 @@ MONGODB_URI=mongodb+srv://jrokuser:YOUR_PASSWORD@jrok-cluster.xxxxx.mongodb.net/
 services:
   mongodb:
     image: mongo:7
-    container_name: jrok-mongodb
+    container_name: kproxy-mongodb
     restart: always
     ports:
       - "27017:27017"
@@ -95,7 +100,7 @@ volumes:
 
 Connection string:
 ```bash
-MONGODB_URI=mongodb://admin:your-secure-password@localhost:27017/jrok?authSource=admin
+MONGODB_URI=mongodb://admin:your-secure-password@localhost:27017/kproxy?authSource=admin
 ```
 
 ### Native Installation (Ubuntu)
@@ -120,20 +125,23 @@ sudo systemctl enable mongod
 
 ## Database Schema
 
-Jrok automatically creates these collections:
+kproxy automatically creates these collections:
 
 | Collection | Description |
 |------------|-------------|
 | `users` | User accounts from OAuth |
 | `organizations` | Organizations (multi-tenant) |
-| `apikeys` | API keys for CLI authentication |
+| `apiKeys` | API keys for CLI authentication |
 | `sessions` | User sessions |
 | `tunnels` | Active and historical tunnels |
-| `domains` | Custom domains with certificates |
-| `vpsservers` | Registered VPS servers |
-| `certificates` | SSL certificate storage |
-| `bandwidthStats` | Usage statistics |
-| `activities` | Audit log |
+| `customDomains` | Custom-domain records (Cloudflare-for-SaaS hostname id + status) |
+| `agentConnections` | Durable agent registry (cold fallback; routing is via gossip) |
+| `serverHeartbeats` | Node liveness for peer discovery |
+| `tcpPortAllocations` | TCP tunnel port assignments |
+| `bandwidthUsage` | Usage statistics |
+| `auditLogs` | Audit log |
+
+> Removed: the `certificates` and cert-sync collections — certificates are now issued and stored by **Cloudflare**, not in MongoDB.
 
 ## Connection String Format
 
@@ -166,7 +174,7 @@ mongodb://user:pass@host1:27017,host2:27017,host3:27017/database?replicaSet=rs0
 
 Example with all options:
 ```
-mongodb+srv://user:pass@cluster.mongodb.net/jrok?retryWrites=true&w=majority&maxPoolSize=50&connectTimeoutMS=10000
+mongodb+srv://user:pass@cluster.mongodb.net/kproxy?retryWrites=true&w=majority&maxPoolSize=50&connectTimeoutMS=10000
 ```
 
 ## Testing Connection
@@ -178,7 +186,7 @@ mongodb+srv://user:pass@cluster.mongodb.net/jrok?retryWrites=true&w=majority&max
 npm install -g mongosh
 
 # Test connection
-mongosh "mongodb+srv://user:pass@cluster.mongodb.net/jrok"
+mongosh "mongodb+srv://user:pass@cluster.mongodb.net/kproxy"
 
 # List collections
 show collections
@@ -189,14 +197,14 @@ show collections
 ```javascript
 const { MongoClient } = require('mongodb');
 
-const uri = "mongodb+srv://user:pass@cluster.mongodb.net/jrok";
+const uri = "mongodb+srv://user:pass@cluster.mongodb.net/kproxy";
 const client = new MongoClient(uri);
 
 async function test() {
   try {
     await client.connect();
     console.log("Connected successfully!");
-    const db = client.db("jrok");
+    const db = client.db("kproxy");
     const collections = await db.listCollections().toArray();
     console.log("Collections:", collections.map(c => c.name));
   } finally {
@@ -217,10 +225,10 @@ M0 clusters have limited backup. Upgrade to M2+ for automatic backups.
 
 ```bash
 # Using mongodump
-mongodump --uri="mongodb+srv://user:pass@cluster.mongodb.net/jrok" --out=./backup
+mongodump --uri="mongodb+srv://user:pass@cluster.mongodb.net/kproxy" --out=./backup
 
 # Restore
-mongorestore --uri="mongodb+srv://user:pass@cluster.mongodb.net/jrok" ./backup/jrok
+mongorestore --uri="mongodb+srv://user:pass@cluster.mongodb.net/kproxy" ./backup/kproxy
 ```
 
 ## Monitoring

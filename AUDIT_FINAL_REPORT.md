@@ -1,3 +1,5 @@
+> ⚠️ SUPERSEDED — this audit predates the kproxy migration and describes the removed nginx + Certbot/Let's Encrypt + MongoDB cert-sync architecture. Kept for history.
+
 # Codebase Audit - Final Report
 **Date:** December 19, 2025  
 **Project:** Jrok Tunnel Service v2.3.0  

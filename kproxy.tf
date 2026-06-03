@@ -23,22 +23,22 @@ resource "digitalocean_ssh_key" "my_key" {
 }
 
 # Define VPS servers (configurable count)
-resource "digitalocean_droplet" "jrok" {
+resource "digitalocean_droplet" "kproxy" {
   count = var.vps_count
-  
+
   image    = "ubuntu-22-04-x64"
-  name     = "jrok-${count.index + 1}"                          # jrok-1, jrok-2, etc
+  name     = "kproxy-${count.index + 1}"                        # kproxy-1, kproxy-2, etc
   region   = var.regions[count.index % length(var.regions)]            # Cycle through regions
   size     = "s-1vcpu-1gb"
   ssh_keys = [digitalocean_ssh_key.my_key.id]
-  
-  tags     = ["jrok", "production"]
+
+  tags     = ["kproxy", "production"]
 }
 
 # Output all VPS IP addresses
 output "vps_servers" {
   value = [
-    for i, droplet in digitalocean_droplet.jrok :
+    for i, droplet in digitalocean_droplet.kproxy :
     {
       name       = droplet.name
       ip_address = droplet.ipv4_address
@@ -51,7 +51,7 @@ output "vps_servers" {
 
 output "vps_ips_list" {
   value = [
-    for droplet in digitalocean_droplet.jrok :
+    for droplet in digitalocean_droplet.kproxy :
     droplet.ipv4_address
   ]
   description = "Simple list of all VPS IP addresses"

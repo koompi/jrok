@@ -1,5 +1,10 @@
 import { MongoClient, Db, Collection } from "mongodb";
 
+// Database name. Defaults to "kproxy". IMPORTANT: existing deployments created
+// under the old "jrok" name must set MONGO_DB_NAME=jrok (or migrate the data),
+// otherwise the app connects to a fresh empty "kproxy" database.
+export const DB_NAME = process.env.MONGO_DB_NAME || "kproxy";
+
 let db: Db;
 let client: MongoClient;
 
@@ -33,13 +38,13 @@ export interface Collections {
 let collections: Collections;
 
 export async function connectDatabase(): Promise<void> {
-  const mongoUri = process.env.MONGODB_URI || "mongodb://localhost:27017/jrok";
+  const mongoUri = process.env.MONGODB_URI || "mongodb://localhost:27017/kproxy";
 
   client = new MongoClient(mongoUri);
 
   try {
     await client.connect();
-    db = client.db("jrok");
+    db = client.db(DB_NAME);
 
     // Initialize collections
     collections = {
@@ -73,7 +78,7 @@ export async function connectDatabase(): Promise<void> {
     await createIndexes();
     await createSaaSIndexes();
 
-    console.log("✅ Connected to MongoDB");
+    console.log(`✅ Connected to MongoDB (database: ${DB_NAME})`);
   } catch (error) {
     console.error("❌ Failed to connect to MongoDB:", error);
     throw error;

@@ -4,6 +4,7 @@ import * as tunnelService from "./tunnelService";
 import * as activityService from "./activityService";
 import { getTunnelByDomain, invalidateTunnelCache } from "../utils/database";
 import { getCollections } from "../utils/mongodb";
+import * as gossipService from "./gossipService";
 
 // =============================================================================
 // DISTRIBUTED AGENT SERVICE
@@ -204,6 +205,16 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
   // Store local WebSocket reference
   localSockets.set(agentId, socket);
 
+  // Publish to the gossip routing table (hot path) — replicated to all nodes
+  // in-memory so cross-node requests resolve without a MongoDB round-trip.
+  gossipService.register({
+    domain: finalDomain,
+    agentId,
+    serverId: SERVER_ID,
+    serverHost: SERVER_HOST,
+    serverPort: SERVER_PORT,
+  });
+
   // Create Agent object for return value
   const agent: Agent = {
     id: agentId,
@@ -374,7 +385,10 @@ export async function unregisterAgent(id: string): Promise<void> {
   if (connection) {
     // Remove from MongoDB
     await collections.agentConnections.deleteOne({ agentId: id });
-    
+
+    // Tombstone in the gossip routing table so all nodes stop routing here.
+    gossipService.unregister(connection.domain);
+
     // Mark tunnel as inactive
     try {
       await collections.tunnels.updateOne(

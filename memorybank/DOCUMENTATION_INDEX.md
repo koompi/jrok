@@ -1,3 +1,5 @@
+> ⚠️ HISTORICAL — describes the pre-kproxy nginx + Certbot/Let's Encrypt (leader-based) design that was removed. See ../docs/getting-started/architecture.md for the current architecture.
+
 # 📚 Complete Documentation Index
 
 ## Your jrok is Now Production-Ready! 🚀

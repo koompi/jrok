@@ -6,7 +6,6 @@ import {
   SystemLog, 
   RateLimitStats,
   AuthMetrics,
-  CertMetrics,
   SystemMetricsSnapshot,
   SystemConfig,
   MonitoringConfig
@@ -383,29 +382,6 @@ export default function MonitoringPage() {
             <Card>
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm flex items-center gap-2">
-                  <Lock className="h-4 w-4" />
-                  Cert Renewals
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="text-xl font-bold">
-                  {data.certificates.renewalSuccesses}
-                  <span className="text-red-500 text-sm ml-1">
-                    ({data.certificates.renewalFailures} failed)
-                  </span>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {data.certificates.lastRenewal 
-                    ? `Last: ${formatDateTime(data.certificates.lastRenewal)}`
-                    : 'No renewals yet'
-                  }
-                </p>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm flex items-center gap-2">
                   <FileText className="h-4 w-4" />
                   Map Sizes
                 </CardTitle>
@@ -581,34 +557,6 @@ export default function MonitoringPage() {
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Certificate Metrics</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <div className="text-sm text-muted-foreground">Attempts</div>
-                  <div className="text-2xl font-bold">{data.certificates.renewalAttempts}</div>
-                </div>
-                <div>
-                  <div className="text-sm text-muted-foreground">Successes</div>
-                  <div className="text-2xl font-bold text-green-500">{data.certificates.renewalSuccesses}</div>
-                </div>
-                <div>
-                  <div className="text-sm text-muted-foreground">Failures</div>
-                  <div className="text-2xl font-bold text-red-500">{data.certificates.renewalFailures}</div>
-                </div>
-              </div>
-              
-              {data.certificates.lastError && (
-                <div className="mt-4 p-2 bg-red-500/10 border border-red-500/50 rounded">
-                  <div className="text-sm font-medium text-red-500">Last Error</div>
-                  <p className="text-sm">{data.certificates.lastError}</p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
         </TabsContent>
 
         {/* Config Tab */}

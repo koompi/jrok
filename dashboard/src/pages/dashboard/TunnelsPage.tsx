@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { api, EnhancedTunnel } from '@/lib/api';
+import { api, EnhancedTunnel, BASE_DOMAIN } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -88,7 +88,7 @@ const transformTunnel = (tunnel: EnhancedTunnel): TunnelUIData => ({
   subdomain: tunnel.domain,
   domain: tunnel.customDomain 
     ? `${tunnel.domain}.${tunnel.customDomain}`
-    : `${tunnel.domain}.jrok.io`,
+    : `${tunnel.domain}.${BASE_DOMAIN}`,
   status: tunnel.status,
   localPort: 3000, // Default, would come from agent data
   localHost: 'localhost',
@@ -180,7 +180,7 @@ export default function TunnelsPage() {
   const handleCreateTunnel = () => {
     toast({
       title: 'Tunnel configuration saved',
-      description: 'Use the CLI to start this tunnel: jrok tunnel --port ' + newTunnelPort,
+      description: 'Use the CLI to start this tunnel: kproxy tunnel --port ' + newTunnelPort,
     });
     setIsDialogOpen(false);
     setNewTunnelName('');
@@ -248,7 +248,7 @@ export default function TunnelsPage() {
                     value={newTunnelSubdomain}
                     onChange={(e) => setNewTunnelSubdomain(e.target.value)}
                   />
-                  <span className="text-sm text-muted-foreground whitespace-nowrap">.jrok.io</span>
+                  <span className="text-sm text-muted-foreground whitespace-nowrap">.{BASE_DOMAIN}</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Leave empty for a random subdomain
@@ -587,13 +587,13 @@ export default function TunnelsPage() {
                 <p className="font-medium mb-2">Basic tunnel (random subdomain)</p>
                 <div className="relative">
                   <pre className="bg-background/80 border rounded-lg p-3 text-sm font-mono overflow-x-auto">
-                    jrok --port 3000
+                    kproxy --port 3000
                   </pre>
                   <Button 
                     variant="ghost" 
                     size="icon" 
                     className="absolute top-2 right-2 h-7 w-7"
-                    onClick={() => copyToClipboard('jrok --port 3000')}
+                    onClick={() => copyToClipboard('kproxy --port 3000')}
                   >
                     <Copy className="h-3.5 w-3.5" />
                   </Button>
@@ -606,13 +606,13 @@ export default function TunnelsPage() {
                 <p className="font-medium mb-2">Custom subdomain</p>
                 <div className="relative">
                   <pre className="bg-background/80 border rounded-lg p-3 text-sm font-mono overflow-x-auto">
-                    jrok --port 3000 --domain my-app
+                    kproxy --port 3000 --domain my-app
                   </pre>
                   <Button 
                     variant="ghost" 
                     size="icon" 
                     className="absolute top-2 right-2 h-7 w-7"
-                    onClick={() => copyToClipboard('jrok --port 3000 --domain my-app')}
+                    onClick={() => copyToClipboard('kproxy --port 3000 --domain my-app')}
                   >
                     <Copy className="h-3.5 w-3.5" />
                   </Button>
@@ -625,13 +625,13 @@ export default function TunnelsPage() {
                 <p className="font-medium mb-2">TCP tunnel (SSH, MongoDB, etc.)</p>
                 <div className="relative">
                   <pre className="bg-background/80 border rounded-lg p-3 text-sm font-mono overflow-x-auto">
-                    jrok --tcp --port 22 --domain my-ssh
+                    kproxy --tcp --port 22 --domain my-ssh
                   </pre>
                   <Button 
                     variant="ghost" 
                     size="icon" 
                     className="absolute top-2 right-2 h-7 w-7"
-                    onClick={() => copyToClipboard('jrok --tcp --port 22 --domain my-ssh')}
+                    onClick={() => copyToClipboard('kproxy --tcp --port 22 --domain my-ssh')}
                   >
                     <Copy className="h-3.5 w-3.5" />
                   </Button>

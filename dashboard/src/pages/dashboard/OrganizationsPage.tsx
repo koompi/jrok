@@ -127,7 +127,7 @@ export default function OrganizationsPage() {
                   onChange={(e) => setNewOrgName(e.target.value)}
                 />
                 <p className="text-xs text-muted-foreground">
-                  This will be used to identify your organization across Jrok.
+                  This will be used to identify your organization across KProxy.
                 </p>
               </div>
             </div>

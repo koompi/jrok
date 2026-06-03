@@ -1,16 +1,16 @@
 {
-  "name": "jrok",
+  "name": "kproxy",
   "version": "2.3.0",
   "description": "Expose local services (ports, Docker, Kubernetes) to the internet via secure reverse proxy with WebSocket and TCP tunnel support",
   "main": "dist/index.js",
   "bin": {
-    "jrok": "./dist/index.js"
+    "kproxy": "./dist/index.js"
   },
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --target=node18 --format=cjs --outfile=dist/index.js --minify",
     "build:dev": "bun build src/index.ts --outdir dist --target node",
-    "bundle": "bun build src/index.ts --compile --outfile bin/jrok-standalone",
-    "bundle:all": "npm run build && npx @yao-pkg/pkg dist/index.js --targets node18-linux-x64,node18-macos-x64,node18-win-x64 --output bin/jrok",
+    "bundle": "bun build src/index.ts --compile --outfile bin/kproxy-standalone",
+    "bundle:all": "npm run build && npx @yao-pkg/pkg dist/index.js --targets node18-linux-x64,node18-macos-x64,node18-win-x64 --output bin/kproxy",
     "dev": "bun run src/index.ts",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build"
@@ -33,7 +33,7 @@
     "port-forwarding",
     "cli"
   ],
-  "author": "jrok",
+  "author": "KOOMPI",
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"

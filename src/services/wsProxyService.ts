@@ -2,7 +2,7 @@
  * WebSocket Proxy Service
  * 
  * Manages WebSocket connections between clients and agents for WebSocket tunneling.
- * This allows clients to establish WebSocket connections to local services through jrok tunnels.
+ * This allows clients to establish WebSocket connections to local services through kproxy tunnels.
  */
 
 import type { Agent } from "../types/index";

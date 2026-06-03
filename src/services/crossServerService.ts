@@ -13,6 +13,7 @@ import {
   currentServerPort as SERVER_PORT,
 } from "./agentService";
 import { getCollections } from "../utils/mongodb";
+import * as gossipService from "./gossipService";
 
 // =============================================================================
 // SERVER HEALTH TRACKING
@@ -297,8 +298,27 @@ export async function getClusterStats(): Promise<{
  * Find server hosting a specific domain's tunnel
  */
 export async function findServerForDomain(subdomain: string): Promise<RouteResult> {
+  // HOT PATH: consult the in-memory gossip routing table first (zero DB round-trip).
+  // Falls back to a one-shot whoHas broadcast to cover the propagation gap, then
+  // to MongoDB below as the cold/durable source of truth.
+  const ge = gossipService.resolve(subdomain) || (await gossipService.whoHas(subdomain));
+  if (ge) {
+    if (ge.serverId === SERVER_ID) {
+      return { isLocal: true };
+    }
+    return {
+      isLocal: false,
+      targetServer: {
+        serverId: ge.serverId,
+        serverHost: ge.serverHost,
+        serverPort: ge.serverPort,
+      },
+      proxyUrl: `http://${ge.serverHost}:${ge.serverPort}`,
+    };
+  }
+
   const collections = getCollections();
-  
+
   // First check agentConnections (most reliable for active connections)
   const agentConn = await collections.agentConnections.findOne({ 
     domain: subdomain, 

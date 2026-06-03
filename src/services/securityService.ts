@@ -1,7 +1,7 @@
 /**
  * Security Service
  * 
- * Comprehensive security, rate limiting, and abuse prevention for jrok tunnels.
+ * Comprehensive security, rate limiting, and abuse prevention for kproxy tunnels.
  * Handles both HTTP and TCP tunnel security.
  */
 

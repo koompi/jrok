@@ -1,5 +1,5 @@
 ---
-# Ansible Role: Deploy and run jrok application (without Docker)
+# Ansible Role: Deploy and run kproxy application (without Docker)
 
 - name: Create application directory
   file:
@@ -96,9 +96,8 @@
   copy:
     content: |
       [Unit]
-      Description=jrok - Reverse Tunnel Service
-      After=network.target nginx.service
-      Wants=nginx.service
+      Description=kproxy - Reverse Tunnel Service
+      After=network.target
 
       [Service]
       Type=simple
@@ -107,7 +106,7 @@
       Environment=NODE_ENV=production
       Environment=PORT=3000
       Environment=MONGODB_URI={{ mongodb_uri }}
-      Environment=API_KEY={{ cert_sync_api_key }}
+      Environment=API_KEY={{ api_key }}
       Environment=BASE_DOMAIN={{ domain_name }}
       Environment=JWT_SECRET={{ jwt_secret }}
       Environment=KOOMPI_CLIENT_ID={{ koompi_client_id }}
@@ -115,11 +114,16 @@
       Environment=KOOMPI_REDIRECT_URI={{ koompi_redirect_uri }}
       Environment=DASHBOARD_URL={{ dashboard_url }}
       Environment=ALLOWED_ORIGINS={{ dashboard_url }},https://{{ domain_name }}
-      Environment=VPS_HOST=localhost
+      Environment=VPS_HOST={{ vps_host | default('localhost') }}
       Environment=VPS_ID={{ vps_id | default(ansible_hostname) }}
       Environment=VPS_NAME={{ vps_id | default(ansible_hostname) }}
       Environment=VPS_REGION={{ vps_region | default('default') }}
-      Environment=NGINX_PATH=/etc/nginx/sites-available
+      # Cloudflare for SaaS (edge TLS + custom hostnames)
+      Environment=CF_API_TOKEN={{ cf_api_token }}
+      Environment=CF_ZONE_ID={{ cf_zone_id }}
+      Environment=CF_SAAS_FALLBACK_HOSTNAME={{ cf_saas_fallback_hostname }}
+      # Gossip mesh shared secret (cross-node routing)
+      Environment=GOSSIP_SECRET={{ gossip_secret }}
       # TCP port range (unique per server for multi-server setup)
       Environment=TCP_PORT_MIN={{ tcp_port_min | default('10000') }}
       Environment=TCP_PORT_MAX={{ tcp_port_max | default('20000') }}
@@ -132,11 +136,11 @@
 
       StandardOutput=journal
       StandardError=journal
-      SyslogIdentifier=jrok
+      SyslogIdentifier=kproxy
 
       [Install]
       WantedBy=multi-user.target
-    dest: /etc/systemd/system/jrok.service
+    dest: /etc/systemd/system/kproxy.service
     owner: root
     group: root
     mode: '0644'
@@ -147,16 +151,16 @@
     daemon_reload: yes
   tags: ["app"]
 
-- name: Stop jrok service (if running)
+- name: Stop kproxy service (if running)
   systemd:
-    name: jrok
+    name: kproxy
     state: stopped
   ignore_errors: yes
   tags: ["app"]
 
-- name: Start jrok service
+- name: Start kproxy service
   systemd:
-    name: jrok
+    name: kproxy
     state: started
     enabled: yes
   tags: ["app"]
@@ -185,7 +189,7 @@
   tags: ["app", "verify"]
 
 - name: Show service logs
-  shell: journalctl -u jrok --no-pager -n 30
+  shell: journalctl -u kproxy --no-pager -n 30
   register: service_logs
   tags: ["app", "verify"]
 

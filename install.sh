@@ -9,7 +9,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║                   Jrok CLI Installer                                  ║${NC}"
+echo -e "${GREEN}║                   KProxy CLI Installer                                ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -33,7 +33,7 @@ echo -e "${GREEN}✓${NC} Node.js $NODE_VERSION"
 
 # Create temp directory
 TEMP_DIR=$(mktemp -d)
-echo -e "${YELLOW}→${NC} Downloading Jrok CLI..."
+echo -e "${YELLOW}→${NC} Downloading KProxy CLI..."
 
 # Clone the repository
 cd "$TEMP_DIR"
@@ -55,6 +55,6 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║                   Installation Complete! 🎉                          ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "Run ${GREEN}jrok --help${NC} to get started"
-echo -e "Run ${GREEN}jrok --port 3000${NC} to expose your local server"
+echo -e "Run ${GREEN}kproxy --help${NC} to get started"
+echo -e "Run ${GREEN}kproxy --port 3000${NC} to expose your local server"
 echo ""

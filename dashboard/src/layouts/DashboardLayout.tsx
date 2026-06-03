@@ -43,7 +43,7 @@ import {
 import { cn } from '@/lib/utils';
 import { ModeToggle } from '@/components/mode-toggle';
 import { useState } from 'react';
-import jrokLogo from '@/public/jrok-logo.png';
+import logo from '@/public/kproxy-logo.png';
 
 interface NavItemType {
   name: string;
@@ -165,12 +165,12 @@ export default function DashboardLayout() {
           <div className="flex h-16 items-center justify-between px-4 border-b">
             <Link to="/dashboard" className="flex items-center gap-2 group">
               <div className="relative">
-                <img src={jrokLogo} alt="Jrok" className="h-9 w-9 transition-transform duration-300 group-hover:scale-110" />
+                <img src={logo} alt="KProxy" className="h-9 w-9 transition-transform duration-300 group-hover:scale-110" />
                 <div className="absolute -bottom-0.5 -right-0.5 h-3 w-3 bg-emerald-500 rounded-full border-2 border-card animate-pulse" />
               </div>
               <div className="flex flex-col">
                 <span className="text-lg font-bold bg-gradient-to-r from-primary to-primary/70 bg-clip-text text-transparent">
-                  Jrok
+                  KProxy
                 </span>
                 <span className="text-[10px] text-muted-foreground -mt-1">Secure Tunnels</span>
               </div>

@@ -99,10 +99,10 @@ export default function RuixenBentoCards() {
         {/* Section Footer Heading */}
         <div className="max-w-2xl ml-auto text-right px-4 mt-6 lg:-mt-20">
           <h2 className="text-4xl md:text-6xl font-bold text-black dark:text-white mb-4">
-            Why Choose Jrok?
+            Why Choose KProxy?
           </h2>
           <p className="text-gray-600 dark:text-gray-400 text-lg">
-            Jrok allows you to securely expose your local application to the internet without requiring to have a public IP or complex network configurations.
+            KProxy allows you to securely expose your local application to the internet without requiring to have a public IP or complex network configurations.
           </p>
         </div>
       </div>

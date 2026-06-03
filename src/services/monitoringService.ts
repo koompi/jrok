@@ -1,16 +1,15 @@
 /**
  * Monitoring Service
  * 
- * Comprehensive system monitoring for jrok including:
+ * Comprehensive system monitoring for kproxy including:
  * - Memory usage tracking
  * - WebSocket connection limits
  * - Rate limit statistics
  * - Authentication metrics
- * - Certificate renewal tracking
  * - System health metrics
  */
 
-import { getClient, getCollections } from "../utils/mongodb";
+import { getClient, getCollections, DB_NAME } from "../utils/mongodb";
 import os from "os";
 
 // ============ Configuration ============
@@ -50,22 +49,6 @@ const authMetrics: AuthMetrics = {
   successCount: 0,
   failureCount: 0,
   failedAttempts: new Map(),
-};
-
-// Certificate metrics
-interface CertMetrics {
-  renewalAttempts: number;
-  renewalSuccesses: number;
-  renewalFailures: number;
-  lastRenewal: number | null;
-  lastError: string | null;
-}
-const certMetrics: CertMetrics = {
-  renewalAttempts: 0,
-  renewalSuccesses: 0,
-  renewalFailures: 0,
-  lastRenewal: null,
-  lastError: null,
 };
 
 // System metrics history (for graphs)
@@ -267,30 +250,6 @@ export function getAuthMetrics(): {
   };
 }
 
-// ============ Certificate Tracking ============
-
-/**
- * Track certificate renewal attempt
- */
-export function trackCertRenewal(success: boolean, error?: string): void {
-  certMetrics.renewalAttempts++;
-  
-  if (success) {
-    certMetrics.renewalSuccesses++;
-    certMetrics.lastRenewal = Date.now();
-  } else {
-    certMetrics.renewalFailures++;
-    certMetrics.lastError = error || "Unknown error";
-  }
-}
-
-/**
- * Get certificate metrics
- */
-export function getCertMetrics(): CertMetrics {
-  return { ...certMetrics };
-}
-
 // ============ System Metrics ============
 
 /**
@@ -452,7 +411,7 @@ export function addLog(
 
 async function storeLogToDb(log: SystemLog): Promise<void> {
   try {
-    const db = getClient()?.db("jrok");
+    const db = getClient()?.db(DB_NAME);
     if (!db) return;
     
     await db.collection("system_logs").insertOne({
@@ -492,7 +451,6 @@ export interface MonitoringDashboardData {
   health: ReturnType<typeof getSystemHealth>;
   rateLimits: RateLimitStats[];
   auth: ReturnType<typeof getAuthMetrics>;
-  certificates: CertMetrics;
   logs: SystemLog[];
   history: SystemMetricsSnapshot[];
   config: {
@@ -511,7 +469,6 @@ export function getDashboardData(): MonitoringDashboardData {
     health: getSystemHealth(),
     rateLimits: getRateLimitStats(),
     auth: getAuthMetrics(),
-    certificates: getCertMetrics(),
     logs: getRecentLogs(100),
     history: getMetricsHistory(60),
     config: {
@@ -547,7 +504,7 @@ export interface SystemConfig {
  */
 export async function getSystemConfig(): Promise<SystemConfig> {
   try {
-    const db = getClient()?.db("jrok");
+    const db = getClient()?.db(DB_NAME);
     if (!db) throw new Error("Database not connected");
     
     const config = await db.collection("system_config").findOne({ configId: "main" });
@@ -596,7 +553,7 @@ export async function getSystemConfig(): Promise<SystemConfig> {
  */
 export async function updateSystemConfig(updates: Partial<SystemConfig>): Promise<SystemConfig> {
   try {
-    const db = getClient()?.db("jrok");
+    const db = getClient()?.db(DB_NAME);
     if (!db) throw new Error("Database not connected");
     
     await db.collection("system_config").updateOne(
@@ -656,7 +613,7 @@ export function initMonitoringService(
 
 async function createMonitoringIndexes(): Promise<void> {
   try {
-    const db = getClient()?.db("jrok");
+    const db = getClient()?.db(DB_NAME);
     if (!db) return;
     
     // System logs indexes

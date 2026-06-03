@@ -1,3 +1,5 @@
+> ⚠️ HISTORICAL — describes the pre-kproxy nginx + Certbot/Let's Encrypt (leader-based) design that was removed. See ../docs/getting-started/architecture.md for the current architecture.
+
 # Deployment Guide - jrok
 
 Complete guide for deploying the jrok application across single-node and multi-node environments.

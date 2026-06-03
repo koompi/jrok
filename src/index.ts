@@ -16,7 +16,7 @@ import * as wsProxyService from "./services/wsProxyService";
 import * as tcpService from "./services/tcpService";
 import * as securityService from "./services/securityService";
 import * as crossServerService from "./services/crossServerService";
-import * as certSyncService from "./services/certificateSyncService";
+import * as gossipService from "./services/gossipService";
 import * as monitoringService from "./services/monitoringService";
 import { connectDatabase, closeDatabase, createDistributedStateIndexes } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
@@ -150,10 +150,7 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
 // Configuration - adjust these to your setup
 const config: TunnelConfig = {
   vpsHost: process.env.VPS_HOST || "your-vps.com",
-  vpsUser: process.env.VPS_USER || "root",
-  vpsPort: process.env.VPS_PORT ? parseInt(process.env.VPS_PORT) : 22,
-  nginxConfPath: process.env.NGINX_PATH || "/etc/nginx/sites-available",
-  baseDomain: process.env.BASE_DOMAIN || "tunnel.example.com",
+  baseDomain: process.env.BASE_DOMAIN || "live.example.com",
   apiKey: process.env.API_KEY || "your-secret-key-change-this",
 };
 
@@ -276,11 +273,8 @@ async function authenticateRequest(req: Request): Promise<AuthContext | null> {
 async function registerLocalVpsServer(): Promise<void> {
   try {
     const vpsId = process.env.VPS_ID || `vps-${generateId().substring(0, 8)}`;
-    const vpsName = process.env.VPS_NAME || "jrok-server";
+    const vpsName = process.env.VPS_NAME || "kproxy-server";
     const vpsHost = process.env.VPS_HOST || "localhost";
-    const sshUser = process.env.VPS_USER || "root";
-    const sshPort = process.env.VPS_PORT ? parseInt(process.env.VPS_PORT) : 22;
-    const nginxPath = process.env.NGINX_PATH || "/etc/nginx/sites-available";
 
     // Check if already registered by ID
     const existing = await vpsService.getVpsServerById(vpsId);
@@ -302,9 +296,6 @@ async function registerLocalVpsServer(): Promise<void> {
       id: vpsId,
       name: vpsName,
       host: vpsHost,
-      sshUser,
-      sshPort,
-      nginxPath,
       healthy: true,
       lastHealthCheck: Date.now(),
     });
@@ -312,7 +303,7 @@ async function registerLocalVpsServer(): Promise<void> {
     console.log(`✅ VPS server registered: ${vpsName} (${vpsHost})`);
   } catch (error) {
     console.error("Warning: Could not register VPS server:", error instanceof Error ? error.message : String(error));
-    console.error("    Tunnel creation will not sync Nginx configs automatically");
+    console.error("    This server may not be discoverable for cross-server agent routing");
   }
 }
 
@@ -339,10 +330,6 @@ async function startServer() {
     crossServerService.initCrossServerRouting();
     console.log("✅ Cross-server routing initialized");
 
-    // Initialize certificate sync infrastructure (MongoDB collections + indexes)
-    await certSyncService.initializeCertificateSync();
-    console.log("✅ Certificate sync infrastructure initialized");
-
     // Restore TCP servers on startup (reconnect to allocated ports)
     await tcpService.restoreTcpServersOnStartup();
     console.log("✅ TCP tunnels restored");
@@ -358,6 +345,12 @@ async function startServer() {
       port: process.env.PORT ? parseInt(process.env.PORT) : 3000,
       websocket: {
         open(ws: any) {
+          // Internal gossip mesh peer (node-to-node routing replication)
+          if (ws.data?.type === 'gossip-peer') {
+            gossipService.onPeerOpen(ws);
+            return;
+          }
+
           // Handle client-tunnel WebSocket (from browser/client to tunneled service)
           if (ws.data?.type === 'client-tunnel') {
             const { agentWs, agent, subdomain, path, headers } = ws.data;
@@ -429,7 +422,7 @@ async function startServer() {
             const welcomeMessage: any = {
               type: "welcome",
               agentId: agent.id,
-              message: "Connected to jrok",
+              message: "Connected to kproxy",
               protocol,
               domain: finalDomain,
               requestedDomain: wasModified ? domain : undefined,
@@ -475,6 +468,12 @@ async function startServer() {
         },
 
         message(ws: any, data: string | Buffer) {
+          // Internal gossip mesh peer message
+          if (ws.data?.type === 'gossip-peer') {
+            gossipService.onPeerMessage(ws, data);
+            return;
+          }
+
           // Handle client-tunnel WebSocket messages (forward to agent)
           if (ws.data?.type === 'client-tunnel') {
             const wsId = ws.data.wsId;
@@ -598,6 +597,12 @@ async function startServer() {
         },
 
         close(ws: any, code: number, reason: string) {
+          // Internal gossip mesh peer disconnect
+          if (ws.data?.type === 'gossip-peer') {
+            gossipService.onPeerClose(ws);
+            return;
+          }
+
           // Handle client-tunnel WebSocket close
           if (ws.data?.type === 'client-tunnel') {
             const wsId = ws.data.wsId;
@@ -648,6 +653,16 @@ async function startServer() {
         const path = url.pathname;
         const method = req.method;
         const hostname = url.hostname;
+
+        // Internal gossip mesh endpoint (node-to-node routing-table replication).
+        // Reached directly over host:port between kproxy nodes, never via Cloudflare.
+        if (path === "/_gossip" && req.headers.get("upgrade") === "websocket") {
+          if (!gossipService.verifyToken(url.searchParams.get("token"))) {
+            return new Response("forbidden", { status: 403 });
+          }
+          const ok = (server as any).upgrade(req, { data: { type: "gossip-peer" } });
+          return ok ? undefined : new Response("gossip upgrade failed", { status: 400 });
+        }
 
         // CORS configuration - whitelist allowed origins
         const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173").split(",").map(o => o.trim());
@@ -963,14 +978,6 @@ async function startServer() {
         if (path === "/admin/monitoring/auth" && method === "GET") {
           return addCors(new Response(
             JSON.stringify({ success: true, auth: monitoringService.getAuthMetrics() }),
-            { status: 200, headers: { "Content-Type": "application/json" } }
-          ));
-        }
-
-        // Get certificate metrics
-        if (path === "/admin/monitoring/certificates" && method === "GET") {
-          return addCors(new Response(
-            JSON.stringify({ success: true, certificates: monitoringService.getCertMetrics() }),
             { status: 200, headers: { "Content-Type": "application/json" } }
           ));
         }
@@ -1422,7 +1429,7 @@ async function startServer() {
         // ============ Tunnel Domain Routing ============
         // Check if this is a tunnel domain request (extract subdomain or custom domain)
         // MUST be before auth check to allow public tunnel access
-        const baseDomain = config.baseDomain; // e.g., "tunnel.koompi.cloud"
+        const baseDomain = config.baseDomain; // e.g., "live.koompi.cloud"
         
         // First, check if this is a registered custom domain
         let tunnelDomain: string | null = null;
@@ -1440,7 +1447,7 @@ async function startServer() {
             isCustomDomainRequest = true;
           }
         } else if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
-          // Extract subdomain (e.g., "demo" from "demo.tunnel.koompi.cloud")
+          // Extract subdomain (e.g., "demo" from "demo.live.koompi.cloud")
           tunnelDomain = hostname.replace(`.${baseDomain}`, '');
         }
         
@@ -1466,7 +1473,7 @@ async function startServer() {
             return addCors(new Response(
               JSON.stringify({
                 success: false,
-                message: `No active agent found for domain: ${subdomain}. Please ensure the agent is running${isCustomDomainRequest ? `: jrok --port <port> --domain ${subdomain}` : `: jrok --port <port> --domain ${subdomain}`}`,
+                message: `No active agent found for domain: ${subdomain}. Please ensure the agent is running${isCustomDomainRequest ? `: kproxy --port <port> --domain ${subdomain}` : `: kproxy --port <port> --domain ${subdomain}`}`,
               }),
               { status: 503, headers: { "Content-Type": "application/json" } }
             ));
@@ -1636,28 +1643,6 @@ async function startServer() {
       return await domainHandler.handleResyncDomain(decodeURIComponent(domain));
     }
 
-    if (path.startsWith("/domains/") && path.endsWith("/transfer") && method === "POST") {
-      const domain = path.split("/")[2];
-      return await domainHandler.handleTransferDomain(decodeURIComponent(domain), req);
-    }
-
-    if (path.startsWith("/domains/") && path.endsWith("/backup") && method === "POST") {
-      const domain = path.split("/")[2];
-      return await domainHandler.handleBackupDomain(decodeURIComponent(domain));
-    }
-
-    if (path.startsWith("/domains/") && path.includes("/backups/") && method === "POST") {
-      const parts = path.split("/");
-      const domain = parts[2];
-      const backupId = parts[4];
-      return await domainHandler.handleRestoreDomain(decodeURIComponent(domain), backupId);
-    }
-
-    if (path.startsWith("/domains/") && path.includes("/backup") && method === "GET") {
-      const domain = path.split("/")[2];
-      return await domainHandler.handleListBackups(decodeURIComponent(domain));
-    }
-
     // Generic domain GET/DELETE - must be AFTER specific routes
     if (path.startsWith("/domains/") && method === "GET") {
       const domain = path.split("/")[2];
@@ -1669,137 +1654,9 @@ async function startServer() {
       return await domainHandler.handleDeleteDomain(decodeURIComponent(domain));
     }
 
-    // ============ Certificate Sync API (for multi-server cert distribution) ============
-    
-    // Download certificate from MongoDB (VPS servers call this)
-    if (path.startsWith("/certificates/download/") && method === "GET") {
-      const domain = path.split("/")[3];
-      if (!domain) {
-        return addCors(new Response(
-          JSON.stringify({ success: false, error: "Domain is required" }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
-        ));
-      }
-      
-      try {
-        const cert = await certSyncService.downloadCertificateFromMongoDB(decodeURIComponent(domain));
-        if (!cert) {
-          return addCors(new Response(
-            JSON.stringify({ success: false, error: "Certificate not found" }),
-            { status: 404, headers: { "Content-Type": "application/json" } }
-          ));
-        }
-        
-        return addCors(new Response(
-          JSON.stringify({
-            success: true,
-            domain: cert.domain,
-            cert: cert.cert,
-            chain: cert.chain,
-            fullchain: cert.fullchain,
-            privkey: cert.privkey,
-            expiry: cert.expiry,
-            version: cert.version,
-            uploadedAt: cert.uploadedAt
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        ));
-      } catch (error) {
-        return addCors(new Response(
-          JSON.stringify({ success: false, error: String(error) }),
-          { status: 500, headers: { "Content-Type": "application/json" } }
-        ));
-      }
-    }
-
-    // List all certificates
-    if (path === "/certificates/list" && method === "GET") {
-      try {
-        const certs = await certSyncService.listCertificates();
-        return addCors(new Response(
-          JSON.stringify({ success: true, certificates: certs }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        ));
-      } catch (error) {
-        return addCors(new Response(
-          JSON.stringify({ success: false, error: String(error) }),
-          { status: 500, headers: { "Content-Type": "application/json" } }
-        ));
-      }
-    }
-
-    // Get certificate status
-    if (path.startsWith("/certificates/status/") && method === "GET") {
-      const domain = path.split("/")[3];
-      if (!domain) {
-        return addCors(new Response(
-          JSON.stringify({ success: false, error: "Domain is required" }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
-        ));
-      }
-      
-      try {
-        const status = await certSyncService.getCertificateStatus(decodeURIComponent(domain));
-        return addCors(new Response(
-          JSON.stringify({ success: true, ...status }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        ));
-      } catch (error) {
-        return addCors(new Response(
-          JSON.stringify({ success: false, error: String(error) }),
-          { status: 500, headers: { "Content-Type": "application/json" } }
-        ));
-      }
-    }
-
-    // Check sync queue (for VPS servers to see pending syncs)
-    if (path === "/certificates/sync-queue" && method === "GET") {
-      try {
-        const { getClient } = await import("./utils/mongodb");
-        const queue = getClient()?.db("jrok").collection("cert_sync_queue");
-        const pending = await queue?.find({ processed: false }).toArray() || [];
-        
-        return addCors(new Response(
-          JSON.stringify({ success: true, pending }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        ));
-      } catch (error) {
-        return addCors(new Response(
-          JSON.stringify({ success: false, error: String(error) }),
-          { status: 500, headers: { "Content-Type": "application/json" } }
-        ));
-      }
-    }
-
-    // Mark sync as processed (VPS server confirms it pulled the cert)
-    if (path.startsWith("/certificates/sync-queue/") && method === "POST") {
-      const syncId = path.split("/")[3];
-      if (!syncId) {
-        return addCors(new Response(
-          JSON.stringify({ success: false, error: "Sync ID is required" }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
-        ));
-      }
-      
-      try {
-        const { getClient } = await import("./utils/mongodb");
-        const queue = getClient()?.db("jrok").collection("cert_sync_queue");
-        await queue?.updateOne(
-          { _id: decodeURIComponent(syncId) as any },
-          { $set: { processed: true, processedAt: new Date() } }
-        );
-        
-        return addCors(new Response(
-          JSON.stringify({ success: true, message: "Sync marked as processed" }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        ));
-      } catch (error) {
-        return addCors(new Response(
-          JSON.stringify({ success: false, error: String(error) }),
-          { status: 500, headers: { "Content-Type": "application/json" } }
-        ));
-      }
-    }
+    // NOTE: the /certificates/* sync API was removed. Edge TLS is handled by
+    // Cloudflare (Universal SSL for our subdomains, Cloudflare for SaaS for
+    // custom domains) — nodes no longer issue, store, or sync certificates.
 
     // 404
     return addCors(new Response(
@@ -1817,6 +1674,11 @@ async function startServer() {
     console.log(`📝 Base domain: ${config.baseDomain}`);
     console.log(`🔐 Auth enabled with API key`);
     console.log(`🔌 WebSocket agent endpoint: ws://localhost:${server.port}/ws/agent`);
+
+    // Initialize gossip routing mesh (in-memory routing table replicated across
+    // nodes; MongoDB stays as the cold/durable fallback). Started after the
+    // listener is up so peers can dial us back on /_gossip.
+    gossipService.initGossip();
 
     // Cleanup stale agents every 30 seconds (disconnect if no heartbeat for 90 seconds)
     setInterval(() => {
@@ -1850,46 +1712,6 @@ async function startServer() {
     }, 60 * 60 * 1000);
 
     console.log("✅ Auto-cleanup enabled (agents: 30s, tunnels: 5m, rate limits: 10m, stats: 1h)");
-
-    // Check certificate sync queue every 5 minutes (pull new certs to local storage)
-    setInterval(async () => {
-      try {
-        const { getClient } = await import("./utils/mongodb");
-        const queue = getClient()?.db("jrok").collection("cert_sync_queue");
-        if (!queue) return;
-
-        const serverId = process.env.VPS_ID || process.env.SERVER_ID || "server-1";
-        const pendingCerts = await queue.find({ processed: false }).toArray();
-        
-        for (const item of pendingCerts) {
-          try {
-            const cert = await certSyncService.downloadCertificateFromMongoDB(item.domain);
-            if (cert) {
-              // Write certificates to local filesystem
-              const certDir = `/etc/letsencrypt/live/${item.domain}`;
-              await Bun.spawn(["mkdir", "-p", certDir]).exited;
-              
-              // Decode base64 and write files
-              await Bun.write(`${certDir}/cert.pem`, Buffer.from(cert.cert, 'base64'));
-              await Bun.write(`${certDir}/chain.pem`, Buffer.from(cert.chain, 'base64'));
-              await Bun.write(`${certDir}/fullchain.pem`, Buffer.from(cert.fullchain, 'base64'));
-              await Bun.write(`${certDir}/privkey.pem`, Buffer.from(cert.privkey, 'base64'));
-              
-              // Set proper permissions
-              await Bun.spawn(["chmod", "600", `${certDir}/privkey.pem`]).exited;
-              
-              console.log(`🔐 Synced certificate for ${item.domain} (v${cert.version})`);
-            }
-          } catch (syncError) {
-            console.error(`Failed to sync certificate for ${item.domain}:`, syncError);
-          }
-        }
-      } catch (error) {
-        console.error("Certificate sync error:", error);
-      }
-    }, 5 * 60 * 1000);
-
-    console.log("✅ Certificate sync enabled (check every 5 minutes)");
 
     // Graceful shutdown
     process.on("SIGINT", async () => {

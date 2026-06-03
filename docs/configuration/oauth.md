@@ -1,6 +1,6 @@
 # KOOMPI ID OAuth Setup
 
-Configure KOOMPI ID as the authentication provider for your Jrok dashboard.
+Configure KOOMPI ID as the authentication provider for your KProxy dashboard.
 
 ## What is KOOMPI ID?
 
@@ -26,9 +26,9 @@ KOOMPI ID is an OAuth 2.0 identity provider that allows users to sign in with th
 
 1. Click **"Create Project"** or **"New Application"**
 2. Fill in the details:
-   - **Name**: Your project name (e.g., "Jrok Tunnel Service")
+   - **Name**: Your project name (e.g., "KProxy Tunnel Service")
    - **Description**: Brief description of your service
-   - **Website URL**: Your service URL (e.g., `https://tunnel.yourdomain.com`)
+   - **Website URL**: Your service URL (e.g., `https://live.yourdomain.com`)
 
 ### Step 4: Configure OAuth Settings
 
@@ -37,7 +37,7 @@ KOOMPI ID is an OAuth 2.0 identity provider that allows users to sign in with th
    
    For production:
    ```
-   https://tunnel.yourdomain.com/auth/callback
+   https://live.yourdomain.com/auth/callback
    ```
    
    For development:
@@ -51,7 +51,7 @@ KOOMPI ID is an OAuth 2.0 identity provider that allows users to sign in with th
 
 > ⚠️ **Important**: Keep your Client Secret secure! Never expose it in client-side code or public repositories.
 
-### Step 5: Configure Jrok
+### Step 5: Configure KProxy
 
 Add the credentials to your environment:
 
@@ -59,7 +59,7 @@ Add the credentials to your environment:
 # .env
 KOOMPI_CLIENT_ID=koompi_your_client_id
 KOOMPI_CLIENT_SECRET=secret_your_client_secret
-KOOMPI_REDIRECT_URI=https://tunnel.yourdomain.com/auth/callback
+KOOMPI_REDIRECT_URI=https://live.yourdomain.com/auth/callback
 ```
 
 Or in Ansible inventory:
@@ -67,7 +67,7 @@ Or in Ansible inventory:
 ```ini
 koompi_client_id=koompi_your_client_id
 koompi_client_secret=secret_your_client_secret
-koompi_redirect_uri=https://tunnel.yourdomain.com/auth/callback
+koompi_redirect_uri=https://live.yourdomain.com/auth/callback
 ```
 
 ## OAuth Flow
@@ -76,7 +76,7 @@ koompi_redirect_uri=https://tunnel.yourdomain.com/auth/callback
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Browser    │     │  Jrok Server │     │  KOOMPI ID   │
+│   Browser    │     │  KProxy Server │     │  KOOMPI ID   │
 │  (Dashboard) │     │              │     │    OAuth     │
 └──────┬───────┘     └──────┬───────┘     └──────┬───────┘
        │                    │                    │
@@ -114,7 +114,7 @@ koompi_redirect_uri=https://tunnel.yourdomain.com/auth/callback
 
 ## Dashboard Integration
 
-The Jrok dashboard handles OAuth automatically:
+The KProxy dashboard handles OAuth automatically:
 
 1. User clicks "Sign in with KOOMPI ID"
 2. Redirected to KOOMPI OAuth
@@ -130,10 +130,10 @@ After logging in, users can create API keys for CLI use:
 # Via dashboard: Create API key in organization settings
 
 # Via CLI (after initial OAuth login)
-jrok apikey create --name "My Laptop" --org <org-id>
+kproxy apikey create --name "My Laptop" --org <org-id>
 ```
 
-API keys have format: `jrok_xxxxxxxxxxxxxxxx`
+API keys have format: `kproxy_xxxxxxxxxxxxxxxx`
 
 ## Troubleshooting
 
@@ -161,7 +161,7 @@ API keys have format: `jrok_xxxxxxxxxxxxxxxx`
 
 **Solution**: Add your dashboard URL to `ALLOWED_ORIGINS`:
 ```bash
-ALLOWED_ORIGINS=https://tunnel.yourdomain.com,http://localhost:5173
+ALLOWED_ORIGINS=https://live.yourdomain.com,http://localhost:5173
 ```
 
 ### Session Expired

@@ -1,168 +1,153 @@
 # Architecture Overview
 
-Jrok is an agent-based tunnel service that exposes local services to the public internet through a lightweight WebSocket connection.
+kproxy is a **horizontally-scalable reverse proxy** for exposing local services to the internet. Agents dial out over a persistent WebSocket from anywhere (no public IP, no port-forwarding, no shared network), and any kproxy node can serve any agent. There is **no single point of failure** and you scale by **adding nodes** — Cloudflare's Load Balancer spreads traffic across them, and an in-memory gossip mesh lets every node route to every agent.
 
-## How It Works
+## Topology
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              INTERNET                                        │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         YOUR VPS / CLOUD SERVER                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                           NGINX                                       │   │
-│  │  • SSL Termination (Let's Encrypt)                                   │   │
-│  │  • Wildcard Certificate (*.tunnel.example.com)                       │   │
-│  │  • Reverse Proxy                                                     │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                    │                                         │
-│                                    ▼                                         │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                        JROK SERVER                                    │   │
-│  │  • WebSocket Connection Manager                                      │   │
-│  │  • Request Routing                                                   │   │
-│  │  • Authentication (KOOMPI ID OAuth / API Keys)                       │   │
-│  │  • MongoDB (tunnels, users, organizations)                           │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-           ▲                    ▲                    ▲
-           │                    │                    │
-      WebSocket            WebSocket            WebSocket
-           │                    │                    │
-           ▼                    ▼                    ▼
-┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-│   JROK AGENT 1   │  │   JROK AGENT 2   │  │   JROK AGENT 3   │
-│   (Your laptop)  │  │   (Dev server)   │  │   (CI/CD runner) │
-│                  │  │                  │  │                  │
-│   localhost:3000 │  │   localhost:8080 │  │   localhost:5000 │
-└──────────────────┘  └──────────────────┘  └──────────────────┘
+                          ┌──────────────────────────────┐
+   Browsers / API         │        CLOUDFLARE EDGE         │
+   clients      ─────────▶│  • Universal SSL (auto)        │  TLS #1: browser ⇄ Cloudflare
+                          │  • Load Balancer (origin pool) │  (fully automatic)
+                          │  • WAF / DDoS / caching        │
+                          │  • Custom Hostnames (SaaS TLS) │
+                          └───────────────┬────────────────┘
+                                          │  TLS #2: Cloudflare ⇄ origin
+                                          │  (one Origin CA cert per node)
+                 ┌────────────────────────┼────────────────────────┐
+                 ▼                        ▼                        ▼
+          ┌────────────┐           ┌────────────┐           ┌────────────┐
+          │  kproxy-1  │◀────────▶│  kproxy-2  │◀────────▶│  kproxy-N  │   ← just add nodes
+          │ (stateless)│  gossip   │ (stateless)│  gossip   │ (stateless)│
+          └─────┬──────┘  /_gossip └─────┬──────┘  mesh     └─────┬──────┘
+                │  persistent agent WebSocket tunnels (dialed OUT by agents)
+        ┌───────┴───────┐        ┌───────┴───────┐        ┌───────┴───────┐
+        ▼               ▼        ▼               ▼        ▼               ▼
+   ┌─────────┐    ┌─────────┐  ┌─────────┐         ...  ┌─────────┐
+   │ agent A │    │ agent B │  │ agent C │              │ agent Z │   ← run anywhere
+   │ :3000   │    │ :8080   │  │ :5432   │              │ :22     │
+   └─────────┘    └─────────┘  └─────────┘              └─────────┘
+        │
+        ▼ local container / app / API / database
+
+   Shared services (not on the request hot path):
+   • MongoDB  — cold/durable state (users, orgs, API keys, tunnels, custom domains)
+   • Cloudflare R2 / S3 — large file payloads (presigned URLs; never transit kproxy)
 ```
 
-## Traffic Flow
+## Request flow
 
-### 1. Agent Connection
+### 1. Agent connects (dials out)
 ```
-Client → jrok CLI → WebSocket → Jrok Server → Registered in MongoDB
+kproxy CLI ──wss──▶ Cloudflare ──▶ kproxy node ──▶ register in gossip map (+ MongoDB)
 ```
+`kproxy --port 3000` opens a WebSocket to `/ws/agent`, authenticates with an API key, and the node it lands on becomes that agent's **home node**. The home node publishes `hostname → node` into the in-memory gossip table, which replicates to every other node within milliseconds.
 
-When you run `jrok --port 3000`:
-1. CLI establishes a WebSocket connection to the Jrok server
-2. Server authenticates via API key
-3. Server registers the agent with assigned subdomain
-4. Server sends back the public URL
-
-### 2. Incoming Request
+### 2. Inbound request
 ```
-Browser → https://myapp.tunnel.example.com → Nginx → Jrok Server
+Browser ──https──▶ Cloudflare (edge TLS + LB) ──▶ some kproxy node (origin TLS)
 ```
+Cloudflare's Load Balancer picks any healthy node from the origin pool. The chosen node may **not** be the agent's home node — that's fine.
 
-When someone visits your tunnel URL:
-1. DNS resolves `*.tunnel.example.com` to your VPS
-2. Nginx terminates SSL and proxies to Jrok server
-3. Jrok server extracts subdomain from Host header
-
-### 3. Request Forwarding
+### 3. Routing (the interesting part)
 ```
-Jrok Server → WebSocket → Jrok Agent → Local Service → Response
+node receiving request ──gossip lookup──▶ "agent X is on home node" ──forward──▶ home node ──tunnel──▶ agent ──▶ local service
 ```
+- The receiving node looks up the hostname in its **in-memory gossip table** — zero database round-trip on the hot path.
+- If the agent is **local**, it forwards straight down the tunnel.
+- If the agent is on **another node**, it proxies the request to that node over the internal mesh, which forwards down the tunnel.
+- On a rare cache miss (the agent connected milliseconds ago), the node does a one-shot `whoHas` broadcast, then falls back to MongoDB.
 
-The server:
-1. Looks up the agent for the subdomain
-2. Forwards the HTTP request through WebSocket
-3. Agent makes local HTTP request to your service
-4. Response flows back through the same path
+## TLS model — who issues what
+
+| Leg | Covers | Who provisions it | Notes |
+|-----|--------|-------------------|-------|
+| Browser ⇄ Cloudflare | `*.yourdomain` subdomains | **Cloudflare Universal SSL** | Automatic, auto-renewed. You do nothing. |
+| Browser ⇄ Cloudflare | customer **custom domains** | **Cloudflare for SaaS** (Custom Hostnames) | kproxy calls the CF API; CF issues + renews. Customer CNAMEs **DNS-only**. |
+| Cloudflare ⇄ kproxy node | the origin leg | **one Cloudflare Origin CA cert** | 15-year cert, identical on every node, installed once. Or use `cloudflared` for zero certs. |
+
+There is **no Let's Encrypt, no Certbot, no nginx, no certificate syncing**. Cloudflare owns every public certificate.
+
+## Large payloads go to R2, not through kproxy
+
+kproxy is the **control + small-payload plane**: HTTP requests/responses, APIs, WebSocket apps. It is **not** a bulk file pipe. Large uploads/downloads should go **directly to Cloudflare R2 (or S3)** via presigned URLs — the client talks to R2, not to your tunnel.
+
+This is deliberate and matches the platform:
+- Cloudflare's Load Balancer is not designed to stream large files through the origin.
+- Keeping big payloads off the tunnel keeps node memory flat and lets you scale on request *count*, not byte volume.
+
+```
+Upload:   client ──presigned PUT──▶ Cloudflare R2        (kproxy only mints the URL)
+Download: client ──presigned GET──▶ Cloudflare R2
+App/API:  client ──▶ Cloudflare ──▶ kproxy ──▶ agent ──▶ your service
+```
 
 ## Components
 
-### Jrok Server
-The main server application built with [Bun](https://bun.sh):
+### kproxy node (server)
+Stateless Bun process (`src/`). Each node:
+- terminates the Cloudflare Origin CA cert directly (`Bun.serve` native TLS — no nginx)
+- accepts agent tunnels on `/ws/agent`
+- runs the **gossip routing** service and the internal mesh (`/_gossip`)
+- forwards requests to local agents, or proxies to the node that holds the agent
 
-- **WebSocket Manager**: Handles persistent connections with agents
-- **HTTP Router**: Routes incoming requests to correct agents
-- **Auth Service**: KOOMPI ID OAuth + API key authentication
-- **Organization Service**: Multi-tenant organization management
-- **Stats Service**: Bandwidth tracking and usage analytics
+Run several processes per box with `Bun.serve({ reusePort: true })` to use all cores.
 
-### Jrok CLI Agent
-A lightweight Node.js CLI that:
+### Gossip routing (`gossipService.ts`)
+The distributed routing brain — **no Redis, no external coordinator**:
+- in-memory `hostname → node` map on every node
+- full-mesh gossip over `/_gossip` (authenticated with `GOSSIP_SECRET`)
+- conflict resolution by `(timestamp, nodeId)`, tombstones on disconnect, periodic anti-entropy
+- self-healing: a dead node's routes are evicted and its agents reconnect elsewhere
+- **routing availability == cluster availability** — nothing separate to keep alive
 
-- Establishes WebSocket connection to server
-- Receives HTTP requests from server
-- Forwards to local service
-- Returns response through WebSocket
-- Auto-reconnects on disconnect
+### kproxy CLI agent
+Lightweight Node/Bun client. Dials out over WebSocket, receives requests, forwards to the local service, returns responses, auto-reconnects. Works behind NAT/firewalls with no inbound ports.
 
 ### Dashboard
-React-based web dashboard for:
+React/Vite web UI for login (OAuth), organizations, API keys, tunnels, custom domains, and usage.
 
-- User authentication (KOOMPI ID)
-- Organization management
-- API key management
-- Tunnel monitoring
-- Usage statistics
+### Shared services
+- **MongoDB** — cold/durable state only (users, orgs, API keys, tunnel records, custom-domain records). **Not** on the request hot path; gossip is. A brief Mongo blip doesn't drop live traffic.
+- **Cloudflare** — edge TLS, Load Balancer, WAF, DNS, and Custom Hostnames for custom domains.
+- **Cloudflare R2 / S3** — large file storage via presigned URLs.
 
-### Infrastructure
-- **Nginx**: SSL termination, wildcard certificates, load balancing
-- **Certbot**: Automatic Let's Encrypt certificate management
-- **MongoDB**: Persistent storage for users, organizations, tunnels
-- **Cloudflare**: DNS management for wildcard domains
+## No single point of failure
 
-## Security Model
+| Layer | How it survives a failure |
+|-------|---------------------------|
+| Edge | Cloudflare LB health-checks the origin pool and steers away from dead nodes |
+| Routing | Gossip map lives on every node; a node loss evicts its routes, agents reconnect |
+| Agents | Auto-reconnect to a surviving node (via the LB) and re-register |
+| State | MongoDB replica set / Atlas; only cold data, off the hot path |
+| Certs | Cloudflare-managed — nothing for a node to lose |
 
-### Authentication Layers
+## Scaling — "just add a node"
 
-1. **KOOMPI ID OAuth**: Dashboard login for users
-2. **API Keys**: CLI authentication with scoped permissions
-3. **Organization Isolation**: Resources scoped to organizations
-4. **Rate Limiting**: Protection against abuse
+1. Provision a box, install the Origin CA cert (or run `cloudflared`).
+2. Set `VPS_ID` (unique), `VPS_HOST` (how peers reach it directly), and the shared `GOSSIP_SECRET`.
+3. Add its IP/hostname to the Cloudflare Load Balancer origin pool.
+4. The node joins the gossip mesh automatically; the LB starts sending it traffic.
 
-### Data Flow Security
+Capacity scales with the number of nodes. Each agent is one long-lived socket (tens of thousands per node), so total agent capacity ≈ sum of nodes.
 
-- All public connections use HTTPS (TLS 1.2+)
-- WebSocket connections use WSS (encrypted)
-- API keys are hashed before storage
-- Sessions expire after 7 days
-
-## Scalability
-
-### Single Server
-For most use cases, a single VPS handles:
-- Hundreds of concurrent agents
-- Thousands of requests per second
-- Automatic cleanup of stale connections
-
-### Multi-Server (High Availability)
-For production deployments:
-- Multiple VPS servers behind load balancer
-- Shared MongoDB (Atlas recommended)
-- Nginx upstream configuration
-- Health checks and failover
-
-See [Multi-Server Setup](../advanced/multi-server.md) for details.
-
----
-
-## Technology Stack
+## Technology stack
 
 | Component | Technology |
 |-----------|------------|
-| Server Runtime | [Bun](https://bun.sh) |
-| Database | MongoDB (Atlas) |
-| Web Server | Nginx |
-| SSL | Let's Encrypt + Certbot |
-| DNS | Cloudflare |
+| Server runtime | [Bun](https://bun.sh) |
+| Edge / TLS / LB | Cloudflare (Universal SSL, Load Balancer, Cloudflare for SaaS) |
+| Routing | In-process gossip mesh (no external store) |
+| Cold state | MongoDB (Atlas or self-hosted) |
+| Large files | Cloudflare R2 / S3 (presigned URLs) |
 | Dashboard | React + Vite |
-| CLI | Node.js + TypeScript |
+| CLI | Node/Bun + TypeScript |
 | IaC | Terraform + Ansible |
 
 ---
 
-## Next Steps
-
-- [Self-Hosting Guide](../deployment/self-hosting.md) - Deploy your own server
-- [Terraform Setup](../deployment/terraform.md) - Provision infrastructure
-- [Environment Variables](../configuration/environment.md) - Configuration options
+## Next steps
+- [Cloudflare Setup](../configuration/cloudflare.md) — orange proxy, Load Balancer, Origin CA, Custom Hostnames
+- [Multi-Server Deployment](../deployment/multi-server.md) — the gossip mesh and scaling
+- [Environment Variables](../configuration/environment.md) — all configuration options
+- [MongoDB Setup](../configuration/mongodb.md) — cold-state database

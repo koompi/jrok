@@ -1,258 +1,194 @@
 # Environment Variables
 
-Complete reference for all Jrok configuration options.
+Complete reference for all kproxy configuration options.
 
-## Required Variables
-
-These must be set for Jrok to function properly.
+## Required
 
 ### Database
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `MONGODB_URI` | MongoDB connection string | `mongodb+srv://user:pass@cluster.mongodb.net/jrok` |
+| `MONGODB_URI` | MongoDB connection string (cold/durable state) | `mongodb+srv://user:pass@cluster.mongodb.net/kproxy` |
+| `MONGO_DB_NAME` | Database name. **Defaults to `kproxy`.** Set to `jrok` if migrating an existing deployment, or migrate the data. | `kproxy` |
 
 ### Authentication
 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `JWT_SECRET` | Secret for JWT signing (min 64 chars) | `openssl rand -base64 64` |
+| `API_KEY` | Optional master/admin API key for privileged endpoints (e.g. `/admin/cluster/stats`) | `openssl rand -hex 32` |
 
 ### Domain
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `BASE_DOMAIN` | Base domain for tunnel subdomains | `tunnel.example.com` |
+| `BASE_DOMAIN` | Base domain for generated app subdomains | `live.example.com` |
 
-### OAuth (Required for Dashboard)
+### OAuth (for dashboard login)
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `KOOMPI_CLIENT_ID` | OAuth client ID from KOOMPI | `abc123...` |
+| `KOOMPI_CLIENT_ID` | OAuth client ID | `abc123...` |
 | `KOOMPI_CLIENT_SECRET` | OAuth client secret | `secret456...` |
-| `KOOMPI_REDIRECT_URI` | OAuth callback URL | `https://tunnel.example.com/auth/callback` |
+| `KOOMPI_REDIRECT_URI` | OAuth callback URL | `https://live.example.com/auth/callback` |
 
 ---
 
-## Optional Variables
-
-### Server Configuration
+## Multi-node (gossip routing + cross-node forwarding)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `VPS_ID` | **Unique** node id. Also the gossip node id and the "lower id dials" key. | auto-generated |
+| `VPS_HOST` | Address other nodes use to reach this one **directly** (not via Cloudflare) for `/_gossip` and cross-node forwarding. | `localhost` |
+| `VPS_NAME` | Human-friendly node label (shown in cluster stats / logs). | `VPS_ID` |
+| `VPS_REGION` | Optional region tag for the node (informational). | none |
+| `HOSTNAME` | Host machine name used in heartbeats / diagnostics. | OS hostname |
+| `GOSSIP_SECRET` | Shared secret guarding the gossip mesh — **set the same value on every node**. Without it, any host that reaches `/_gossip` can poison routing. | none (unauthenticated + warns) |
 | `PORT` | HTTP server port | `3000` |
+
+> Set `VPS_ID`, `VPS_HOST`, and `GOSSIP_SECRET` on **every** node in production.
+
+---
+
+## Cloudflare for SaaS (customer custom domains)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `CF_API_TOKEN` | Token with **SSL and Certificates: Edit** on the zone | `...` |
+| `CF_ZONE_ID` | Zone that owns the fallback origin | `...` |
+| `CF_SAAS_FALLBACK_HOSTNAME` | Hostname customers CNAME to (DNS only). Defaults to `BASE_DOMAIN`. | `ssl.live.example.com` |
+
+The Cloudflare ⇄ origin TLS leg is configured at the process/host level, not in kproxy app config — see [Cloudflare Setup](./cloudflare.md) (Origin CA cert or `cloudflared`).
+
+---
+
+## Optional
+
+### Server
+
+| Variable | Description | Default |
+|----------|-------------|---------|
 | `NODE_ENV` | Environment mode | `development` |
 | `DASHBOARD_URL` | Dashboard URL for redirects | `http://localhost:5173` |
 | `ALLOWED_ORIGINS` | CORS allowed origins (comma-separated) | `http://localhost:5173` |
 
-### VPS Configuration (for nginx management)
+### TCP tunnels & connection limits
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `VPS_HOST` | VPS hostname/IP for SSH | `localhost` |
-| `VPS_USER` | SSH username | `root` |
-| `VPS_PORT` | SSH port | `22` |
-| `VPS_ID` | Unique VPS identifier | Auto-generated |
-| `VPS_NAME` | Human-readable VPS name | `jrok-server` |
-| `NGINX_PATH` | Nginx config directory | `/etc/nginx/sites-available` |
+| `TCP_PORT_MIN` | Low end of the port range allocated to TCP tunnels | `10000` |
+| `TCP_PORT_MAX` | High end of the TCP tunnel port range | `20000` |
+| `MAX_AGENT_CONNECTIONS` | Max concurrent agent WebSocket tunnels per node | unlimited |
+| `MAX_CLIENT_CONNECTIONS` | Max concurrent client connections per node | unlimited |
+| `MAX_CONNECTIONS_PER_IP` | Max concurrent connections from a single source IP | unlimited |
 
-### Security
+> Open the `TCP_PORT_MIN`–`TCP_PORT_MAX` range on the firewall for TCP tunnels. Cloudflare's
+> Load Balancer fronts HTTP/HTTPS; raw TCP tunnels connect to the node directly on these ports.
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `API_KEY` | Legacy API key (backward compat) | None |
-| `CERT_SYNC_API_KEY` | Key for certificate sync API | None |
-
-### Notifications (Optional)
+### Notifications
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token for alerts | None |
-| `TELEGRAM_CHAT_ID` | Telegram chat ID for alerts | None |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token for alerts | none |
+| `TELEGRAM_CHAT_ID` | Telegram chat id for alerts | none |
+
+### Removed / no longer used
+
+These variables were part of the old nginx + Certbot/Let's Encrypt + MongoDB cert-sync design and are **no longer read**:
+
+| Variable | Why it's gone |
+|----------|---------------|
+| `NGINX_PATH` | kproxy no longer runs or configures nginx — Cloudflare is the edge. |
+| `CERT_SYNC_API_KEY` | The MongoDB certificate-sync service was removed; Cloudflare issues + stores certs. |
+| `CLOUDFLARE_TOKEN` (Certbot) | The DNS-01/Certbot token is gone. Custom-hostname issuance uses `CF_API_TOKEN` instead. |
+| `VPS_USER`, `VPS_PORT` | SSH/cert-sync plumbing that no longer exists. |
+
+> **Backward compatibility:** the legacy `JROK_*` env vars are still accepted as fallbacks for
+> the new `KPROXY_*` CLI vars; API keys with the `jrok_` prefix are still accepted alongside
+> `kproxy_`; and a legacy `~/.jrok` config is still read.
 
 ---
 
-## Example .env File
+## Example `.env`
 
 ```bash
 # =============================================================================
-# JROK ENVIRONMENT CONFIGURATION
+# KPROXY ENVIRONMENT CONFIGURATION
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# REQUIRED: Database
-# -----------------------------------------------------------------------------
-# MongoDB Atlas connection string
-# Get from: https://cloud.mongodb.com → Database → Connect
-MONGODB_URI=mongodb+srv://jrokuser:securepassword@cluster0.xxxxx.mongodb.net/jrok?retryWrites=true&w=majority
+# --- Database (cold/durable state) ---------------------------------------------
+MONGODB_URI=mongodb+srv://kproxy:password@cluster0.xxxxx.mongodb.net/kproxy?retryWrites=true&w=majority
+# Existing "jrok" deployments: set MONGO_DB_NAME=jrok or migrate the data.
+MONGO_DB_NAME=kproxy
 
-# -----------------------------------------------------------------------------
-# REQUIRED: Authentication
-# -----------------------------------------------------------------------------
-# JWT secret for session tokens (generate with: openssl rand -base64 64)
-JWT_SECRET=your-super-long-secret-key-at-least-64-characters-for-security
+# --- Auth ----------------------------------------------------------------------
+JWT_SECRET=your-super-long-secret-at-least-64-characters
 
-# -----------------------------------------------------------------------------
-# REQUIRED: Domain
-# -----------------------------------------------------------------------------
-# Base domain for tunnel subdomains (without https://)
-BASE_DOMAIN=tunnel.yourdomain.com
+# --- Domain --------------------------------------------------------------------
+BASE_DOMAIN=live.yourdomain.com
 
-# -----------------------------------------------------------------------------
-# REQUIRED: KOOMPI OAuth (for dashboard login)
-# -----------------------------------------------------------------------------
-# Get from: https://dash.koompi.org → Create Project → OAuth Settings
-KOOMPI_CLIENT_ID=your-koompi-client-id
-KOOMPI_CLIENT_SECRET=your-koompi-client-secret
-KOOMPI_REDIRECT_URI=https://tunnel.yourdomain.com/auth/callback
+# --- KOOMPI OAuth (dashboard) --------------------------------------------------
+KOOMPI_CLIENT_ID=your-client-id
+KOOMPI_CLIENT_SECRET=your-client-secret
+KOOMPI_REDIRECT_URI=https://live.yourdomain.com/auth/callback
 
-# -----------------------------------------------------------------------------
-# OPTIONAL: Server Configuration
-# -----------------------------------------------------------------------------
+# --- Multi-node (gossip mesh) --------------------------------------------------
+VPS_ID=node-a                 # unique per node
+VPS_HOST=10.0.0.11            # how peers reach THIS node directly (private/mesh IP)
+VPS_NAME=kproxy-sgp1          # optional label
+VPS_REGION=sgp1               # optional region tag
+GOSSIP_SECRET=shared-secret-set-on-every-node
 PORT=3000
+
+# --- Cloudflare for SaaS (custom domains) --------------------------------------
+CF_API_TOKEN=your-cf-token
+CF_ZONE_ID=your-zone-id
+CF_SAAS_FALLBACK_HOSTNAME=ssl.live.yourdomain.com
+
+# --- Server --------------------------------------------------------------------
 NODE_ENV=production
-DASHBOARD_URL=https://tunnel.yourdomain.com
-ALLOWED_ORIGINS=https://tunnel.yourdomain.com,http://localhost:5173
+DASHBOARD_URL=https://live.yourdomain.com
+ALLOWED_ORIGINS=https://live.yourdomain.com
+# API_KEY=admin-master-key-for-privileged-endpoints   # optional
 
-# -----------------------------------------------------------------------------
-# OPTIONAL: VPS/SSH Configuration (for nginx management)
-# -----------------------------------------------------------------------------
-VPS_HOST=localhost
-VPS_USER=root
-VPS_PORT=22
-VPS_NAME=jrok-primary
-NGINX_PATH=/etc/nginx/sites-available
+# --- TCP tunnels & limits (optional) -------------------------------------------
+# TCP_PORT_MIN=10000
+# TCP_PORT_MAX=20000
+# MAX_AGENT_CONNECTIONS=10000
+# MAX_CLIENT_CONNECTIONS=20000
+# MAX_CONNECTIONS_PER_IP=100
 
-# -----------------------------------------------------------------------------
-# OPTIONAL: Security
-# -----------------------------------------------------------------------------
-# API key for certificate sync between servers
-CERT_SYNC_API_KEY=your-32-char-secure-key
-
-# Legacy API key (for backward compatibility)
-# API_KEY=legacy-api-key
-
-# -----------------------------------------------------------------------------
-# OPTIONAL: Notifications
-# -----------------------------------------------------------------------------
-# Telegram alerts (create bot via @BotFather)
-# TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-# TELEGRAM_CHAT_ID=-1001234567890
+# --- Notifications (optional) --------------------------------------------------
+# TELEGRAM_BOT_TOKEN=...
+# TELEGRAM_CHAT_ID=...
 ```
 
 ---
 
-## Generating Secrets
-
-### JWT Secret
+## Generating secrets
 
 ```bash
-# Generate a secure 64-character secret
-openssl rand -base64 64
-
-# Or using Node.js
-node -e "console.log(require('crypto').randomBytes(64).toString('base64'))"
-```
-
-### API Key
-
-```bash
-# Generate a 32-character hex key
-openssl rand -hex 32
+openssl rand -base64 64     # JWT_SECRET
+openssl rand -hex 32        # GOSSIP_SECRET
 ```
 
 ---
 
-## Environment-Specific Configurations
-
-### Development
-
-```bash
-NODE_ENV=development
-PORT=3000
-DASHBOARD_URL=http://localhost:5173
-ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
-KOOMPI_REDIRECT_URI=http://localhost:3000/auth/callback
-```
-
-### Production
-
-```bash
-NODE_ENV=production
-PORT=3000
-DASHBOARD_URL=https://tunnel.yourdomain.com
-ALLOWED_ORIGINS=https://tunnel.yourdomain.com
-KOOMPI_REDIRECT_URI=https://tunnel.yourdomain.com/auth/callback
-```
-
----
-
-## Loading Environment Variables
-
-### From .env File (Development)
-
-Jrok automatically loads `.env` file in development mode.
-
-### From Shell (Production)
-
-```bash
-# Export individually
-export MONGODB_URI="mongodb+srv://..."
-export JWT_SECRET="..."
-
-# Or source from file
-source /etc/jrok/environment
-```
-
-### With systemd
-
-In `/etc/systemd/system/jrok.service`:
+## Loading & systemd
 
 ```ini
+# /etc/systemd/system/kproxy.service
 [Service]
 Environment=NODE_ENV=production
-Environment=PORT=3000
-EnvironmentFile=/etc/jrok/environment
+EnvironmentFile=/etc/kproxy/environment
+ExecStart=/usr/local/bin/bun run /opt/kproxy/src/index.ts
 ```
 
-### With Docker
-
-```bash
-# Using .env file
-docker run --env-file .env jrok
-
-# Using individual vars
-docker run -e MONGODB_URI="..." -e JWT_SECRET="..." jrok
-```
-
-### With Docker Compose
-
-```yaml
-services:
-  jrok:
-    env_file:
-      - .env
-    environment:
-      - NODE_ENV=production
-      - PORT=3000
-```
+Required variables are validated on startup; missing ones cause the server to exit with an error.
 
 ---
 
-## Validation
-
-Jrok validates required variables on startup. Missing variables will cause the server to exit with an error message.
-
-```bash
-# Example error
-❌ Missing required environment variable: MONGODB_URI
-❌ Missing required environment variable: JWT_SECRET
-```
-
----
-
-## Next Steps
-
-- [KOOMPI OAuth Setup](./oauth.md) - Configure authentication
-- [Cloudflare Setup](./cloudflare.md) - DNS and SSL
-- [MongoDB Setup](./mongodb.md) - Database configuration
+## Next steps
+- [Cloudflare Setup](./cloudflare.md) — orange proxy, Load Balancer, Origin CA, Custom Hostnames
+- [MongoDB Setup](./mongodb.md) — cold-state database
+- [Multi-Server Deployment](../deployment/multi-server.md) — gossip mesh and scaling

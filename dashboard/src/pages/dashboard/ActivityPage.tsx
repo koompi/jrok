@@ -81,7 +81,7 @@ const transformActivity = (activity: ActivityLog): ActivityUIData => ({
   title: getActivityTitle(activity.action, activity.resourceType),
   description: activity.description,
   metadata: activity.metadata || {},
-  user: { name: activity.userId || 'System', email: activity.ipAddress || 'system@jrok.io' },
+  user: { name: activity.userId || 'System', email: activity.ipAddress || 'system' },
   timestamp: activity.createdAt,
   status: getActivityStatus(activity.action),
 });
@@ -275,7 +275,7 @@ export default function ActivityPage() {
               <p className="text-muted-foreground text-center max-w-sm">
                 {searchQuery || categoryFilter !== 'all' 
                   ? 'Try adjusting your filters'
-                  : 'Activity will appear here as you use Jrok'}
+                  : 'Activity will appear here as you use KProxy'}
               </p>
             </div>
           ) : (

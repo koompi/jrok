@@ -6,9 +6,6 @@ export interface VpsServer {
   id: string;
   name: string;
   host: string;
-  sshUser: string;
-  sshPort: number;
-  nginxPath: string;
   healthy: boolean;
   lastHealthCheck: number;
   createdAt: number;

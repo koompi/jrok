@@ -539,7 +539,7 @@ export default function ApiKeysPage() {
             </div>
             <h3 className="text-lg font-medium mb-2">No API keys yet</h3>
             <p className="text-muted-foreground text-center max-w-sm mb-6">
-              API keys allow you to authenticate your applications and CLI tools with Jrok.
+              API keys allow you to authenticate your applications and CLI tools with KProxy.
             </p>
             <Button onClick={() => setIsDialogOpen(true)} className="gap-2">
               <Plus className="h-4 w-4" />
@@ -554,11 +554,11 @@ export default function ApiKeysPage() {
         <CardContent className="pt-6">
           <h3 className="font-semibold mb-2">Using API Keys</h3>
           <p className="text-sm text-muted-foreground mb-4">
-            API keys authenticate your CLI and applications with Jrok. Keep them secure and never share them publicly.
+            API keys authenticate your CLI and applications with KProxy. Keep them secure and never share them publicly.
           </p>
           <div className="bg-background rounded-lg p-4 font-mono text-sm">
             <p className="text-muted-foreground mb-2"># Authenticate with the CLI</p>
-            <p className="text-primary">jrok auth --token YOUR_API_KEY</p>
+            <p className="text-primary">kproxy auth --token YOUR_API_KEY</p>
           </div>
         </CardContent>
       </Card>

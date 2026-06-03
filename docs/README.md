@@ -1,60 +1,51 @@
-# Jrok Documentation
+# kproxy Documentation
 
-Welcome to the Jrok documentation. This guide will help you set up, deploy, and use Jrok for exposing local services to the public internet.
+kproxy is a horizontally-scalable reverse proxy for exposing local services to the internet — no single point of failure, scale by adding nodes, fronted by Cloudflare for TLS and load balancing.
 
-## Table of Contents
+## Start here
+- [Architecture Overview](./getting-started/architecture.md) — the flow, gossip routing, TLS model, R2 for large files
+- [Quick Start](./getting-started/quick-start.md) — expose a local service in minutes
 
-### Getting Started
-- [Quick Start Guide](./getting-started/quick-start.md) - Get up and running in 5 minutes
-- [Architecture Overview](./getting-started/architecture.md) - Understand how Jrok works
+## Deployment
+- [Multi-Server Deployment](./deployment/multi-server.md) — the gossip mesh, HA, scaling
+- [Self-Hosting Guide](./deployment/self-hosting.md) — deploy your own node
+- [Ansible Deployment](./deployment/ansible.md) — automated configuration
+- [Docker Deployment](./deployment/docker.md) — container-based deployment
 
-### Deployment
-- [Self-Hosting Guide](./deployment/self-hosting.md) - Deploy your own Jrok server
-- [Terraform Setup](./deployment/terraform.md) - Provision VPS with DigitalOcean
-- [Ansible Deployment](./deployment/ansible.md) - Automated server configuration
-- [Docker Deployment](./deployment/docker.md) - Container-based deployment
+## Configuration
+- [Cloudflare Setup](./configuration/cloudflare.md) — orange proxy, Load Balancer, Origin CA, Cloudflare for SaaS, R2
+- [Environment Variables](./configuration/environment.md) — all configuration options
+- [MongoDB Setup](./configuration/mongodb.md) — cold/durable state
+- [KOOMPI ID OAuth Setup](./configuration/oauth.md) — dashboard authentication
 
-### Configuration
-- [Environment Variables](./configuration/environment.md) - All configuration options
-- [KOOMPI ID OAuth Setup](./configuration/oauth.md) - Authentication configuration
-- [Cloudflare Setup](./configuration/cloudflare.md) - DNS and SSL certificates
-- [MongoDB Setup](./configuration/mongodb.md) - Database configuration
+## CLI reference
+- [CLI Installation](./cli/installation.md)
+- [CLI Commands](./cli/commands.md) — HTTP, TCP, domains
 
-### CLI Reference
-- [CLI Installation](./cli/installation.md) - Install the Jrok CLI
-- [CLI Commands](./cli/commands.md) - Full command reference (HTTP, TCP, domains)
-- [CLI Configuration](./cli/configuration.md) - Configure the CLI
+## How TLS works (no Certbot)
+- **Your subdomains** (`*.live.yourdomain.com`) → Cloudflare **Universal SSL**, automatic.
+- **Customer custom domains** → **Cloudflare for SaaS** (Custom Hostnames); customers CNAME **DNS-only** (grey cloud).
+- **Cloudflare ⇄ node** → one **Origin CA** cert per node (or `cloudflared`, zero certs).
 
-### API Reference
-- [REST API](./api/rest.md) - HTTP API endpoints
-- [WebSocket API](./api/websocket.md) - Real-time communication
+There is no Let's Encrypt, Certbot, nginx, or certificate syncing.
 
-### Features
-- **HTTP/HTTPS Tunnels** - Expose web services with automatic SSL
-- **TCP Tunnels** - Raw TCP for databases, SSH, custom protocols
-- **Custom Domains** - CNAME-verified custom domain support
-- **Smart Subdomain Handling** - Auto-suffix on conflicts, `--force-new` option
+## Features
+- **HTTP/HTTPS tunnels** — expose web apps and APIs; TLS handled at the Cloudflare edge
+- **TCP tunnels** — databases, SSH, custom protocols
+- **Custom domains** — Cloudflare-for-SaaS Custom Hostnames (DNS-only CNAME)
+- **Gossip routing** — in-memory, no Redis, no single point of failure
+- **Large files via R2/S3** — presigned URLs; big payloads bypass the tunnel entirely
 
-### Security
-- **Rate Limiting** - HTTP request limits per tunnel
-- **TCP Connection Limits** - Max concurrent connections per agent
-- **Bandwidth Throttling** - Per-tunnel bandwidth limits
-- **IP Allowlist** - Restrict access to specific IPs
-- **Connection Logging** - Full audit trails
-- **CNAME Verification** - Custom domains require DNS verification
-
-### Advanced
-- [Custom Domains](./advanced/custom-domains.md) - Use your own domains
-- [Multi-Server Setup](./advanced/multi-server.md) - High availability configuration
-- [Security Best Practices](./advanced/security.md) - Secure your deployment
+## Security
+- Rate limiting, IP allowlists, connection logging
+- API keys (`kproxy_…`; legacy `jrok_…` still accepted)
+- Authenticated gossip mesh (`GOSSIP_SECRET`)
+- Origins locked to Cloudflare IPs (or `cloudflared`)
 
 ---
 
-## Quick Links
-
+## Quick links
 | Resource | Description |
 |----------|-------------|
 | [GitHub Repository](https://github.com/koompi/jrok) | Source code and issues |
-| [KOOMPI Cloud](https://tunnel.koompi.cloud) | Managed Jrok service |
 | [KOOMPI ID](https://dash.koompi.org) | OAuth credentials |
-| [Discord Community](https://discord.gg/koompi) | Get help and support |

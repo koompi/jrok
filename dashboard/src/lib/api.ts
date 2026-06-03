@@ -2,6 +2,13 @@
 // In production, use the actual API URL from env
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+// Public hostname config (override per-deployment via Vite env).
+// BASE_DOMAIN is the wildcard base for generated tunnel URLs (<sub>.<BASE_DOMAIN>).
+// CNAME_TARGET is the Cloudflare-for-SaaS fallback hostname customers point custom
+// domains at via a DNS-only (grey-cloud) CNAME.
+export const BASE_DOMAIN = import.meta.env.VITE_BASE_DOMAIN || 'live.koompi.cloud';
+export const CNAME_TARGET = import.meta.env.VITE_CNAME_TARGET || BASE_DOMAIN;
+
 interface ApiResponse<T> {
   success: boolean;
   message?: string;
@@ -401,10 +408,6 @@ class ApiClient {
     return this.request('/admin/monitoring/auth');
   }
 
-  async getCertMetrics(): Promise<{ success: boolean; certificates: CertMetrics }> {
-    return this.request('/admin/monitoring/certificates');
-  }
-
   async getSystemConfig(): Promise<{ success: boolean; config: SystemConfig }> {
     return this.request('/admin/monitoring/config');
   }
@@ -590,9 +593,8 @@ export interface EnhancedDomain {
   id: string;
   domain: string;
   baseDomain: boolean;
-  certPath?: string;
   certExpiry?: number;
-  certbotEmail: string;
+  certbotEmail?: string; // legacy contact email (no longer used for issuance)
   createdAt: number;
   active: boolean;
   synced: boolean;
@@ -600,6 +602,11 @@ export interface EnhancedDomain {
   dnsVerified: boolean;
   dnsRecords?: DnsRecord[];
   tunnelCount: number;
+  // Cloudflare for SaaS (Custom Hostnames) — replaces Certbot/Let's Encrypt
+  cnameTarget?: string; // DNS-only CNAME target the customer points their domain at
+  cnameVerified?: boolean;
+  ownershipVerification?: { type?: string; name?: string; value?: string };
+  cfHostnameId?: string;
 }
 
 export interface DashboardStats {
@@ -744,14 +751,6 @@ export interface AuthMetrics {
   topFailedIdentifiers: Array<{ identifier: string; count: number; lastAttempt: number }>;
 }
 
-export interface CertMetrics {
-  renewalAttempts: number;
-  renewalSuccesses: number;
-  renewalFailures: number;
-  lastRenewal: number | null;
-  lastError: string | null;
-}
-
 export interface SystemLog {
   timestamp: number;
   level: 'info' | 'warn' | 'error' | 'debug';
@@ -793,7 +792,6 @@ export interface MonitoringDashboardData {
   health: SystemHealth;
   rateLimits: RateLimitStats[];
   auth: AuthMetrics;
-  certificates: CertMetrics;
   logs: SystemLog[];
   history: SystemMetricsSnapshot[];
   config: MonitoringConfig;

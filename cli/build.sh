@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-echo "🔨 Building jrok CLI..."
+echo "🔨 Building kproxy CLI..."
 
 # Colors
 GREEN='\033[0;32m'
@@ -10,7 +10,7 @@ NC='\033[0m' # No Color
 
 # Clean previous builds
 echo -e "${BLUE}Cleaning previous builds...${NC}"
-rm -rf dist/ bin/jrok
+rm -rf dist/ bin/kproxy
 
 # Build JS bundle
 echo -e "${BLUE}Building JavaScript bundle...${NC}"
@@ -22,29 +22,29 @@ mkdir -p bin
 
 # Create executable wrapper
 echo -e "${BLUE}Creating executable...${NC}"
-cat > bin/jrok << 'EOF'
+cat > bin/kproxy << 'EOF'
 #!/usr/bin/env node
 require('../dist/index.js');
 EOF
 
 # Make it executable
-chmod +x bin/jrok
+chmod +x bin/kproxy
 echo -e "${GREEN}✓ Executable created${NC}"
 
 # Optional: Create standalone binary (requires bun)
 if command -v bun &> /dev/null; then
   echo -e "${BLUE}Creating standalone binary...${NC}"
-  bun build src/index.ts --compile --outfile bin/jrok-standalone
-  chmod +x bin/jrok-standalone
+  bun build src/index.ts --compile --outfile bin/kproxy-standalone
+  chmod +x bin/kproxy-standalone
   echo -e "${GREEN}✓ Standalone binary created${NC}"
 fi
 
 echo -e "${GREEN}✨ Build complete!${NC}"
 echo ""
 echo "Test locally:"
-echo "  ./bin/jrok version"
-echo "  ./bin/jrok help"
+echo "  ./bin/kproxy version"
+echo "  ./bin/kproxy help"
 echo ""
 echo "Install globally:"
 echo "  npm link"
-echo "  jrok version"
+echo "  kproxy version"

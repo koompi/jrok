@@ -43,18 +43,24 @@ export async function handleRegisterDomain(req: Request): Promise<Response> {
       );
     }
 
-    const body = (await req.json()) as RegisterCustomDomainRequest;
+    const body = (await req.json()) as RegisterCustomDomainRequest & { email?: string };
+
+    // Accept `email` (preferred) or the legacy `certbotEmail` field as the domain
+    // contact email. It is stored for contact only — Cloudflare provisions the cert,
+    // so no email is used for certificate issuance.
+    const contactEmail = body.email || body.certbotEmail;
 
     // Validate input
-    if (!body.domain || !body.certbotEmail) {
+    if (!body.domain || !contactEmail) {
       return new Response(
         JSON.stringify({
           success: false,
-          message: "Missing required fields: domain, certbotEmail",
+          message: "Missing required fields: domain and a contact email",
         } as DomainResponse),
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
+    body.certbotEmail = contactEmail;
 
     // Validate domain format (basic validation)
     if (!isValidDomain(body.domain)) {
@@ -263,7 +269,7 @@ export async function handleResyncDomain(domain: string): Promise<Response> {
     return new Response(
       JSON.stringify({
         success: true,
-        message: "Domain certificate synced to all VPS servers",
+        message: "Refreshed certificate status from Cloudflare",
         domain: customDomain,
       } as DomainResponse),
       { status: 200, headers: { "Content-Type": "application/json" } }
@@ -281,174 +287,9 @@ export async function handleResyncDomain(domain: string): Promise<Response> {
   }
 }
 
-export async function handleTransferDomain(domain: string, req: Request): Promise<Response> {
-  try {
-    if (!domain) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Domain name is required",
-        } as DomainResponse),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
-
-    const body = (await req.json()) as {
-      targetVpsId: string;
-      includeOtherServers?: boolean;
-    };
-
-    if (!body.targetVpsId) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "targetVpsId is required",
-        } as DomainResponse),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
-
-    const customDomain = await domainService.transferDomain(
-      decodeURIComponent(domain),
-      body.targetVpsId,
-      body.includeOtherServers !== false
-    );
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        message: "Domain transferred successfully",
-        domain: customDomain,
-      } as DomainResponse),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    return new Response(
-      JSON.stringify({
-        success: false,
-        message: "Failed to transfer domain",
-        error: errorMsg,
-      } as DomainResponse),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
-  }
-}
-
-export async function handleBackupDomain(domain: string): Promise<Response> {
-  try {
-    if (!domain) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Domain name is required",
-        } as DomainResponse),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
-
-    const backup = await domainService.backupDomain(decodeURIComponent(domain));
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        message: "Domain backup created successfully",
-        backup,
-      }),
-      { status: 201, headers: { "Content-Type": "application/json" } }
-    );
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    return new Response(
-      JSON.stringify({
-        success: false,
-        message: "Failed to backup domain",
-        error: errorMsg,
-      } as DomainResponse),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
-  }
-}
-
-export async function handleRestoreDomain(domain: string, backupId: string): Promise<Response> {
-  try {
-    if (!domain) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Domain name is required",
-        } as DomainResponse),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
-
-    if (!backupId) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Backup ID is required",
-        } as DomainResponse),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
-
-    const customDomain = await domainService.restoreDomain(decodeURIComponent(domain), backupId);
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        message: "Domain restored from backup successfully",
-        domain: customDomain,
-      } as DomainResponse),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    return new Response(
-      JSON.stringify({
-        success: false,
-        message: "Failed to restore domain",
-        error: errorMsg,
-      } as DomainResponse),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
-  }
-}
-
-export async function handleListBackups(domain: string): Promise<Response> {
-  try {
-    if (!domain) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          message: "Domain name is required",
-        } as DomainResponse),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
-
-    const backups = await domainService.listDomainBackups(decodeURIComponent(domain));
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        backups,
-        total: backups.length,
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    return new Response(
-      JSON.stringify({
-        success: false,
-        message: "Failed to list backups",
-        error: errorMsg,
-      } as DomainResponse),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
-  }
-}
+// NOTE: certificate transfer/backup/restore endpoints were removed.
+// Certificates are now provisioned and managed by Cloudflare for SaaS — there
+// are no local cert files to transfer, back up, or restore.
 
 /**
  * Basic domain validation

@@ -1,3 +1,5 @@
+> ⚠️ HISTORICAL — describes the pre-kproxy nginx + Certbot/Let's Encrypt (leader-based) design that was removed. See ../docs/getting-started/architecture.md for the current architecture.
+
 # Docker & Ansible Integration Guide - jrok
 
 Detailed guide explaining how Docker containerization integrates with Ansible automation for both single-node and multi-node deployments.

@@ -6,9 +6,9 @@ import crypto from "crypto";
 // Generate a secure API key
 function generateApiKey(): { key: string; hash: string; prefix: string } {
   const random = crypto.randomBytes(32).toString("hex");
-  const key = `jrok_${random}`;
+  const key = `kproxy_${random}`;
   const hash = crypto.createHash("sha256").update(key).digest("hex");
-  const prefix = key.substring(0, 14); // jrok_ + first 8 chars
+  const prefix = key.substring(0, 15); // kproxy_ + first 8 chars
 
   return { key, hash, prefix };
 }

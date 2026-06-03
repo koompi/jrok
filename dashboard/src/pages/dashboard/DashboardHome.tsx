@@ -1,7 +1,7 @@
 import { useAuth } from '@/contexts/AuthContext';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useQuery } from '@tanstack/react-query';
-import { api, DashboardStats, ActivityLog } from '@/lib/api';
+import { api, DashboardStats, ActivityLog, BASE_DOMAIN } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -295,12 +295,12 @@ export default function DashboardHome() {
                         </Badge>
                       </div>
                       <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <span>{tunnel.customDomain ? `${tunnel.domain}.${tunnel.customDomain}` : `${tunnel.domain}.jrok.io`}</span>
+                        <span>{tunnel.customDomain ? `${tunnel.domain}.${tunnel.customDomain}` : `${tunnel.domain}.${BASE_DOMAIN}`}</span>
                         <Button 
                           variant="ghost" 
                           size="icon" 
                           className="h-5 w-5 opacity-0 group-hover:opacity-100 transition-opacity"
-                          onClick={() => copyToClipboard(`https://${tunnel.customDomain ? `${tunnel.domain}.${tunnel.customDomain}` : `${tunnel.domain}.jrok.io`}`)}
+                          onClick={() => copyToClipboard(`https://${tunnel.customDomain ? `${tunnel.domain}.${tunnel.customDomain}` : `${tunnel.domain}.${BASE_DOMAIN}`}`)}
                         >
                           <Copy className="h-3 w-3" />
                         </Button>
@@ -325,7 +325,7 @@ export default function DashboardHome() {
                 <div className="text-center py-8 text-muted-foreground">
                   <Globe className="h-8 w-8 mx-auto mb-2 opacity-50" />
                   <p>No active tunnels yet</p>
-                  <p className="text-sm mt-1">Run <code className="bg-muted px-1.5 py-0.5 rounded">jrok --port 3000</code> to get started</p>
+                  <p className="text-sm mt-1">Run <code className="bg-muted px-1.5 py-0.5 rounded">kproxy --port 3000</code> to get started</p>
                 </div>
               )}
             </div>
@@ -493,7 +493,7 @@ export default function DashboardHome() {
                   <h4 className="font-semibold">Install the CLI</h4>
                 </div>
                 <p className="text-sm text-muted-foreground mb-3">
-                  Install Jrok CLI globally using npm or bun.
+                  Install KProxy CLI globally using npm or bun.
                 </p>
                 <div className="relative">
                   <pre className="bg-muted/50 p-3 rounded-lg text-xs font-mono overflow-x-auto">
@@ -525,13 +525,13 @@ export default function DashboardHome() {
                 </p>
                 <div className="relative">
                   <pre className="bg-muted/50 p-3 rounded-lg text-xs font-mono overflow-x-auto">
-                    jrok --port 3000
+                    kproxy --port 3000
                   </pre>
                   <Button 
                     variant="ghost" 
                     size="icon" 
                     className="absolute top-2 right-2 h-6 w-6"
-                    onClick={() => copyToClipboard('jrok --port 3000')}
+                    onClick={() => copyToClipboard('kproxy --port 3000')}
                   >
                     <Copy className="h-3 w-3" />
                   </Button>

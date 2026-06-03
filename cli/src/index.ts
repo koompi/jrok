@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Jrok Agent Client - CLI Tool
+ * KProxy Agent Client - CLI Tool
  * 
  * Expose local services (Docker, Kubernetes, ports) to public internet via reverse proxy
  */
@@ -20,8 +20,10 @@ const GITHUB_RAW = "https://raw.githubusercontent.com/koompi/jrok";
 const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
 
 // Config file path
-const CONFIG_DIR = join(homedir(), '.jrok');
+const CONFIG_DIR = join(homedir(), '.kproxy');
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
+// Legacy location (pre-rename) — read once for backward-compatible migration.
+const LEGACY_CONFIG_FILE = join(homedir(), '.jrok', 'config.json');
 
 interface StoredConfig {
   serverUrl?: string;
@@ -80,6 +82,10 @@ function loadStoredConfig(): StoredConfig {
   try {
     if (existsSync(CONFIG_FILE)) {
       return JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+    }
+    // Fall back to the legacy ~/.jrok config so existing users keep their settings.
+    if (existsSync(LEGACY_CONFIG_FILE)) {
+      return JSON.parse(readFileSync(LEGACY_CONFIG_FILE, 'utf-8'));
     }
   } catch (error) {
     // Ignore errors
@@ -146,7 +152,7 @@ async function checkForUpdates(silent = false): Promise<{ hasUpdate: boolean; la
     if (compareVersions(latestVersion, VERSION) > 0) {
       if (!silent) {
         console.log(`\n📦 Update available: ${VERSION} → ${latestVersion}`);
-        console.log(`   Run 'jrok doctor' to update\n`);
+        console.log(`   Run 'kproxy doctor' to update\n`);
       }
       return { hasUpdate: true, latestVersion };
     }
@@ -252,7 +258,7 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
                      'port';
   
   // Check if TCP protocol is requested
-  const isTcp = args['tcp'] === 'true' || args['tcp'] === '' || process.env.JROK_PROTOCOL === 'tcp';
+  const isTcp = args['tcp'] === 'true' || args['tcp'] === '' || (process.env.KPROXY_PROTOCOL ?? process.env.JROK_PROTOCOL) === 'tcp';
   
   // Check if force-new is requested (always create new subdomain)
   const forceNew = args['force-new'] === 'true' || args['force-new'] === '' || args['new'] === 'true' || args['new'] === '';
@@ -278,15 +284,15 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
   }
 
   return {
-    serverUrl: args["server"] || process.env.JROK_SERVER || storedConfig.serverUrl || DEFAULT_SERVER,
-    domain: args["domain"] || process.env.JROK_DOMAIN,
+    serverUrl: args["server"] || (process.env.KPROXY_SERVER ?? process.env.JROK_SERVER) || storedConfig.serverUrl || DEFAULT_SERVER,
+    domain: args["domain"] || (process.env.KPROXY_DOMAIN ?? process.env.JROK_DOMAIN),
     port: args["port"] ? parseInt(args["port"]) : 
-          process.env.JROK_PORT ? parseInt(process.env.JROK_PORT) : 
+          (process.env.KPROXY_PORT ?? process.env.JROK_PORT) ? parseInt((process.env.KPROXY_PORT ?? process.env.JROK_PORT)) : 
           serviceType === 'port' ? 3000 : undefined,
-    localHost: args["host"] || process.env.JROK_HOST || "localhost",
-    authToken: args["auth"] || process.env.JROK_AUTH || storedConfig.apiKey,
+    localHost: args["host"] || (process.env.KPROXY_HOST ?? process.env.JROK_HOST) || "localhost",
+    authToken: args["auth"] || (process.env.KPROXY_AUTH ?? process.env.JROK_AUTH) || storedConfig.apiKey,
     serviceType: serviceType as 'port' | 'docker-swarm' | 'kubernetes',
-    serviceName: args["docker-service"] || args["k8s-service"] || process.env.JROK_SERVICE,
+    serviceName: args["docker-service"] || args["k8s-service"] || (process.env.KPROXY_SERVICE ?? process.env.JROK_SERVICE),
     protocol: isTcp ? 'tcp' : 'http',
     forceNew,
     ipSecurity,
@@ -295,17 +301,17 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
 
 function validateConnectConfig(config: Partial<ClientConfig>): asserts config is ClientConfig {
   if (!config.serverUrl) {
-    throw new Error("Missing serverUrl. Use --server or JROK_SERVER env var");
+    throw new Error("Missing serverUrl. Use --server or KPROXY_SERVER env var");
   }
   // Domain is now optional - will auto-generate if not provided
   if (!config.authToken) {
-    throw new Error("Missing authToken. Use --auth or JROK_AUTH env var");
+    throw new Error("Missing authToken. Use --auth or KPROXY_AUTH env var");
   }
 
   // Validate based on service type
   if (config.serviceType === 'port') {
     if (!config.port || config.port < 1 || config.port > 65535) {
-      throw new Error("Invalid port number. Use --port (1-65535) or JROK_PORT");
+      throw new Error("Invalid port number. Use --port (1-65535) or KPROXY_PORT");
     }
   } else if (config.serviceType === 'docker-swarm' || config.serviceType === 'kubernetes') {
     if (!config.serviceName) {
@@ -316,10 +322,10 @@ function validateConnectConfig(config: Partial<ClientConfig>): asserts config is
 
 function validateBasicConfig(config: Partial<ClientConfig>): void {
   if (!config.serverUrl) {
-    throw new Error("Missing serverUrl. Use --server or JROK_SERVER env var");
+    throw new Error("Missing serverUrl. Use --server or KPROXY_SERVER env var");
   }
   if (!config.authToken) {
-    throw new Error("Missing authToken. Use --auth or JROK_AUTH env var");
+    throw new Error("Missing authToken. Use --auth or KPROXY_AUTH env var");
   }
 }
 
@@ -640,7 +646,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
     ? `Docker Swarm: ${config.serviceName}`
     : `Kubernetes: ${config.serviceName}`;
 
-  console.log(`\n🔌 Connecting to jrok server...`);
+  console.log(`\n🔌 Connecting to kproxy server...`);
   console.log(`📍 Domain: ${config.domain}`);
   console.log(`🏠 Local Service: ${serviceDesc}`);
   console.log(`📡 Protocol: ${protocol.toUpperCase()}`);
@@ -792,7 +798,7 @@ async function listServices(config: { serverUrl: string; authToken: string }): P
 
     if (tunnels.length === 0) {
       console.log("📋 No active tunnels");
-      console.log("💡 Create one with: jrok --port 3000");
+      console.log("💡 Create one with: kproxy --port 3000");
       return;
     }
 
@@ -862,7 +868,7 @@ async function listOrganizations(serverUrl: string, authToken: string): Promise<
 
     if (orgs.length === 0) {
       console.log("📋 No organizations found");
-      console.log("💡 Create one at your dashboard or use: jrok org create --name 'My Org'");
+      console.log("💡 Create one at your dashboard or use: kproxy org create --name 'My Org'");
       return;
     }
 
@@ -948,7 +954,7 @@ async function listApiKeys(serverUrl: string, authToken: string, orgId: string):
 
     if (keys.length === 0) {
       console.log("🔑 No API keys found");
-      console.log("💡 Create one with: jrok apikey create --name 'My Key' --org <org-id>");
+      console.log("💡 Create one with: kproxy apikey create --name 'My Key' --org <org-id>");
       return;
     }
 
@@ -959,7 +965,7 @@ async function listApiKeys(serverUrl: string, authToken: string, orgId: string):
     keys.forEach((key: any) => {
       console.log(
         (key.id || key._id).padEnd(26),
-        (key.keyPrefix || 'jrok_...').padEnd(16),
+        (key.keyPrefix || 'kproxy_...').padEnd(16),
         key.name.slice(0, 19).padEnd(20),
         (key.permissions || []).join(', ').slice(0, 20)
       );
@@ -1001,9 +1007,9 @@ async function createApiKey(
     console.log(`\n⚠️  IMPORTANT: Save this key now! It will only be shown once.\n`);
     console.log(`🔑 API Key: ${rawKey}`);
     console.log(`\nTo use this key:`);
-    console.log(`  jrok config --auth ${rawKey}`);
+    console.log(`  kproxy config --auth ${rawKey}`);
     console.log(`  # or`);
-    console.log(`  export JROK_AUTH=${rawKey}`);
+    console.log(`  export KPROXY_AUTH=${rawKey}`);
     console.log("");
   } catch (error) {
     console.error("❌ Error creating API key:", error instanceof Error ? error.message : error);
@@ -1069,8 +1075,8 @@ async function registerCustomDomain(
     console.log(`📝 NEXT STEP: Add a CNAME record to your DNS:\n`);
     console.log(`   ${domainName}  CNAME  ${domain.cnameTarget || domain.targetSubdomain + '.tunnel.koompi.cloud'}\n`);
     console.log(`After adding the DNS record, verify with:`);
-    console.log(`   jrok domain status --name ${domainName}`);
-    console.log(`   jrok domain verify --name ${domainName}`);
+    console.log(`   kproxy domain status --name ${domainName}`);
+    console.log(`   kproxy domain verify --name ${domainName}`);
   } catch (error) {
     console.error("❌ Error registering domain:", error instanceof Error ? error.message : error);
     process.exit(1);
@@ -1106,7 +1112,7 @@ async function checkDomainStatus(serverUrl: string, authToken: string, domainNam
       }
     } else {
       console.log(`\n🎉 CNAME is correctly configured!`);
-      console.log(`   Run: jrok domain verify --name ${domainName}`);
+      console.log(`   Run: kproxy domain verify --name ${domainName}`);
     }
   } catch (error) {
     console.error("❌ Error checking domain status:", error instanceof Error ? error.message : error);
@@ -1167,7 +1173,7 @@ async function listCustomDomains(serverUrl: string, authToken: string): Promise<
 
     if (domains.length === 0) {
       console.log("\n📋 No custom domains registered\n");
-      console.log("💡 Register one with: jrok domain register --name example.com --email you@email.com");
+      console.log("💡 Register one with: kproxy domain register --name example.com --email you@email.com");
       return;
     }
 
@@ -1234,8 +1240,8 @@ function clearConfig(): void {
 
 async function whoami(serverUrl: string, authToken: string): Promise<void> {
   try {
-    // Check if it's an API key or session token
-    if (authToken.startsWith('jrok_')) {
+    // Check if it's an API key or session token (jrok_ kept for backward compatibility)
+    if (authToken.startsWith('kproxy_') || authToken.startsWith('jrok_')) {
       console.log("\n🔑 Using API Key authentication");
       console.log(`Key prefix: ${authToken.slice(0, 15)}...`);
       
@@ -1290,27 +1296,27 @@ async function whoami(serverUrl: string, authToken: string): Promise<void> {
 }
 
 function showVersion(): void {
-  console.log(`jrok v${VERSION}`);
+  console.log(`kproxy v${VERSION}`);
   console.log(`Node ${process.version}`);
 }
 
 function showHelp(): void {
   console.log(`
 ╔══════════════════════════════════════════════════════════════════════╗
-║                   Jrok Agent Client v${VERSION}                   ║
+║                   KProxy Agent Client v${VERSION}                   ║
 ║   Expose Local Services to Public Internet via Reverse Proxy         ║
 ╚══════════════════════════════════════════════════════════════════════╝
 
 QUICK START:
-  jrok --port 3000                               # That's it! 🚀
+  kproxy --port 3000                               # That's it! 🚀
   
   First time? You'll be prompted for your API key.
   Get one from: ${DEFAULT_SERVER}
 
 SIMPLE USAGE:
-  jrok --port 3000                    # Expose localhost:3000 (auto subdomain)
-  jrok --port 8080                    # Expose localhost:8080 (auto subdomain)
-  jrok --port 3000 --domain myapp     # Expose as myapp.tunnel.koompi.cloud
+  kproxy --port 3000                    # Expose localhost:3000 (auto subdomain)
+  kproxy --port 8080                    # Expose localhost:8080 (auto subdomain)
+  kproxy --port 3000 --domain myapp     # Expose as myapp.tunnel.koompi.cloud
 
 COMMANDS:
   connect              Connect a local service to public domain
@@ -1339,66 +1345,66 @@ COMMANDS:
   help                 Show this help message
 
 CONFIG COMMANDS:
-  jrok config                                    # Show current config
-  jrok config --server https://...               # Set server URL
-  jrok config --auth jrok_xxx                   # Set API key
-  jrok config --org <org-id>                     # Set default organization
-  jrok config --clear                            # Clear all saved config
+  kproxy config                                    # Show current config
+  kproxy config --server https://...               # Set server URL
+  kproxy config --auth kproxy_xxx                   # Set API key
+  kproxy config --org <org-id>                     # Set default organization
+  kproxy config --clear                            # Clear all saved config
 
 ORGANIZATION COMMANDS:
-  jrok org list                                  # List your organizations
-  jrok org create --name "My Company"            # Create organization
-  jrok org use --id <org-id>                     # Set default organization
+  kproxy org list                                  # List your organizations
+  kproxy org create --name "My Company"            # Create organization
+  kproxy org use --id <org-id>                     # Set default organization
 
 API KEY COMMANDS:
-  jrok apikey list --org <org-id>                # List API keys
-  jrok apikey create --org <org-id> --name "CI"  # Create API key
-  jrok apikey revoke --org <org-id> --id <key>   # Revoke API key
+  kproxy apikey list --org <org-id>                # List API keys
+  kproxy apikey create --org <org-id> --name "CI"  # Create API key
+  kproxy apikey revoke --org <org-id> --id <key>   # Revoke API key
 
 CUSTOM DOMAIN COMMANDS:
-  jrok domain register --name mysite.com --email me@email.com
-  jrok domain status --name mysite.com           # Check CNAME
-  jrok domain verify --name mysite.com           # Verify & issue SSL
-  jrok domain list                               # List all domains
+  kproxy domain register --name mysite.com --email me@email.com
+  kproxy domain status --name mysite.com           # Check CNAME
+  kproxy domain verify --name mysite.com           # Verify & issue SSL
+  kproxy domain list                               # List all domains
 
 CONNECT EXAMPLES:
   # Quick start - HTTP/HTTPS tunnel (auto subdomain)
-  jrok --port 3000
+  kproxy --port 3000
   
   # With custom subdomain
-  jrok --port 3000 --domain myapp
+  kproxy --port 3000 --domain myapp
 
   # Force new subdomain (creates myapp-a7b3 if myapp exists)
-  jrok --port 3000 --domain myapp --force-new
+  kproxy --port 3000 --domain myapp --force-new
 
   # TCP tunnel for SSH access
-  jrok --tcp --port 22 --domain ssh-server
+  kproxy --tcp --port 22 --domain ssh-server
   
   # TCP tunnel for MongoDB
-  jrok --tcp --port 27017 --domain mongodb
+  kproxy --tcp --port 27017 --domain mongodb
   
   # TCP tunnel for Redis
-  jrok --tcp --port 6379 --domain redis
+  kproxy --tcp --port 6379 --domain redis
 
   # Docker Swarm service
-  jrok connect --domain api --docker-service my-api
+  kproxy connect --domain api --docker-service my-api
 
   # Kubernetes service
-  jrok connect --domain app --k8s-service my-svc:8080
+  kproxy connect --domain app --k8s-service my-svc:8080
 
 IP SECURITY EXAMPLES:
   # Restrict access to specific IPs only (internal tools)
-  jrok --port 3000 --allow-ip 192.168.1.0/24,10.0.0.5
+  kproxy --port 3000 --allow-ip 192.168.1.0/24,10.0.0.5
   
   # Block specific IPs
-  jrok --port 8080 --block-ip 1.2.3.4,5.6.7.8
+  kproxy --port 8080 --block-ip 1.2.3.4,5.6.7.8
   
   # Enable restrict mode (no IPs allowed until you add them via dashboard)
-  jrok --port 3000 --restrict
+  kproxy --port 3000 --restrict
   
   # Combine with TCP tunnels for secure internal services
-  jrok --tcp --port 22 --allow-ip 10.0.0.0/8 --domain ssh-internal
-  jrok --tcp --port 27017 --allow-ip 192.168.1.100 --domain mongodb-prod
+  kproxy --tcp --port 22 --allow-ip 10.0.0.0/8 --domain ssh-internal
+  kproxy --tcp --port 27017 --allow-ip 192.168.1.100 --domain mongodb-prod
 
 OPTIONS:
   --server           Server URL (default: ${DEFAULT_SERVER})
@@ -1422,14 +1428,14 @@ OPTIONS:
   --restrict         Enable allowlist mode with empty list (blocks all until IPs added)
 
 ENVIRONMENT VARIABLES:
-  JROK_SERVER     Server URL (default: ${DEFAULT_SERVER})
-  JROK_AUTH       API key
-  JROK_DOMAIN     Subdomain
-  JROK_PORT       Local port
-  JROK_HOST       Local host
+  KPROXY_SERVER     Server URL (default: ${DEFAULT_SERVER})
+  KPROXY_AUTH       API key
+  KPROXY_DOMAIN     Subdomain
+  KPROXY_PORT       Local port
+  KPROXY_HOST       Local host
 
 CONFIG FILE:
-  ~/.jrok/config.json
+  ~/.kproxy/config.json
 
 For more info: https://github.com/koompi/jrok
 `);
@@ -1447,14 +1453,14 @@ async function main(): Promise<void> {
 
     // Helper to get server URL and auth token
     const getServerAndAuth = () => {
-      const serverUrl = args.server || process.env.JROK_SERVER || storedConfig.serverUrl;
-      const authToken = args.auth || process.env.JROK_AUTH || storedConfig.apiKey;
+      const serverUrl = args.server || (process.env.KPROXY_SERVER ?? process.env.JROK_SERVER) || storedConfig.serverUrl;
+      const authToken = args.auth || (process.env.KPROXY_AUTH ?? process.env.JROK_AUTH) || storedConfig.apiKey;
       
       if (!serverUrl) {
-        throw new Error("Missing server URL. Use --server, config, or JROK_SERVER env var");
+        throw new Error("Missing server URL. Use --server, config, or KPROXY_SERVER env var");
       }
       if (!authToken) {
-        throw new Error("Missing auth token. Use --auth, config, or JROK_AUTH env var");
+        throw new Error("Missing auth token. Use --auth, config, or KPROXY_AUTH env var");
       }
       
       return { serverUrl, authToken };
@@ -1463,7 +1469,7 @@ async function main(): Promise<void> {
     const getOrgId = () => {
       const orgId = args.org || storedConfig.organizationId;
       if (!orgId) {
-        throw new Error("Missing organization ID. Use --org or set default with 'jrok org use --id <org-id>'");
+        throw new Error("Missing organization ID. Use --org or set default with 'kproxy org use --id <org-id>'");
       }
       return orgId;
     };
@@ -1561,7 +1567,7 @@ async function main(): Promise<void> {
             await setDefaultOrganization(args.id);
             break;
           default:
-            console.log("Usage: jrok org <list|create|use>");
+            console.log("Usage: kproxy org <list|create|use>");
             console.log("  list              List your organizations");
             console.log("  create --name     Create a new organization");
             console.log("  use --id          Set default organization");
@@ -1591,7 +1597,7 @@ async function main(): Promise<void> {
             await revokeApiKey(serverUrl, authToken, orgId, args.id);
             break;
           default:
-            console.log("Usage: jrok apikey <list|create|revoke>");
+            console.log("Usage: kproxy apikey <list|create|revoke>");
             console.log("  list                  List API keys");
             console.log("  create --name         Create API key");
             console.log("  revoke --id           Revoke API key");
@@ -1611,7 +1617,7 @@ async function main(): Promise<void> {
               throw new Error("Missing domain name. Use --name example.com");
             }
             if (!args.email) {
-              throw new Error("Missing certbot email. Use --email you@example.com");
+              throw new Error("Missing contact email. Use --email you@example.com");
             }
             await registerCustomDomain(serverUrl, authToken, args.name, args.email, args.subdomain);
             break;
@@ -1635,7 +1641,7 @@ async function main(): Promise<void> {
             break;
           }
           default:
-            console.log("Usage: jrok domain <register|verify|status|list>");
+            console.log("Usage: kproxy domain <register|verify|status|list>");
             console.log("");
             console.log("Custom Domain Management:");
             console.log("  register --name <domain> --email <email>  Register a custom domain");
@@ -1649,16 +1655,16 @@ async function main(): Promise<void> {
             console.log("  --subdomain <name>    Custom subdomain to map to (optional)");
             console.log("");
             console.log("Example flow:");
-            console.log("  1. jrok domain register --name mysite.com --email me@email.com");
+            console.log("  1. kproxy domain register --name mysite.com --email me@email.com");
             console.log("  2. Add CNAME record: mysite.com -> mysite-com.tunnel.koompi.cloud");
-            console.log("  3. jrok domain status --name mysite.com   # Check CNAME");
-            console.log("  4. jrok domain verify --name mysite.com   # Issue certificate");
+            console.log("  3. kproxy domain status --name mysite.com   # Check CNAME");
+            console.log("  4. kproxy domain verify --name mysite.com   # Issue certificate");
         }
         break;
       }
 
       case "doctor": {
-        console.log('🏥 Running jrok health check...\n');
+        console.log('🏥 Running kproxy health check...\n');
         console.log(`📌 Current version: ${VERSION}`);
         
         // Check for updates
@@ -1671,7 +1677,7 @@ async function main(): Promise<void> {
           // Prompt for auto-update
           const answer = await promptInput('\n🚀 Would you like to update now? (y/n): ');
           if (answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') {
-            console.log('\n📦 Updating jrok...');
+            console.log('\n📦 Updating kproxy...');
             const { execSync } = require('child_process');
             try {
               const installCmd = `curl -fsSL ${GITHUB_RAW}/v${latestVersion}/install.sh | bash`;

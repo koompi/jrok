@@ -1,22 +1,29 @@
 ---
-# Ansible Playbook: Setup jrok on DigitalOcean VPS
+# Ansible Playbook: Setup kproxy on DigitalOcean VPS
 # Usage: ansible-playbook -i inventory.ini playbook.yml
 # Or with tags: ansible-playbook -i inventory.ini playbook.yml --tags "docker"
+#
+# TLS is handled by Cloudflare at the edge (no nginx/certbot on the host).
+# Customer custom domains use Cloudflare for SaaS custom hostnames; Cloudflare
+# auto-issues and auto-renews the edge certificate.
 
-- name: Setup jrok VPS servers
+- name: Setup kproxy VPS servers
   hosts: jrok_servers
   become: yes
   vars:
     # Change these to match your setup
     docker_version: "24.0"
-    certbot_email: "your-email@example.com"
-    cloudflare_token: "{{ lookup('env', 'CLOUDFLARE_TOKEN') }}"
     mongodb_uri: "{{ lookup('env', 'MONGODB_URI') }}"
-    cert_sync_api_key: "{{ lookup('env', 'CERT_SYNC_API_KEY') }}"
     koompi_client_id: "{{ lookup('env', 'KOOMPI_CLIENT_ID') }}"
     koompi_client_secret: "{{ lookup('env', 'KOOMPI_CLIENT_SECRET') }}"
     koompi_redirect_uri: "{{ lookup('env', 'KOOMPI_REDIRECT_URI') }}"
     dashboard_url: "{{ lookup('env', 'DASHBOARD_URL') }}"
+    # Cloudflare for SaaS (edge TLS + custom hostnames) — consumed by the app systemd env
+    cf_api_token: "{{ lookup('env', 'CF_API_TOKEN') }}"
+    cf_zone_id: "{{ lookup('env', 'CF_ZONE_ID') }}"
+    cf_saas_fallback_hostname: "{{ lookup('env', 'CF_SAAS_FALLBACK_HOSTNAME') }}"
+    # Gossip mesh shared secret — consumed by the app systemd env
+    gossip_secret: "{{ lookup('env', 'GOSSIP_SECRET') }}"
 
   pre_tasks:
     - name: Update apt cache
@@ -39,8 +46,7 @@
       tags: ["basic"]
 
   roles:
-    - certbot
-    - nginx
+    - docker
     - app
 
   post_tasks:
@@ -70,7 +76,7 @@
 
     - name: Verify services are running
       shell: |
-        systemctl status jrok --no-pager
+        systemctl status kproxy --no-pager
       register: service_status
       tags: ["verify"]
       ignore_errors: yes
@@ -84,27 +90,26 @@
       debug:
         msg: |
           ✅ Setup Complete!
-          
+
           Server ID: {{ vps_id | default(ansible_hostname) }}
           Region: {{ vps_region | default('default') }}
-          
+
           Access your service at:
           - https://{{ domain_name }}
           - http://{{ inventory_hostname }}:3000 (direct)
-          
+
           TCP Tunnels:
           - Port range: {{ tcp_port_min | default('10000') }}-{{ tcp_port_max | default('20000') }}
           - Use --tcp flag with CLI for TCP tunnels (SSH, MongoDB, etc.)
-          
+
           SSH into server:
           - ssh ubuntu@{{ inventory_hostname }}
-          
+
           Check logs:
-          - journalctl -u jrok -f
-          
-          Certificate status:
-          - sudo certbot certificates
-          
-          Renew certificate:
-          - sudo certbot renew --dry-run
+          - journalctl -u kproxy -f
+
+          TLS / certificates:
+          - Public TLS is handled by Cloudflare at the edge (no certbot on host).
+          - Customer custom domains are issued automatically via Cloudflare for SaaS
+            custom hostnames (CNAME, DNS-only, to {{ cf_saas_fallback_hostname | default('CF_SAAS_FALLBACK_HOSTNAME') }}).
       tags: ["info"]

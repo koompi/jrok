@@ -1,13 +1,21 @@
 # Ansible Deployment Guide
 
-Automate your Jrok server configuration and deployment using Ansible.
+Automate your KProxy node configuration and deployment using Ansible.
+
+KProxy nodes are stateless Bun processes fronted by **Cloudflare** (edge TLS + Load Balancer) and
+wired together by an in-memory **gossip mesh**. There are **no `certbot` or `nginx` roles** — those
+were removed when TLS moved to Cloudflare and routing moved to gossip. Only two roles remain:
+
+- **`docker`** — installs Docker / container runtime prerequisites
+- **`app`** — clones the repo, installs Bun, renders the environment, and runs the `kproxy` service
 
 ## Prerequisites
 
-- VPS server(s) provisioned (see [Terraform Setup](./terraform.md))
+- VPS server(s) provisioned (e.g. via Terraform)
 - SSH access to your VPS
 - Ansible installed locally
-- Required credentials (MongoDB, Cloudflare, KOOMPI OAuth)
+- Required credentials (MongoDB, Cloudflare API token + Zone ID, KOOMPI OAuth, gossip secret)
+- A Cloudflare zone in front of the nodes — see [Cloudflare Setup](../configuration/cloudflare.md)
 
 ## Installation
 
@@ -32,11 +40,9 @@ ansible/
 ├── inventory.ini           # Server inventory
 ├── playbook.yml            # Main playbook
 └── roles/
-    ├── certbot/            # SSL certificate management
+    ├── docker/            # Container runtime prerequisites
     │   └── tasks/main.yml
-    ├── nginx/              # Nginx configuration
-    │   └── tasks/main.yml
-    └── app/                # Application deployment
+    └── app/               # KProxy application + systemd service
         └── tasks/main.yml
 ```
 
@@ -47,53 +53,61 @@ ansible/
 Edit `ansible/inventory.ini`:
 
 ```ini
-[jrok_servers]
+[kproxy_servers]
 # Format: name ansible_host=IP ansible_user=root ansible_ssh_private_key_file=~/.ssh/key
-vps-sgp1 ansible_host=152.42.226.37 ansible_user=root ansible_ssh_private_key_file=~/.ssh/id_rsa
-# Add more servers for multi-VPS setup:
-# vps-nyc1 ansible_host=10.0.0.2 ansible_user=root
-# vps-lon1 ansible_host=10.0.0.3 ansible_user=root
+vps-sgp1 ansible_host=152.42.226.37 ansible_user=root ansible_ssh_private_key_file=~/.ssh/id_rsa vps_id=node-a vps_host=10.0.0.11
+# Add more nodes for a multi-VPS setup (each needs a unique vps_id / vps_host):
+# vps-nyc1 ansible_host=10.0.0.2 ansible_user=root vps_id=node-b vps_host=10.0.0.12
+# vps-lon1 ansible_host=10.0.0.3 ansible_user=root vps_id=node-c vps_host=10.0.0.13
 
-[jrok_servers:vars]
+[kproxy_servers:vars]
 # =============================================================================
-# DOMAIN CONFIGURATION
+# DOMAIN
 # =============================================================================
-domain_name=tunnel.yourdomain.com
-certbot_email=admin@yourdomain.com
-
-# =============================================================================
-# CLOUDFLARE (Required for wildcard SSL)
-# =============================================================================
-# Get from: Cloudflare Dashboard → My Profile → API Tokens
-cloudflare_token=YOUR_CLOUDFLARE_API_TOKEN
+base_domain=live.yourdomain.com
 
 # =============================================================================
-# MONGODB (Required)
+# CLOUDFLARE FOR SAAS (customer custom domains)
+# =============================================================================
+# CF_API_TOKEN needs "SSL and Certificates: Edit" on the zone.
+cf_api_token=YOUR_CLOUDFLARE_API_TOKEN
+cf_zone_id=YOUR_CLOUDFLARE_ZONE_ID
+cf_saas_fallback_hostname=live.yourdomain.com
+
+# =============================================================================
+# GOSSIP ROUTING MESH (same secret on every node)
+# =============================================================================
+gossip_secret=YOUR_SHARED_GOSSIP_SECRET
+# vps_id / vps_host are set per-host above. Optionally label nodes:
+vps_name=kproxy
+vps_region=sgp1
+
+# =============================================================================
+# MONGODB (cold/durable state)
 # =============================================================================
 # Get from: MongoDB Atlas → Database → Connect → Connect your application
-mongodb_uri=mongodb+srv://user:password@cluster.mongodb.net/jrok?retryWrites=true&w=majority
+mongodb_uri=mongodb+srv://user:password@cluster.mongodb.net/kproxy?retryWrites=true&w=majority
+mongo_db_name=kproxy
 
 # =============================================================================
-# KOOMPI OAUTH (Required for dashboard login)
+# KOOMPI OAUTH (dashboard login)
 # =============================================================================
-# Get from: https://dash.koompi.org → Create Project → OAuth Settings
 koompi_client_id=YOUR_KOOMPI_CLIENT_ID
 koompi_client_secret=YOUR_KOOMPI_CLIENT_SECRET
-koompi_redirect_uri=https://tunnel.yourdomain.com/auth/callback
+koompi_redirect_uri=https://live.yourdomain.com/auth/callback
 
 # =============================================================================
 # APPLICATION SETTINGS
 # =============================================================================
-dashboard_url=https://tunnel.yourdomain.com
+dashboard_url=https://live.yourdomain.com
 
-# Security secrets (generate with: openssl rand -base64 64)
+# Security secret (generate with: openssl rand -base64 64)
 jwt_secret=YOUR_JWT_SECRET_64_CHARS
-cert_sync_api_key=YOUR_CERT_SYNC_KEY
 
 # Repository settings
 repo_url=https://github.com/koompi/jrok.git
 repo_branch=main
-app_dir=/opt/jrok
+app_dir=/opt/kproxy
 
 # SSH settings
 ansible_port=22
@@ -101,13 +115,19 @@ ansible_connection=ssh
 ansible_timeout=30
 ```
 
+> No `certbot_email`, no `cloudflare DNS-01` credentials, and no `cert_sync_api_key` — Cloudflare
+> issues and renews every public certificate. The only Cloudflare values KProxy needs are the API
+> token, Zone ID, and SaaS fallback hostname for **Custom Hostnames**.
+
 ### Environment Variables Method
 
 Instead of hardcoding secrets, use environment variables:
 
 ```bash
 # Export secrets
-export CLOUDFLARE_TOKEN="your-token"
+export CF_API_TOKEN="your-token"
+export CF_ZONE_ID="your-zone-id"
+export GOSSIP_SECRET="your-shared-secret"
 export MONGODB_URI="your-connection-string"
 export KOOMPI_CLIENT_ID="your-client-id"
 export KOOMPI_CLIENT_SECRET="your-client-secret"
@@ -144,17 +164,14 @@ ansible-playbook -i inventory.ini playbook.yml
 ### Run Specific Roles
 
 ```bash
-# Only SSL certificates
-ansible-playbook -i inventory.ini playbook.yml --tags "certbot"
+# Only container runtime
+ansible-playbook -i inventory.ini playbook.yml --tags "docker"
 
-# Only Nginx
-ansible-playbook -i inventory.ini playbook.yml --tags "nginx"
-
-# Only application
+# Only the application
 ansible-playbook -i inventory.ini playbook.yml --tags "app"
 
-# SSL + Nginx
-ansible-playbook -i inventory.ini playbook.yml --tags "certbot,nginx"
+# Both
+ansible-playbook -i inventory.ini playbook.yml --tags "docker,app"
 ```
 
 ### Dry Run (Check Mode)
@@ -177,8 +194,8 @@ ansible-playbook -i inventory.ini playbook.yml -vvv  # Debug
 
 ```yaml
 ---
-- name: Setup jrok VPS servers
-  hosts: jrok_servers
+- name: Setup kproxy nodes
+  hosts: kproxy_servers
   become: yes
 
   pre_tasks:
@@ -193,9 +210,8 @@ ansible-playbook -i inventory.ini playbook.yml -vvv  # Debug
         state: present
 
   roles:
-    - certbot  # SSL certificates
-    - nginx    # Web server
-    - app      # Jrok application
+    - docker  # Container runtime prerequisites
+    - app     # KProxy application + systemd service
 
   post_tasks:
     - name: Setup firewall
@@ -203,68 +219,19 @@ ansible-playbook -i inventory.ini playbook.yml -vvv  # Debug
         rule: allow
         port: "{{ item }}"
         proto: tcp
-      loop: ["22", "80", "443", "3000"]
+      loop: ["22", "443", "3000"]   # plus your TCP tunnel port range
 
     - name: Enable UFW
       ufw:
         state: enabled
 ```
 
-### Certbot Role
-
-Installs Certbot and obtains wildcard SSL certificates:
-
-```yaml
-# roles/certbot/tasks/main.yml
-- name: Install certbot with cloudflare plugin
-  apt:
-    name: [certbot, python3-certbot-dns-cloudflare]
-    state: present
-
-- name: Create Cloudflare credentials
-  copy:
-    content: |
-      dns_cloudflare_api_token={{ cloudflare_token }}
-    dest: /etc/letsencrypt/secrets/cloudflare.ini
-    mode: '0600'
-
-- name: Issue wildcard certificate
-  shell: |
-    certbot certonly \
-      --dns-cloudflare \
-      --dns-cloudflare-credentials /etc/letsencrypt/secrets/cloudflare.ini \
-      --email {{ certbot_email }} \
-      --agree-tos \
-      --non-interactive \
-      -d "{{ domain_name }}" \
-      -d "*.{{ domain_name }}"
-```
-
-### Nginx Role
-
-Configures Nginx as reverse proxy with SSL:
-
-```yaml
-# roles/nginx/tasks/main.yml
-- name: Install Nginx
-  apt:
-    name: nginx
-    state: present
-
-- name: Configure Nginx
-  template:
-    src: nginx.conf.j2
-    dest: /etc/nginx/nginx.conf
-
-- name: Reload Nginx
-  systemd:
-    name: nginx
-    state: reloaded
-```
+> In production, restrict `:443` (and the app port) to the [Cloudflare IP ranges](https://www.cloudflare.com/ips/),
+> or run `cloudflared` so the origin needs no inbound port at all.
 
 ### App Role
 
-Deploys and runs the Jrok application:
+Deploys and runs the KProxy application as the `kproxy` systemd service:
 
 ```yaml
 # roles/app/tasks/main.yml
@@ -280,16 +247,22 @@ Deploys and runs the Jrok application:
 - name: Install dependencies
   shell: cd {{ app_dir }} && bun install
 
+- name: Render environment file
+  template:
+    src: environment.j2          # MONGODB_URI, CF_*, GOSSIP_SECRET, VPS_*, etc.
+    dest: /etc/kproxy/environment
+
 - name: Create systemd service
   template:
-    src: jrok.service.j2
-    dest: /etc/systemd/system/jrok.service
+    src: kproxy.service.j2
+    dest: /etc/systemd/system/kproxy.service
 
-- name: Start jrok service
+- name: Start kproxy service
   systemd:
-    name: jrok
+    name: kproxy
     state: started
     enabled: yes
+    daemon_reload: yes
 ```
 
 ## Post-Deployment
@@ -300,32 +273,25 @@ Deploys and runs the Jrok application:
 # SSH into server
 ssh root@YOUR_VPS_IP
 
-# Check jrok service
-systemctl status jrok
-journalctl -u jrok -f
+# Check kproxy service
+systemctl status kproxy
+journalctl -u kproxy -f
 
-# Check nginx
-nginx -t
-systemctl status nginx
+# In multi-node setups, confirm the mesh formed:
+journalctl -u kproxy | grep gossip   # look for "gossip: connected to peer <id>"
 
-# Check certificates
-certbot certificates
+# Edge cert is live (browser ⇄ Cloudflare)
+curl -I https://live.yourdomain.com/health
 ```
 
 ### Manual Commands
 
 ```bash
-# Restart jrok
-systemctl restart jrok
-
-# Restart nginx
-systemctl restart nginx
-
-# Renew certificates (dry run)
-certbot renew --dry-run
+# Restart kproxy
+systemctl restart kproxy
 
 # View logs
-journalctl -u jrok --since "1 hour ago"
+journalctl -u kproxy --since "1 hour ago"
 ```
 
 ## Troubleshooting
@@ -333,46 +299,43 @@ journalctl -u jrok --since "1 hour ago"
 ### SSH Connection Failed
 
 ```bash
-# Test SSH manually
 ssh -v root@YOUR_VPS_IP
-
-# Check SSH key
 ssh-add -l
-
-# Add key if missing
 ssh-add ~/.ssh/id_rsa
-```
-
-### Certificate Issues
-
-```bash
-# Check Cloudflare token
-cat /etc/letsencrypt/secrets/cloudflare.ini
-
-# Force renewal
-certbot certonly --dns-cloudflare \
-  --dns-cloudflare-credentials /etc/letsencrypt/secrets/cloudflare.ini \
-  -d "domain.com" -d "*.domain.com" --force-renewal
 ```
 
 ### Service Won't Start
 
 ```bash
 # Check logs
-journalctl -u jrok -n 100
+journalctl -u kproxy -n 100
 
-# Check environment
-cat /etc/systemd/system/jrok.service
+# Check environment + unit
+cat /etc/systemd/system/kproxy.service
+cat /etc/kproxy/environment
 
 # Test manually
-cd /opt/jrok
+cd /opt/kproxy
 /root/.bun/bin/bun run dist/index.js
 ```
+
+### Gossip Peers Not Connecting (multi-node)
+
+- Confirm `VPS_HOST:PORT/_gossip` is reachable **node-to-node** (private network / firewall).
+- Confirm `GOSSIP_SECRET` is identical on every node (mismatch → 403 on `/_gossip`).
+- Confirm each `VPS_ID` is unique.
+
+### Custom Hostname / Certificate Issues
+
+Certificates are issued by Cloudflare, not on the node — check **SSL/TLS → Custom Hostnames**
+(and **Edge Certificates** for Universal SSL) in the Cloudflare dashboard. See
+[Cloudflare Setup](../configuration/cloudflare.md).
 
 ---
 
 ## Next Steps
 
-- [Docker Deployment](./docker.md) - Container-based alternative
-- [Environment Variables](../configuration/environment.md) - All config options
-- [Multi-Server Setup](../advanced/multi-server.md) - High availability
+- [Docker Deployment](./docker.md) — container-based alternative
+- [Cloudflare Setup](../configuration/cloudflare.md) — edge TLS, Load Balancer, Cloudflare for SaaS
+- [Environment Variables](../configuration/environment.md) — all config options
+- [Multi-Server Deployment](./multi-server.md) — high availability and scaling

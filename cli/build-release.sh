@@ -11,7 +11,7 @@ NC='\033[0m' # No Color
 
 # Clean previous builds
 echo -e "${BLUE}Cleaning previous builds...${NC}"
-rm -rf dist/ bin/jrok-*
+rm -rf dist/ bin/kproxy-*
 
 # Create directories
 mkdir -p dist bin
@@ -34,27 +34,27 @@ echo -e "${YELLOW}This may take a few minutes...${NC}"
 
 npx @yao-pkg/pkg dist/index.js \
   --targets node18-linux-x64,node18-macos-x64,node18-win-x64 \
-  --output bin/jrok \
+  --output bin/kproxy \
   --compress GZip
 
 # Rename files with proper extensions
 echo -e "${BLUE}Renaming binaries...${NC}"
 
-if [ -f "bin/jrok-linux" ]; then
-  mv bin/jrok-linux bin/jrok-linux-x64
-  chmod +x bin/jrok-linux-x64
-  echo -e "${GREEN}✓ Linux binary: bin/jrok-linux-x64${NC}"
+if [ -f "bin/kproxy-linux" ]; then
+  mv bin/kproxy-linux bin/kproxy-linux-x64
+  chmod +x bin/kproxy-linux-x64
+  echo -e "${GREEN}✓ Linux binary: bin/kproxy-linux-x64${NC}"
 fi
 
-if [ -f "bin/jrok-macos" ]; then
-  mv bin/jrok-macos bin/jrok-macos-x64
-  chmod +x bin/jrok-macos-x64
-  echo -e "${GREEN}✓ macOS binary: bin/jrok-macos-x64${NC}"
+if [ -f "bin/kproxy-macos" ]; then
+  mv bin/kproxy-macos bin/kproxy-macos-x64
+  chmod +x bin/kproxy-macos-x64
+  echo -e "${GREEN}✓ macOS binary: bin/kproxy-macos-x64${NC}"
 fi
 
-if [ -f "bin/jrok-win.exe" ]; then
-  mv bin/jrok-win.exe bin/jrok-windows-x64.exe
-  echo -e "${GREEN}✓ Windows binary: bin/jrok-windows-x64.exe${NC}"
+if [ -f "bin/kproxy-win.exe" ]; then
+  mv bin/kproxy-win.exe bin/kproxy-windows-x64.exe
+  echo -e "${GREEN}✓ Windows binary: bin/kproxy-windows-x64.exe${NC}"
 fi
 
 # Show file sizes
@@ -62,12 +62,12 @@ echo ""
 echo -e "${GREEN}✨ Build complete!${NC}"
 echo ""
 echo "Binary sizes:"
-ls -lh bin/jrok-* 2>/dev/null | awk '{print "  " $9 ": " $5}'
+ls -lh bin/kproxy-* 2>/dev/null | awk '{print "  " $9 ": " $5}'
 
 echo ""
 echo "Test binaries:"
-echo "  Linux:   ./bin/jrok-linux-x64 version"
-echo "  macOS:   ./bin/jrok-macos-x64 version"
-echo "  Windows: ./bin/jrok-windows-x64.exe version"
+echo "  Linux:   ./bin/kproxy-linux-x64 version"
+echo "  macOS:   ./bin/kproxy-macos-x64 version"
+echo "  Windows: ./bin/kproxy-windows-x64.exe version"
 echo ""
 echo "Ready for GitHub release!"

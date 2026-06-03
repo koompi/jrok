@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { api, EnhancedDomain } from '@/lib/api';
+import { api, EnhancedDomain, CNAME_TARGET } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -63,6 +63,8 @@ interface DomainUIData {
   dnsVerified: boolean;
   tunnelId: string | null;
   vpsRegion: string | null;
+  cnameTarget: string;
+  ownershipVerification?: { type?: string; name?: string; value?: string };
 }
 
 const transformDomain = (domain: EnhancedDomain): DomainUIData => ({
@@ -71,11 +73,14 @@ const transformDomain = (domain: EnhancedDomain): DomainUIData => ({
   status: domain.active ? 'active' : domain.sslStatus === 'pending' ? 'pending' : 'error',
   sslStatus: domain.sslStatus,
   sslExpiresAt: domain.certExpiry || null,
-  sslProvider: domain.certPath ? 'Let\'s Encrypt' : null,
+  // Certs are provisioned by Cloudflare for SaaS (no Let's Encrypt/Certbot).
+  sslProvider: domain.sslStatus !== 'none' ? 'Cloudflare' : null,
   createdAt: domain.createdAt,
   dnsVerified: domain.dnsVerified,
   tunnelId: domain.tunnelCount > 0 ? 'has-tunnels' : null,
   vpsRegion: domain.synced ? 'Synced' : null,
+  cnameTarget: domain.cnameTarget || CNAME_TARGET,
+  ownershipVerification: domain.ownershipVerification,
 });
 
 const formatDate = (timestamp: number | null) => {
@@ -229,11 +234,15 @@ export default function DomainsPage() {
               <div className="rounded-lg bg-muted/50 p-4 space-y-3">
                 <p className="text-sm font-medium">DNS Configuration Required</p>
                 <p className="text-xs text-muted-foreground">
-                  After adding, you'll need to create a CNAME record pointing to:
+                  After adding, create a <span className="font-medium">DNS-only (grey-cloud)</span> CNAME
+                  record pointing to:
                 </p>
                 <code className="block text-xs bg-background px-3 py-2 rounded border">
-                  tunnel.jrok.io
+                  {CNAME_TARGET}
                 </code>
+                <p className="text-xs text-muted-foreground">
+                  Cloudflare then validates ownership and issues the SSL certificate automatically.
+                </p>
               </div>
             </div>
             <DialogFooter className="flex-col sm:flex-row gap-2">
@@ -480,9 +489,9 @@ export default function DomainsPage() {
                               </a>
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
-                            <DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => copyToClipboard(domain.cnameTarget)}>
                               <RefreshCw className="h-4 w-4 mr-2" />
-                              Renew Certificate
+                              Refresh SSL Status
                             </DropdownMenuItem>
                             <DropdownMenuItem>
                               <Settings className="h-4 w-4 mr-2" />
@@ -497,6 +506,37 @@ export default function DomainsPage() {
                         </DropdownMenu>
                       </div>
                     </div>
+
+                    {!domain.dnsVerified && (
+                      <div className="mt-3 pt-3 border-t text-xs space-y-2">
+                        <p className="text-muted-foreground">
+                          Add this <span className="font-medium">DNS-only (grey-cloud)</span> CNAME, then verify:
+                        </p>
+                        <div className="flex items-center gap-2 font-mono bg-muted/50 rounded px-2 py-1 overflow-x-auto">
+                          <span className="truncate">{domain.domain}</span>
+                          <span className="text-muted-foreground">CNAME</span>
+                          <span className="truncate font-medium">{domain.cnameTarget}</span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-5 w-5 shrink-0"
+                            onClick={() => copyToClipboard(domain.cnameTarget)}
+                          >
+                            <Copy className="h-3 w-3" />
+                          </Button>
+                        </div>
+                        {domain.ownershipVerification?.name && domain.ownershipVerification?.value && (
+                          <>
+                            <p className="text-muted-foreground">
+                              And this TXT record to prove ownership:
+                            </p>
+                            <div className="font-mono bg-muted/50 rounded px-2 py-1 overflow-x-auto break-all">
+                              {domain.ownershipVerification.name} TXT {domain.ownershipVerification.value}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -513,7 +553,7 @@ export default function DomainsPage() {
             DNS Configuration Guide
           </CardTitle>
           <CardDescription>
-            How to set up your custom domain with Jrok
+            How to set up your custom domain with KProxy
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -524,7 +564,7 @@ export default function DomainsPage() {
                 <h4 className="font-medium">Add Domain</h4>
               </div>
               <p className="text-sm text-muted-foreground">
-                Add your custom domain to Jrok. We'll generate the DNS records you need.
+                Add your custom domain to KProxy. We'll generate the DNS records you need.
               </p>
             </div>
             <div className="p-4 rounded-xl border bg-card">
@@ -533,7 +573,7 @@ export default function DomainsPage() {
                 <h4 className="font-medium">Configure DNS</h4>
               </div>
               <p className="text-sm text-muted-foreground">
-                Add a CNAME record pointing to <code className="text-xs bg-muted px-1 rounded">tunnel.jrok.io</code>
+                Add a DNS-only (grey-cloud) CNAME record pointing to <code className="text-xs bg-muted px-1 rounded">{CNAME_TARGET}</code>
               </p>
             </div>
             <div className="p-4 rounded-xl border bg-card">

@@ -1,6 +1,6 @@
 # Assets
 
-This folder contains static assets for the Jrok documentation.
+This folder contains static assets for the KProxy documentation.
 
 ## Logo
 

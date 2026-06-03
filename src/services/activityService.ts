@@ -260,18 +260,6 @@ export async function logDomainVerified(orgId: string, domainId: string, domain:
   });
 }
 
-export async function logCertificateRenewed(orgId: string, domainId: string, domain: string): Promise<void> {
-  await logActivity({
-    organizationId: orgId,
-    category: "domains",
-    action: "renewed",
-    resourceType: "certificate",
-    resourceId: domainId,
-    resourceName: domain,
-    description: `SSL certificate renewed for ${domain}`,
-  });
-}
-
 export async function logApiKeyCreated(orgId: string, userId: string, keyId: string, keyName: string, ip?: string): Promise<void> {
   await logActivity({
     organizationId: orgId,

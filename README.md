@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="./docs/assets/logo.png" alt="Jrok Logo" width="200">
+  <img src="./docs/assets/logo.png" alt="KProxy Logo" width="200">
 </p>
 
-<h1 align="center">Jrok : ជ្រក</h1>
+<h1 align="center">KProxy : ជ្រក</h1>
 
 <p align="center">
   <strong>Expose local services to the public internet — Open Source & Self-Hostable</strong>
@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/koompi/jrok/releases"><img src="https://img.shields.io/github/v/release/koompi/jrok" alt="Release"></a>
   <a href="https://github.com/koompi/jrok/blob/main/LICENSE"><img src="https://img.shields.io/github/license/koompi/jrok" alt="License"></a>
-  <a href="https://jrok.koompi.cloud"><img src="https://img.shields.io/badge/managed-Jrok%20-blue" alt="Jrok Managed Service"></a>
+  <a href="https://kproxy.koompi.cloud"><img src="https://img.shields.io/badge/managed-KProxy%20-blue" alt="KProxy Managed Service"></a>
 </p>
 
 <p align="center">
@@ -25,9 +25,9 @@
 
 ---
 
-## What is Jrok?
+## What is KProxy?
 
-Jrok is an **open-source tunnel service** that exposes your local development servers to the public internet. Think of it as a self-hostable alternative to ngrok, localtunnel, or Cloudflare Tunnel.
+KProxy is an **open-source tunnel service** that exposes your local development servers to the public internet. Think of it as a self-hostable alternative to ngrok, localtunnel, or Cloudflare Tunnel.
 
 **Use cases:**
 - 🔧 **Development** — Test webhooks, share WIP with clients
@@ -39,7 +39,7 @@ Jrok is an **open-source tunnel service** that exposes your local development se
 
 ## 🚀 Quick Start
 
-### Option 1: Use Jrok from KOOMPI (Managed Service)
+### Option 1: Use KProxy from KOOMPI (Managed Service)
 
 No server setup required. Get started in 30 seconds:
 
@@ -48,25 +48,25 @@ No server setup required. Get started in 30 seconds:
 curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.3.0/install.sh | bash
 
 # Expose your local service (you'll be prompted for API key)
-jrok --port 3000
+kproxy --port 3000
 ```
 
 **Output:**
 ```
 🎲 Generated subdomain: a1b2c3d4
-🔌 Connecting to jrok server...
+🔌 Connecting to kproxy server...
 📍 Domain: a1b2c3d4
 🏠 Local Service: localhost:3000
 
 ✅ Connected to server!
-🌐 Your service is now available at: https://a1b2c3d4.tunnel.koompi.cloud
+🌐 Your service is now available at: https://a1b2c3d4.live.koompi.cloud
 ```
 
-Get your API key at **[jrok.koompi.cloud](https://jrok.koompi.cloud)**
+Get your API key at **[kproxy.koompi.cloud](https://kproxy.koompi.cloud)**
 
 ### Option 2: Self-Hosted
 
-Deploy your own Jrok server for complete control:
+Deploy your own KProxy server for complete control:
 
 ```bash
 git clone https://github.com/koompi/jrok.git
@@ -84,53 +84,53 @@ The deploy script will guide you through the entire setup. See [Self-Hosting Gui
 
 ```bash
 # Simple - auto-generate subdomain
-jrok --port 3000
+kproxy --port 3000
 
 # Custom subdomain
-jrok --port 8080 --domain myapp
-# → https://myapp.tunnel.koompi.cloud
+kproxy --port 8080 --domain myapp
+# → https://myapp.live.koompi.cloud
 
 # TCP tunnel (raw TCP, databases, SSH, etc.)
-jrok --port 5432 --tcp
-# → tcp://tunnel.koompi.cloud:54321
+kproxy --port 5432 --tcp
+# → tcp://live.koompi.cloud:54321
 ```
 
 ### 🔄 Smart Subdomain Handling
 
 ```bash
 # If "myapp" is already taken by another org, auto-assigns suffix
-jrok --port 3000 --domain myapp
-# → https://myapp-a7b3.tunnel.koompi.cloud
+kproxy --port 3000 --domain myapp
+# → https://myapp-a7b3.live.koompi.cloud
 
 # Force new subdomain even if you own the existing one
-jrok --port 3000 --domain myapp --force-new
-# → https://myapp-c2d4.tunnel.koompi.cloud
+kproxy --port 3000 --domain myapp --force-new
+# → https://myapp-c2d4.live.koompi.cloud
 ```
 
 ### 🌍 Custom Domain Support
 
 ```bash
 # Register a custom domain with auto-generated subdomain
-jrok domain register --domain mysite.com
+kproxy domain register --domain mysite.com
 
 # Register with specific subdomain target
-jrok domain register --domain mysite.com --subdomain myapp
+kproxy domain register --domain mysite.com --subdomain myapp
 
-# Verify CNAME and issue SSL certificate
-jrok domain verify --domain mysite.com
+# Verify the DNS-only CNAME (Cloudflare issues the edge cert)
+kproxy domain verify --domain mysite.com
 
 # Check domain status
-jrok domain status --domain mysite.com
+kproxy domain status --domain mysite.com
 ```
 
 ### 🐳 Docker & Kubernetes Support
 
 ```bash
 # Docker Swarm service
-jrok connect --domain api --docker-service my-api
+kproxy connect --domain api --docker-service my-api
 
 # Kubernetes service  
-jrok connect --domain app --k8s-service my-svc:8080
+kproxy connect --domain app --k8s-service my-svc:8080
 ```
 
 ### 🏢 Multi-Tenant Organizations
@@ -142,7 +142,7 @@ jrok connect --domain app --k8s-service my-svc:8080
 
 ### 🔐 Secure by Default
 
-- **HTTPS** with automatic SSL certificates (Let's Encrypt)
+- **HTTPS** with automatic edge TLS (Cloudflare Universal SSL; Cloudflare for SaaS for custom domains)
 - **WebSocket** connections over WSS
 - **API key** authentication with scoped permissions
 - **OAuth** via KOOMPI ID
@@ -164,36 +164,35 @@ jrok connect --domain app --k8s-service my-svc:8080
 
 ## 🏗️ Architecture
 
+KProxy fronts every public request with **Cloudflare** (edge TLS + Load Balancer) and routes
+across stateless nodes with an in-memory **gossip mesh** — no nginx, no Certbot, no single
+point of failure. See [Architecture Overview](./docs/getting-started/architecture.md) for the full picture.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                            INTERNET                                  │
+│                          CLOUDFLARE EDGE                            │
+│  • Universal SSL (your subdomains)   • Load Balancer (origin pool)  │
+│  • Cloudflare for SaaS (customer custom hostnames)  • WAF / DDoS    │
 └─────────────────────────────────────────────────────────────────────┘
-                    │                              │
-           (HTTP/HTTPS)                    (TCP - databases, etc.)
-                    ▼                              ▼
+        │  TLS: browser ⇄ Cloudflare ⇄ origin (Origin CA cert / cloudflared)
+        ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        YOUR VPS SERVER                               │
-│  ┌───────────────────────────────────────────────────────────────┐ │
-│  │  Nginx (SSL termination, wildcard certs)                       │ │
-│  └───────────────────────────────────────────────────────────────┘ │
-│                                  │                                   │
-│  ┌───────────────────────────────────────────────────────────────┐ │
-│  │  Jrok Server (Bun runtime)                                     │ │
-│  │  • WebSocket connection manager                                │ │
-│  │  • HTTP/TCP request routing                                    │ │
-│  │  • Authentication (OAuth + API keys)                           │ │
-│  │  • Security (rate limits, bandwidth, IP allowlist)             │ │
-│  │  • MongoDB (users, orgs, tunnels, custom domains)              │ │
-│  └───────────────────────────────────────────────────────────────┘ │
+│   kproxy-1  ◀───/_gossip───▶  kproxy-2  ◀───/_gossip───▶  kproxy-N   │
+│  (stateless Bun nodes — in-memory gossip routing mesh, just add nodes)│
+│  • WebSocket agent tunnels   • HTTP/TCP routing + cross-node forward │
+│  • Auth (OAuth + API keys)   • Rate limits / bandwidth / IP allowlist│
 └─────────────────────────────────────────────────────────────────────┘
-              ▲                    ▲                    ▲
-              │ WSS                │ WSS                │ WSS
-              ▼                    ▼                    ▼
-       ┌────────────┐       ┌────────────┐       ┌────────────┐
-       │ Jrok Agent │       │ Jrok Agent │       │ Jrok Agent │
-       │  (laptop)  │       │  (server)  │       │  (CI/CD)   │
-       │   :3000    │       │   :8080    │       │   :5000    │
-       └────────────┘       └────────────┘       └────────────┘
+        │  persistent agent WebSocket tunnels (dialed OUT by agents)
+        ▼
+┌────────────┐       ┌────────────┐       ┌────────────┐
+│ KProxy CLI │       │ KProxy CLI │       │ KProxy CLI │
+│  (laptop)  │       │  (server)  │       │  (CI/CD)   │
+│   :3000    │       │   :8080    │       │   :5000    │
+└────────────┘       └────────────┘       └────────────┘
+
+Shared cold state (off the request hot path):
+  • MongoDB — users, orgs, API keys, tunnels, custom-domain records
+  • Cloudflare R2 / S3 — large file payloads via presigned URLs (bypass the tunnel)
 ```
 
 ---
@@ -204,74 +203,78 @@ jrok connect --domain app --k8s-service my-svc:8080
 
 ```bash
 # Expose local port (auto-generates subdomain)
-jrok --port 3000
+kproxy --port 3000
 
 # Specify subdomain
-jrok --port 3000 --domain myapp
+kproxy --port 3000 --domain myapp
 
 # TCP tunnel (databases, SSH, custom protocols)
-jrok --port 5432 --tcp
+kproxy --port 5432 --tcp
 
 # Force new subdomain (even if you own existing one)
-jrok --port 3000 --domain myapp --force-new
+kproxy --port 3000 --domain myapp --force-new
 
 # List active tunnels
-jrok list
+kproxy list
 
 # Disconnect tunnel
-jrok disconnect --domain myapp
+kproxy disconnect --domain myapp
 
 # Show configuration
-jrok config
+kproxy config
 
 # Get help
-jrok help
+kproxy help
 ```
 
 ### Custom Domain Commands
 
 ```bash
 # Register custom domain (auto-generates subdomain target)
-jrok domain register --domain mysite.com
+kproxy domain register --domain mysite.com
 
 # Register with specific subdomain
-jrok domain register --domain mysite.com --subdomain myapp
+kproxy domain register --domain mysite.com --subdomain myapp
 
-# Verify CNAME configuration and issue SSL
-jrok domain verify --domain mysite.com
+# Verify the DNS-only CNAME (Cloudflare issues + renews the edge cert)
+kproxy domain verify --domain mysite.com
 
 # Check domain verification status
-jrok domain status --domain mysite.com
+kproxy domain status --domain mysite.com
 
 # List all your custom domains
-jrok domain list
+kproxy domain list
 ```
 
 ### Organization & API Keys
 
 ```bash
 # List organizations
-jrok org list
+kproxy org list
 
 # Create organization
-jrok org create --name "My Team"
+kproxy org create --name "My Team"
 
 # Create API key
-jrok apikey create --org <org-id> --name "CI Key"
+kproxy apikey create --org <org-id> --name "CI Key"
 ```
 
 ### Configuration
 
 ```bash
 # Set server (for self-hosted)
-jrok config --server https://tunnel.yourdomain.com
+kproxy config --server https://live.yourdomain.com
 
 # Set API key
-jrok config --auth jrok_your_api_key
+kproxy config --auth kproxy_your_api_key
 
 # Clear config
-jrok config --clear
+kproxy config --clear
 ```
+
+> **Backward compatibility:** API keys with the legacy `jrok_` prefix are still accepted
+> alongside `kproxy_`; `JROK_*` environment variables still work as fallbacks for their
+> `KPROXY_*` equivalents; and a legacy `~/.jrok` config is still read.
 
 See [CLI Commands Reference](./docs/cli/commands.md) for full documentation.
 
@@ -279,7 +282,7 @@ See [CLI Commands Reference](./docs/cli/commands.md) for full documentation.
 
 ## � Security
 
-Jrok includes comprehensive security features to protect your tunnels:
+KProxy includes comprehensive security features to protect your tunnels:
 
 ### Built-in Protections
 
@@ -290,16 +293,16 @@ Jrok includes comprehensive security features to protect your tunnels:
 | **HTTP Rate Limiting** | Request rate limiting per tunnel |
 | **IP Allowlist** | Restrict tunnel access to specific IPs |
 | **Connection Logging** | Full audit trail of all connections |
-| **CNAME Verification** | Custom domains require DNS verification before SSL |
+| **CNAME Verification** | Custom domains require a DNS-only CNAME before Cloudflare issues the cert |
 
 ### Custom Domain Security
 
-When registering a custom domain, Jrok requires CNAME verification:
+When registering a custom domain, KProxy uses Cloudflare for SaaS Custom Hostnames:
 
-1. **Register domain** → Jrok provides CNAME target
-2. **Configure DNS** → Add CNAME record pointing to target
-3. **Verify** → Jrok confirms DNS propagation
-4. **SSL Issued** → Certificate generated only after verification
+1. **Register domain** → KProxy registers it as a Cloudflare Custom Hostname and gives you a CNAME target (`CF_SAAS_FALLBACK_HOSTNAME`)
+2. **Configure DNS** → Add a **DNS-only (grey-cloud) CNAME** pointing to that fallback hostname
+3. **Verify** → KProxy polls until Cloudflare reports the hostname active
+4. **Cert issued + auto-renewed** → Cloudflare validates the domain and serves the edge certificate
 
 This prevents domain abuse and ensures you own the domain.
 
@@ -336,8 +339,8 @@ cd jrok
 The script will interactively:
 1. ✅ Prompt for all required credentials
 2. ✅ Create VPS on DigitalOcean (via Terraform)
-3. ✅ Configure DNS records
-4. ✅ Issue SSL certificates (via Certbot + Cloudflare)
+3. ✅ Configure DNS records (proxied) and the Cloudflare Load Balancer pool
+4. ✅ Wire up edge TLS via Cloudflare (Universal SSL + Cloudflare for SaaS — no Certbot)
 5. ✅ Deploy and start all services (via Ansible)
 
 ### What You'll Need Ready
@@ -355,7 +358,8 @@ Before running the deploy script, gather these credentials:
 
 For custom configurations, see our detailed guides:
 - 📖 [Self-Hosting Guide](./docs/deployment/self-hosting.md) — Complete walkthrough
-- 🏗️ [Terraform Setup](./docs/deployment/terraform.md) — Infrastructure provisioning
+- ☁️ [Cloudflare Setup](./docs/configuration/cloudflare.md) — Edge TLS, Load Balancer, Cloudflare for SaaS
+- 🕸️ [Multi-Server Deployment](./docs/deployment/multi-server.md) — Gossip mesh and scaling
 - ⚙️ [Ansible Deployment](./docs/deployment/ansible.md) — Server configuration
 - 🐳 [Docker Deployment](./docs/deployment/docker.md) — Container-based setup
 
@@ -367,12 +371,17 @@ For custom configurations, see our detailed guides:
 
 | Variable | Description | Required |
 |----------|-------------|:--------:|
-| `MONGODB_URI` | MongoDB connection string | ✅ |
+| `MONGODB_URI` | MongoDB connection string (cold state) | ✅ |
 | `JWT_SECRET` | Secret for JWT tokens (64+ chars) | ✅ |
 | `BASE_DOMAIN` | Base domain for tunnels | ✅ |
 | `KOOMPI_CLIENT_ID` | OAuth client ID | ✅ |
 | `KOOMPI_CLIENT_SECRET` | OAuth client secret | ✅ |
 | `KOOMPI_REDIRECT_URI` | OAuth callback URL | ✅ |
+| `CF_API_TOKEN` | Cloudflare token (SSL and Certificates: Edit) for custom hostnames | Multi-tenant |
+| `CF_ZONE_ID` | Cloudflare zone that owns the fallback origin | Multi-tenant |
+| `CF_SAAS_FALLBACK_HOSTNAME` | Hostname customers CNAME to (defaults to `BASE_DOMAIN`) | Multi-tenant |
+| `GOSSIP_SECRET` | Shared secret for the gossip routing mesh (same on every node) | Multi-node |
+| `VPS_ID` / `VPS_HOST` | Unique node id and the address peers reach it on directly | Multi-node |
 | `PORT` | Server port | `3000` |
 | `DASHBOARD_URL` | Dashboard URL | Optional |
 
@@ -381,7 +390,7 @@ See [Environment Variables](./docs/configuration/environment.md) for complete re
 ### Getting Credentials
 
 - 🔐 [KOOMPI ID OAuth](./docs/configuration/oauth.md) — Authentication setup
-- ☁️ [Cloudflare Setup](./docs/configuration/cloudflare.md) — DNS and SSL
+- ☁️ [Cloudflare Setup](./docs/configuration/cloudflare.md) — DNS, edge TLS, Load Balancer, Cloudflare for SaaS
 - 🗄️ [MongoDB Setup](./docs/configuration/mongodb.md) — Database configuration
 
 ---
@@ -391,7 +400,7 @@ See [Environment Variables](./docs/configuration/environment.md) for complete re
 | Category | Guides |
 |----------|--------|
 | **Getting Started** | [Quick Start](./docs/getting-started/quick-start.md) · [Architecture](./docs/getting-started/architecture.md) |
-| **Deployment** | [Self-Hosting](./docs/deployment/self-hosting.md) · [Terraform](./docs/deployment/terraform.md) · [Ansible](./docs/deployment/ansible.md) · [Docker](./docs/deployment/docker.md) |
+| **Deployment** | [Self-Hosting](./docs/deployment/self-hosting.md) · [Multi-Server](./docs/deployment/multi-server.md) · [Ansible](./docs/deployment/ansible.md) · [Docker](./docs/deployment/docker.md) |
 | **Configuration** | [Environment](./docs/configuration/environment.md) · [OAuth](./docs/configuration/oauth.md) · [Cloudflare](./docs/configuration/cloudflare.md) · [MongoDB](./docs/configuration/mongodb.md) |
 | **CLI** | [Installation](./docs/cli/installation.md) · [Commands](./docs/cli/commands.md) |
 
@@ -423,10 +432,10 @@ jrok/
 | Component | Technology |
 |-----------|------------|
 | Server | [Bun](https://bun.sh) (TypeScript) |
-| Database | MongoDB (Atlas) |
-| Web Server | Nginx |
-| SSL | Let's Encrypt + Certbot |
-| DNS | Cloudflare |
+| Database | MongoDB (Atlas) — cold/durable state only |
+| Edge / TLS / LB | Cloudflare (Universal SSL, Load Balancer, Cloudflare for SaaS) |
+| Routing | In-memory gossip mesh (no Redis, no external coordinator) |
+| Large files | Cloudflare R2 / S3 (presigned URLs) |
 | Dashboard | React + Vite + Tailwind |
 | CLI | Node.js + TypeScript |
 | IaC | Terraform + Ansible |
@@ -467,7 +476,7 @@ Built with ❤️ by **[KOOMPI](https://koompi.com)**
 ---
 
 <p align="center">
-  <a href="https://jrok.koompi.cloud">Try Jrok</a> •
+  <a href="https://kproxy.koompi.cloud">Try KProxy</a> •
   <a href="./docs/README.md">Documentation</a> •
   <a href="https://github.com/koompi/jrok/issues">Report Bug</a> •
   <a href="https://github.com/koompi/jrok/discussions">Discussions</a>
