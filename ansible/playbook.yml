@@ -24,6 +24,8 @@
     cf_saas_fallback_hostname: "{{ lookup('env', 'CF_SAAS_FALLBACK_HOSTNAME') }}"
     # Gossip mesh shared secret — consumed by the app systemd env
     gossip_secret: "{{ lookup('env', 'GOSSIP_SECRET') }}"
+    # JWT signing secret (>=32 chars) — REQUIRED in production or the node refuses to boot
+    jwt_secret: "{{ lookup('env', 'JWT_SECRET') }}"
 
   pre_tasks:
     - name: Update apt cache

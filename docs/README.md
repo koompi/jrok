@@ -7,6 +7,7 @@ kproxy is a horizontally-scalable reverse proxy for exposing local services to t
 - [Quick Start](./getting-started/quick-start.md) — expose a local service in minutes
 
 ## Deployment
+- [DigitalOcean + Cloudflare (3-node)](./deployment/digitalocean-cloudflare.md) — full copy-paste runbook + cluster verification checklist
 - [Multi-Server Deployment](./deployment/multi-server.md) — the gossip mesh, HA, scaling
 - [Self-Hosting Guide](./deployment/self-hosting.md) — deploy your own node
 - [Ansible Deployment](./deployment/ansible.md) — automated configuration
