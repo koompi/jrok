@@ -4,6 +4,7 @@ import * as tunnelHandler from "./handlers/tunnelHandler";
 import * as agentHandler from "./handlers/agentHandler";
 import * as domainHandler from "./handlers/domainHandler";
 import * as authHandler from "./handlers/authHandler";
+import * as cliAuthHandler from "./handlers/cliAuthHandler";
 import * as organizationHandler from "./handlers/organizationHandler";
 import * as adminHandler from "./handlers/adminHandler";
 import * as activityHandler from "./handlers/activityHandler";
@@ -811,6 +812,17 @@ async function startServer() {
         // Plans (public)
         if (path === "/plans" && method === "GET") {
           return addCors(await organizationHandler.handleGetPlans());
+        }
+
+        // CLI device-authorization flow (start/poll are public; approve self-authenticates)
+        if (path === "/auth/cli/start" && method === "POST") {
+          return addCors(await cliAuthHandler.handleCliStart(req));
+        }
+        if (path === "/auth/cli/poll" && method === "POST") {
+          return addCors(await cliAuthHandler.handleCliPoll(req));
+        }
+        if (path === "/auth/cli/approve" && method === "POST") {
+          return addCors(await cliAuthHandler.handleCliApprove(req));
         }
 
         // ============ Protected Routes ============

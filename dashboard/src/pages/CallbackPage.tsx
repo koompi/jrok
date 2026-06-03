@@ -34,7 +34,9 @@ export default function CallbackPage() {
         const data = await api.handleCallback(code, state || undefined);
         api.setToken(data.token);
         await refreshUser();
-        navigate('/dashboard', { replace: true });
+        // If the user was mid-way through a CLI login, return them to the approval page.
+        const cliCode = sessionStorage.getItem('kproxy_cli_code');
+        navigate(cliCode ? '/cli' : '/dashboard', { replace: true });
       } catch (err) {
         console.error('Auth callback error:', err);
         setError(err instanceof Error ? err.message : 'Authentication failed');

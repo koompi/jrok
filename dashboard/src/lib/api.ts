@@ -90,6 +90,14 @@ class ApiClient {
     this.setToken(null);
   }
 
+  /** Approve a pending CLI device-authorization request (mints a CLI API key). */
+  async approveCliAuth(userCode: string): Promise<{ success: boolean; organizationId?: string }> {
+    return this.request('/auth/cli/approve', {
+      method: 'POST',
+      body: JSON.stringify({ userCode }),
+    });
+  }
+
   // Organizations
   async getOrganizations(): Promise<{ organizations: Organization[] }> {
     return this.request('/organizations');

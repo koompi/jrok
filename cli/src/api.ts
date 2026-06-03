@@ -133,6 +133,23 @@ export class KproxyApi {
   getLoginUrl(): Promise<{ url?: string; loginUrl?: string }> {
     return this.request("/auth/login");
   }
+  cliStart(label?: string): Promise<{
+    deviceCode: string;
+    userCode: string;
+    verificationUri: string;
+    verificationUriComplete: string;
+    intervalSec: number;
+    expiresInSec: number;
+  }> {
+    return this.request("/auth/cli/start", { method: "POST", body: JSON.stringify({ label }) });
+  }
+  cliPoll(deviceCode: string): Promise<{
+    status: "pending" | "approved" | "denied" | "expired";
+    apiKey?: string;
+    organizationId?: string;
+  }> {
+    return this.request("/auth/cli/poll", { method: "POST", body: JSON.stringify({ deviceCode }) });
+  }
   exchangeCode(code: string): Promise<any> {
     return this.request("/auth/callback", { method: "POST", body: JSON.stringify({ code }) });
   }

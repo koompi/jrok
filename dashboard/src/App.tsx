@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import LandingPage from './pages/LandingPage';
 import CallbackPage from './pages/CallbackPage';
+import CliAuthorizePage from './pages/CliAuthorizePage';
 import DashboardLayout from './layouts/DashboardLayout';
 import DashboardHome from './pages/dashboard/DashboardHome';
 import OrganizationsPage from './pages/dashboard/OrganizationsPage';
@@ -55,6 +56,7 @@ function App() {
       {/* Public routes */}
       <Route path="/" element={<LandingPage />} />
       <Route path="/callback" element={<CallbackPage />} />
+      <Route path="/cli" element={<CliAuthorizePage />} />
 
       {/* Protected dashboard routes */}
       <Route
