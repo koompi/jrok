@@ -280,7 +280,7 @@ export async function selectAgent(domain: string): Promise<Agent | null> {
   }
 
   // Get healthy members
-  const healthyMembers = await getHealthyGroupMembers(group.id);
+  let healthyMembers = await getHealthyGroupMembers(group.id);
 
   console.log(`⚖️  Load balancer: domain=${domain}, strategy=${group.strategy}, healthyMembers=${healthyMembers.length}`);
   healthyMembers.forEach((m, i) => {
@@ -288,8 +288,37 @@ export async function selectAgent(domain: string): Promise<Agent | null> {
   });
 
   if (healthyMembers.length === 0) {
-    console.warn(`⚠️ No healthy agents in group for domain: ${domain}`);
-    return null;
+    // SELF-HEAL: no member is flagged healthy, but a member's agent socket may
+    // actually be live — a member gets flagged unhealthy on a transient blip
+    // (jrok-server restart, momentary disconnect) and nothing ever flips it back,
+    // so the service serves 503 forever until a redeploy. Recover here by
+    // selecting any member whose WebSocket is currently OPEN and restoring its
+    // healthy flag. This branch ONLY runs when the group would otherwise return
+    // null (503), so it can never make a working service worse.
+    const allMembers = await getGroupMembers(group.id);
+    const liveMembers = allMembers.filter((m) => {
+      try {
+        const ws = agentService.getAgentSocket(m.agentId);
+        return !!ws && ws.readyState === 1; // 1 = WebSocket.OPEN
+      } catch {
+        return false;
+      }
+    });
+
+    if (liveMembers.length === 0) {
+      console.warn(`⚠️ No healthy agents in group for domain: ${domain}`);
+      return null;
+    }
+
+    console.warn(`♻️  Self-healing ${liveMembers.length} group member(s) with live sockets for domain: ${domain}`);
+    for (const m of liveMembers) {
+      try {
+        await updateMemberHealth(m.agentId, true);
+      } catch (err) {
+        console.error(`Failed to self-heal member ${m.agentId}:`, err);
+      }
+    }
+    healthyMembers = liveMembers;
   }
 
   // Select agent based on strategy
