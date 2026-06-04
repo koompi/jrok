@@ -1,8 +1,6 @@
 import { MongoClient, Db, Collection } from "mongodb";
 
-// Database name. Defaults to "kproxy". IMPORTANT: existing deployments created
-// under the old "jrok" name must set MONGO_DB_NAME=jrok (or migrate the data),
-// otherwise the app connects to a fresh empty "kproxy" database.
+// Database name (defaults to "kproxy"; override with MONGO_DB_NAME).
 export const DB_NAME = process.env.MONGO_DB_NAME || "kproxy";
 
 let db: Db;

@@ -9,7 +9,7 @@ Complete reference for all kproxy configuration options.
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `MONGODB_URI` | MongoDB connection string (cold/durable state) | `mongodb+srv://user:pass@cluster.mongodb.net/kproxy` |
-| `MONGO_DB_NAME` | Database name. **Defaults to `kproxy`.** Set to `jrok` if migrating an existing deployment, or migrate the data. | `kproxy` |
+| `MONGO_DB_NAME` | Database name. **Defaults to `kproxy`.** | `kproxy` |
 
 ### Authentication
 
@@ -103,10 +103,6 @@ These variables were part of the old nginx + Certbot/Let's Encrypt + MongoDB cer
 | `CLOUDFLARE_TOKEN` (Certbot) | The DNS-01/Certbot token is gone. Custom-hostname issuance uses `CF_API_TOKEN` instead. |
 | `VPS_USER`, `VPS_PORT` | SSH/cert-sync plumbing that no longer exists. |
 
-> **Backward compatibility:** the legacy `JROK_*` env vars are still accepted as fallbacks for
-> the new `KPROXY_*` CLI vars; API keys with the `jrok_` prefix are still accepted alongside
-> `kproxy_`; and a legacy `~/.jrok` config is still read.
-
 ---
 
 ## Example `.env`
@@ -118,7 +114,6 @@ These variables were part of the old nginx + Certbot/Let's Encrypt + MongoDB cer
 
 # --- Database (cold/durable state) ---------------------------------------------
 MONGODB_URI=mongodb+srv://kproxy:password@cluster0.xxxxx.mongodb.net/kproxy?retryWrites=true&w=majority
-# Existing "jrok" deployments: set MONGO_DB_NAME=jrok or migrate the data.
 MONGO_DB_NAME=kproxy
 
 # --- Auth ----------------------------------------------------------------------

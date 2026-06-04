@@ -1,200 +1,91 @@
 # CLI Installation
 
-Install the KProxy CLI to expose your local services to the internet.
+Install the `kproxy` CLI to expose your local services to the internet.
 
-## Quick Install
-
-### macOS / Linux
+## npm (recommended)
 
 ```bash
-# Download latest release
-curl -fsSL https://github.com/koompi/jrok/releases/latest/download/kproxy-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m) -o kproxy
-
-# Make executable
-chmod +x kproxy
-
-# Move to PATH
-sudo mv kproxy /usr/local/bin/
-
-# Verify installation
-kproxy version
+npm install -g kproxy
+kproxy --version
 ```
 
-### npm / Bun
+Works with Node.js 18+. `npx kproxy http 3000` also works without installing.
+
+## Standalone binary (no Node required)
+
+Download the prebuilt binary for your platform from the
+[releases page](https://github.com/koompi/jrok/releases/latest), or build one yourself:
 
 ```bash
-# Using npm
-curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.1.0/install.sh | bash
-
-# Using Bun
-bun install -g kproxy
-
-# Verify
-kproxy version
-```
-
-### Windows
-
-```powershell
-# Download from releases
-Invoke-WebRequest -Uri "https://github.com/koompi/jrok/releases/latest/download/kproxy-windows-x64.exe" -OutFile "kproxy.exe"
-
-# Move to PATH (e.g., C:\Program Files\kproxy\)
-Move-Item kproxy.exe "C:\Program Files\kproxy\"
-
-# Add to PATH (run as Administrator)
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Program Files\kproxy", [EnvironmentVariableTarget]::Machine)
-
-# Verify
-kproxy version
-```
-
-## Build from Source
-
-### Prerequisites
-
-- [Bun](https://bun.sh) v1.0+
-- Node.js 18+ (for npm)
-- Git
-
-### Build Steps
-
-```bash
-# Clone repository
 git clone https://github.com/koompi/jrok.git
 cd jrok/cli
-
-# Install dependencies
-bun install
-
-# Build
-bun run build.sh
-
-# Binary is in cli/bin/
-./bin/kproxy version
+npm install
+npm run bundle          # -> bin/kproxy-standalone
+sudo mv bin/kproxy-standalone /usr/local/bin/kproxy
+kproxy --version
 ```
 
-### Development Mode
+## Build from source
 
 ```bash
-cd cli
+git clone https://github.com/koompi/jrok.git
+cd jrok/cli
+npm install
+npm run build           # bundles dist/index.js
+node dist/index.js --version
 
-# Run directly with Bun
-bun run src/index.ts --help
-
-# Or with ts-node
-npx ts-node src/index.ts --help
+# develop against source
+npm run dev -- http 3000
+npm run typecheck
+npm test
 ```
 
-## First Time Setup
-
-### 1. Get an API Key
-
-**Option A: Use KOOMPI Cloud (Managed)**
-1. Visit [live.koompi.cloud](https://live.koompi.cloud)
-2. Sign in with KOOMPI ID
-3. Create or select an organization
-4. Generate an API key
-
-**Option B: Self-Hosted**
-1. Access your KProxy dashboard
-2. Sign in and create an API key
-
-### 2. Configure CLI
+## First-time setup
 
 ```bash
-# Interactive setup (recommended)
-kproxy --port 3000
-# You'll be prompted for your API key
+# Browser login (device flow) — points the CLI at your server and stores a key
+kproxy login --server https://live.example.com
 
-# Or configure manually
-kproxy config --server https://live.koompi.cloud --auth kproxy_your_api_key
+# …or configure a key manually (CI / headless)
+kproxy config --server https://live.example.com --auth kproxy_your_api_key
 ```
 
-### 3. Start Tunneling!
+Then:
 
 ```bash
-kproxy --port 3000
+kproxy http 3000
 ```
 
-## Verify Installation
+## Verify
 
 ```bash
-# Check version
-kproxy version
-
-# Expected output:
-# kproxy v2.3.0
-# Node v20.x.x
-
-# Show help
-kproxy help
-
-# Check configuration
-kproxy config
+kproxy --version
+kproxy --help
+kproxy config            # show the effective server / org / key
+kproxy doctor            # check connectivity + auth
 ```
 
-## Updating
-
-### npm / Bun
+## Update
 
 ```bash
 npm update -g kproxy
-# or
-bun update -g kproxy
 ```
 
-### Binary
-
-```bash
-# Download and replace
-curl -fsSL https://github.com/koompi/jrok/releases/latest/download/kproxy-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m) -o /usr/local/bin/kproxy
-chmod +x /usr/local/bin/kproxy
-```
-
-## Uninstalling
-
-### npm / Bun
+## Uninstall
 
 ```bash
 npm uninstall -g kproxy
+rm -rf ~/.kproxy          # remove stored config
 ```
 
-> A legacy `~/.jrok` config directory is still read for backward compatibility; new installs
-> use `~/.kproxy`.
+## Platform notes
 
-### Binary
-
-```bash
-sudo rm /usr/local/bin/kproxy
-rm -rf ~/.kproxy  # Remove config
-```
+- **macOS** (binary blocked by Gatekeeper): `xattr -d com.apple.quarantine /usr/local/bin/kproxy`
+- **Linux** (binary): `chmod +x /usr/local/bin/kproxy`
+- **Windows**: run PowerShell as Administrator when adding to `PATH`.
 
 ---
 
-## Platform-Specific Notes
-
-### macOS
-
-If you get "cannot be opened because the developer cannot be verified":
-```bash
-xattr -d com.apple.quarantine /usr/local/bin/kproxy
-```
-
-### Linux
-
-Ensure the binary has execute permissions:
-```bash
-chmod +x /usr/local/bin/kproxy
-```
-
-### Windows
-
-Run PowerShell as Administrator for PATH modifications.
-
----
-
-## Next Steps
-
-- [CLI Commands](./commands.md) - Full command reference
-- [Quick Start](../getting-started/quick-start.md) - Expose your first service
+## Next steps
+- [Quick Start](../getting-started/quick-start.md) — expose your first service
+- [CLI Commands](./commands.md) — the full command reference

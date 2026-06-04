@@ -425,7 +425,7 @@ npm install -g kproxy
 kproxy config --server https://live.yourdomain.com --auth YOUR_API_KEY
 
 # Connect a service
-kproxy --port 3000
+kproxy http 3000
 ```
 
 ---

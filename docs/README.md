@@ -39,7 +39,7 @@ There is no Let's Encrypt, Certbot, nginx, or certificate syncing.
 
 ## Security
 - Rate limiting, IP allowlists, connection logging
-- API keys (`kproxy_…`; legacy `jrok_…` still accepted)
+- API keys (`kproxy_…`)
 - Authenticated gossip mesh (`GOSSIP_SECRET`)
 - Origins locked to Cloudflare IPs (or `cloudflared`)
 

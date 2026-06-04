@@ -44,25 +44,25 @@ KProxy is an **open-source tunnel service** that exposes your local development 
 No server setup required. Get started in 30 seconds:
 
 ```bash
-# Install CLI with one command
-curl -fsSL https://raw.githubusercontent.com/koompi/jrok/v2.3.0/install.sh | bash
+# Install the CLI
+npm install -g kproxy
 
-# Expose your local service (you'll be prompted for API key)
-kproxy --port 3000
+# Authenticate (opens your browser), then expose a local service
+kproxy login --server https://tunnel.koompi.cloud
+kproxy http 3000
 ```
 
 **Output:**
 ```
-🎲 Generated subdomain: a1b2c3d4
-🔌 Connecting to kproxy server...
-📍 Domain: a1b2c3d4
-🏠 Local Service: localhost:3000
+✓ Connected to server
 
-✅ Connected to server!
-🌐 Your service is now available at: https://a1b2c3d4.live.koompi.cloud
+  https://crimson-fox-1a2b.live.koompi.cloud
+  → localhost:3000
+
+Press Ctrl+C to stop.
 ```
 
-Get your API key at **[kproxy.koompi.cloud](https://kproxy.koompi.cloud)**
+Sign in at **[tunnel.koompi.cloud](https://tunnel.koompi.cloud)**
 
 ### Option 2: Self-Hosted
 
@@ -84,43 +84,42 @@ The deploy script will guide you through the entire setup. See [Self-Hosting Gui
 
 ```bash
 # Simple - auto-generate subdomain
-kproxy --port 3000
+kproxy http 3000
 
 # Custom subdomain
-kproxy --port 8080 --domain myapp
+kproxy http 8080 --domain myapp
 # → https://myapp.live.koompi.cloud
 
-# TCP tunnel (raw TCP, databases, SSH, etc.)
-kproxy --port 5432 --tcp
-# → tcp://live.koompi.cloud:54321
+# Raw TCP (databases, SSH, …) — connect directly to the node's public IP:port
+kproxy tcp 5432
 ```
 
 ### 🔄 Smart Subdomain Handling
 
 ```bash
 # If "myapp" is already taken by another org, auto-assigns suffix
-kproxy --port 3000 --domain myapp
+kproxy http 3000 --domain myapp
 # → https://myapp-a7b3.live.koompi.cloud
 
 # Force new subdomain even if you own the existing one
-kproxy --port 3000 --domain myapp --force-new
+kproxy http 3000 --domain myapp --force-new
 # → https://myapp-c2d4.live.koompi.cloud
 ```
 
 ### 🌍 Custom Domain Support
 
 ```bash
-# Register a custom domain with auto-generated subdomain
-kproxy domain register --domain mysite.com
+# Register a custom domain
+kproxy domain register mysite.com --email you@mysite.com
 
 # Register with specific subdomain target
-kproxy domain register --domain mysite.com --subdomain myapp
+kproxy domain register mysite.com --email you@mysite.com --subdomain myapp
 
 # Verify the DNS-only CNAME (Cloudflare issues the edge cert)
-kproxy domain verify --domain mysite.com
+kproxy domain verify mysite.com
 
 # Check domain status
-kproxy domain status --domain mysite.com
+kproxy domain status mysite.com
 ```
 
 ### 🐳 Docker & Kubernetes Support
@@ -202,45 +201,47 @@ Shared cold state (off the request hot path):
 ### Basic Commands
 
 ```bash
-# Expose local port (auto-generates subdomain)
-kproxy --port 3000
+# Authenticate (browser device flow)
+kproxy login --server https://live.example.com
+
+# Expose a local HTTP port (auto-generates subdomain)
+kproxy http 3000
 
 # Specify subdomain
-kproxy --port 3000 --domain myapp
+kproxy http 3000 --domain myapp
 
-# TCP tunnel (databases, SSH, custom protocols)
-kproxy --port 5432 --tcp
+# Inspect requests locally (ngrok-style) at 127.0.0.1:4040
+kproxy http 8080 --inspect
 
-# Force new subdomain (even if you own existing one)
-kproxy --port 3000 --domain myapp --force-new
+# Raw TCP (databases, SSH) — connect to the node's public IP:port
+kproxy tcp 5432
 
-# List active tunnels
-kproxy list
+# Force new subdomain (even if you own the existing one)
+kproxy http 3000 --domain myapp --force-new
 
-# Disconnect tunnel
-kproxy disconnect --domain myapp
+# List / disconnect tunnels
+kproxy list                  # alias: ls
+kproxy disconnect myapp      # alias: rm
 
-# Show configuration
+# Config & help
 kproxy config
-
-# Get help
-kproxy help
+kproxy --help
 ```
 
 ### Custom Domain Commands
 
 ```bash
-# Register custom domain (auto-generates subdomain target)
-kproxy domain register --domain mysite.com
+# Register custom domain
+kproxy domain register mysite.com --email you@mysite.com
 
 # Register with specific subdomain
-kproxy domain register --domain mysite.com --subdomain myapp
+kproxy domain register mysite.com --email you@mysite.com --subdomain myapp
 
 # Verify the DNS-only CNAME (Cloudflare issues + renews the edge cert)
-kproxy domain verify --domain mysite.com
+kproxy domain verify mysite.com
 
 # Check domain verification status
-kproxy domain status --domain mysite.com
+kproxy domain status mysite.com
 
 # List all your custom domains
 kproxy domain list
@@ -271,10 +272,6 @@ kproxy config --auth kproxy_your_api_key
 # Clear config
 kproxy config --clear
 ```
-
-> **Backward compatibility:** API keys with the legacy `jrok_` prefix are still accepted
-> alongside `kproxy_`; `JROK_*` environment variables still work as fallbacks for their
-> `KPROXY_*` equivalents; and a legacy `~/.jrok` config is still read.
 
 See [CLI Commands Reference](./docs/cli/commands.md) for full documentation.
 

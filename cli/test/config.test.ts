@@ -14,7 +14,7 @@ beforeAll(async () => {
 });
 
 afterEach(() => {
-  for (const k of ["KPROXY_SERVER", "KPROXY_AUTH", "KPROXY_ORG", "JROK_SERVER", "JROK_AUTH"]) delete process.env[k];
+  for (const k of ["KPROXY_SERVER", "KPROXY_AUTH", "KPROXY_ORG"]) delete process.env[k];
 });
 
 describe("resolveContext", () => {
@@ -26,14 +26,9 @@ describe("resolveContext", () => {
     expect(resolveContext({}).serverUrl).toBe("https://tunnel.koompi.cloud");
   });
 
-  it("honors legacy JROK_ env vars as a fallback", () => {
-    process.env.JROK_AUTH = "legacy-key";
-    expect(resolveContext({}).authToken).toBe("legacy-key");
-  });
-
-  it("prefers KPROXY_ over legacy JROK_", () => {
-    process.env.JROK_AUTH = "legacy-key";
-    process.env.KPROXY_AUTH = "new-key";
-    expect(resolveContext({}).authToken).toBe("new-key");
+  it("reads the auth token from KPROXY_AUTH, with flags taking precedence", () => {
+    process.env.KPROXY_AUTH = "env-key";
+    expect(resolveContext({}).authToken).toBe("env-key");
+    expect(resolveContext({ auth: "flag-key" }).authToken).toBe("flag-key");
   });
 });

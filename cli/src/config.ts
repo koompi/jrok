@@ -19,20 +19,13 @@ export interface StoredConfig extends ProfileConfig {
 
 const CONFIG_DIR = join(homedir(), ".kproxy");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
-// Legacy location (pre-rename) — read once and migrated to ~/.kproxy.
-const LEGACY_CONFIG_FILE = join(homedir(), ".jrok", "config.json");
 
-export const configPaths = { dir: CONFIG_DIR, file: CONFIG_FILE, legacy: LEGACY_CONFIG_FILE };
+export const configPaths = { dir: CONFIG_DIR, file: CONFIG_FILE };
 
 export function loadConfig(): StoredConfig {
   try {
     if (existsSync(CONFIG_FILE)) {
       return JSON.parse(readFileSync(CONFIG_FILE, "utf-8")) as StoredConfig;
-    }
-    if (existsSync(LEGACY_CONFIG_FILE)) {
-      const legacy = JSON.parse(readFileSync(LEGACY_CONFIG_FILE, "utf-8")) as StoredConfig;
-      saveConfig(legacy); // migrate forward so future runs use ~/.kproxy
-      return legacy;
     }
   } catch {
     // Corrupt/unreadable config — fall back to empty rather than crashing.
@@ -77,16 +70,16 @@ export interface CliContext {
 }
 
 /**
- * Resolve the effective context from (in priority order): explicit flags, env vars
- * (KPROXY_* then legacy JROK_*), the stored/active-profile config, then defaults.
+ * Resolve the effective context from (in priority order): explicit flags, KPROXY_* env
+ * vars, the stored/active-profile config, then defaults.
  */
 export function resolveContext(opts: { server?: string; auth?: string; org?: string } = {}): CliContext {
   const stored = activeProfile(loadConfig());
   const env = process.env;
   return {
-    serverUrl: opts.server || env.KPROXY_SERVER || env.JROK_SERVER || stored.serverUrl || DEFAULT_SERVER,
-    authToken: opts.auth || env.KPROXY_AUTH || env.JROK_AUTH || stored.apiKey,
-    organizationId: opts.org || env.KPROXY_ORG || env.JROK_ORG || stored.organizationId,
+    serverUrl: opts.server || env.KPROXY_SERVER || stored.serverUrl || DEFAULT_SERVER,
+    authToken: opts.auth || env.KPROXY_AUTH || stored.apiKey,
+    organizationId: opts.org || env.KPROXY_ORG || stored.organizationId,
     organizationName: stored.organizationName,
   };
 }

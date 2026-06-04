@@ -1,147 +1,98 @@
-# Quick Start Guide
+# Quick Start
 
-Get KProxy running in 5 minutes! This guide covers the fastest way to expose your local services to the internet.
+Expose a local service to the internet in a couple of minutes with the `kproxy` CLI.
 
-## Option 1: Use KProxy by KOOMPI (Recommended)
+## 1. Install the CLI
 
-The easiest way to use KProxy - no server setup required.
-
-### Step 1: Get Your API Key
-
-1. Visit [kproxy.koompi.cloud](https://kproxy.koompi.cloud)
-2. Sign in with your KOOMPI ID
-3. Create an organization (or use existing one)
-4. Generate an API key from the dashboard
-
-### Step 2: Install the CLI
-
-**macOS / Linux:**
-```bash
-curl -fsSL https://github.com/koompi/jrok/releases/latest/download/kproxy-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m) -o kproxy
-chmod +x kproxy
-sudo mv kproxy /usr/local/bin/
-```
-
-**Or with npm:**
 ```bash
 npm install -g kproxy
 ```
 
-### Step 3: Expose Your Service
+Verify: `kproxy --version`.
+
+## 2. Authenticate
+
+`kproxy login` opens your browser, you approve, and the CLI stores a scoped API key in
+`~/.kproxy/config.json`. Point it at your server with `--server` (the value is remembered):
 
 ```bash
-# First run - you'll be prompted for your API key
-kproxy --port 3000
+# Self-hosted cluster
+kproxy login --server https://live.example.com
 
-# That's it! 🚀
+# Managed (KOOMPI Cloud)
+kproxy login --server https://tunnel.koompi.cloud
 ```
 
-**Output:**
-```
-🔐 No API key configured.
-   Get one from your dashboard at https://kproxy.koompi.cloud
+> Prefer non-interactive / CI? Skip the browser with an API key:
+> `kproxy config --server https://live.example.com --auth kproxy_xxx`
+> (or set `KPROXY_SERVER` / `KPROXY_AUTH`).
 
-Enter your API key: kproxy_xxxxx...
-
-💾 Configuration saved to ~/.kproxy/config.json
-
-🎲 Generated subdomain: a1b2c3d4
-🔌 Connecting to kproxy server...
-📍 Domain: a1b2c3d4
-🏠 Local Service: localhost:3000
-
-https://live.koompi.cloud
-
-✅ Connected to server!
-🌐 Your service is now available at: https://a1b2c3d4.live.koompi.cloud
-✨ Connected to kproxy
-🆔 Agent ID: aa01ea7c-70ef-403e-8720-6729bfef5d95
-```
-
-### Step 4: Access Your Service
-
-Your local service is now publicly accessible at:
-```
-https://<subdomain>.live.koompi.cloud
-```
-
-## Option 2: Self-Hosted
-
-Want to run your own KProxy server? See the [Self-Hosting Guide](../deployment/self-hosting.md).
-
----
-
-## Common Use Cases
-
-### Expose a Development Server
+## 3. Expose your service
 
 ```bash
-# React/Vue/Next.js dev server
-kproxy --port 3000
-
-# Django/Flask
-kproxy --port 8000
-
-# Ruby on Rails
-kproxy --port 3001
+kproxy http 3000
 ```
 
-### Custom Subdomain
+```
+✓ Connected to server
 
+  https://crimson-fox-1a2b.live.example.com
+  → localhost:3000
+
+Press Ctrl+C to stop.
+```
+
+That URL is public and TLS-terminated by Cloudflare. In a cluster, it works no matter which
+node a request lands on — the gossip mesh routes it to the node holding your tunnel.
+
+## Common use cases
+
+### A dev server
 ```bash
-# Use a specific subdomain
-kproxy --port 3000 --domain myapp
-
-# Access at: https://myapp.live.koompi.cloud
-
-# If subdomain is taken, you'll get a suffix automatically:
-# → https://myapp-a7b3.live.koompi.cloud
+kproxy http 3000        # React/Vue/Next
+kproxy http 8000        # Django/Flask
 ```
 
-### TCP Tunnels (Databases, SSH, etc.)
-
+### A specific subdomain
 ```bash
-# Expose PostgreSQL database
-kproxy --port 5432 --tcp
-# Access at: tcp://live.koompi.cloud:54321
-
-# Expose MySQL
-kproxy --port 3306 --tcp
-
-# Expose SSH
-kproxy --port 22 --tcp
+kproxy http 3000 --domain myapp
+# → https://myapp.live.example.com   (a suffix is added if it's taken; use --force-new to insist)
 ```
 
-### Custom Domains
-
+### Inspect requests locally (ngrok-style)
 ```bash
-# Register your custom domain
-kproxy domain register --domain mysite.com
-
-# Configure DNS (add CNAME record), then verify
-kproxy domain verify --domain mysite.com
-
-# Now your domain routes to your tunnel!
+kproxy http 8080 --inspect
+# → also opens http://127.0.0.1:4040 to view/replay tunneled requests
 ```
 
-### Docker Swarm Service
-
+### Raw TCP (SSH, databases)
 ```bash
-# Expose a Docker Swarm service
-kproxy connect --domain api --docker-service my-api
+kproxy tcp 22
 ```
-
-### Kubernetes Service
-
+TCP prints a `host:port`. **Connect to the node's public IP** on that port — raw TCP goes
+**directly to the node**, not through Cloudflare:
 ```bash
-# Expose a Kubernetes service
-kproxy connect --domain app --k8s-service my-svc:8080
+ssh -p <port> user@<node-public-ip>
 ```
 
----
+### A custom domain
+```bash
+kproxy domain register app.yoursite.com --email you@yoursite.com
+# add at your DNS:  app.yoursite.com  CNAME  ssl.live.example.com   (DNS only / grey cloud)
+kproxy domain verify app.yoursite.com
+```
 
-## What's Next?
+### Manage tunnels
+```bash
+kproxy list                 # active tunnels        (alias: ls)
+kproxy disconnect myapp     # tear one down         (alias: rm)
+kproxy whoami               # current server + org
+kproxy logout
+```
 
-- [CLI Commands Reference](../cli/commands.md) - Learn all available commands
-- [Architecture Overview](./architecture.md) - Understand how KProxy works
-- [Self-Hosting Guide](../deployment/self-hosting.md) - Deploy your own server
+Add `--json` to any command for scriptable output.
+
+## What's next?
+- [CLI Commands](../cli/commands.md) — the full command reference
+- [Architecture](./architecture.md) — how routing, TLS, and the gossip mesh work
+- [Deploy your own cluster](../deployment/digitalocean-cloudflare.md) — 3 nodes on DigitalOcean + Cloudflare

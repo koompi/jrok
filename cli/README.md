@@ -80,9 +80,6 @@ setting: **flag → env → stored config → default**.
 | `KPROXY_ORG` | organization id |
 | `KPROXY_DASHBOARD` | dashboard URL used by `kproxy login` |
 
-Legacy `JROK_*` env vars and the `~/.jrok` config are still honored (and migrated
-forward) for backward compatibility.
-
 ## Development
 
 ```bash

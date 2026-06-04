@@ -64,7 +64,7 @@ program.addHelpText(
     "  $ kproxy list                      List your active tunnels",
     "  $ kproxy domain register example.com --email you@example.com",
     "",
-    "Environment: KPROXY_SERVER, KPROXY_AUTH, KPROXY_ORG (legacy JROK_* still honored)",
+    "Environment: KPROXY_SERVER, KPROXY_AUTH, KPROXY_ORG",
     "",
   ].join("\n"),
 );

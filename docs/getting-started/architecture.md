@@ -41,7 +41,7 @@ kproxy is a **horizontally-scalable reverse proxy** for exposing local services 
 ```
 kproxy CLI ──wss──▶ Cloudflare ──▶ kproxy node ──▶ register in gossip map (+ MongoDB)
 ```
-`kproxy --port 3000` opens a WebSocket to `/ws/agent`, authenticates with an API key, and the node it lands on becomes that agent's **home node**. The home node publishes `hostname → node` into the in-memory gossip table, which replicates to every other node within milliseconds.
+`kproxy http 3000` opens a WebSocket to `/ws/agent`, authenticates with an API key, and the node it lands on becomes that agent's **home node**. The home node publishes `hostname → node` into the in-memory gossip table, which replicates to every other node within milliseconds.
 
 ### 2. Inbound request
 ```

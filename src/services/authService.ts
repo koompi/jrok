@@ -481,8 +481,8 @@ export async function authenticateRequest(req: Request): Promise<AuthContext | n
       };
     }
 
-    // Try as API key (kproxy_xxx format; jrok_ accepted for backward compatibility)
-    if (token.startsWith("kproxy_") || token.startsWith("jrok_")) {
+    // Try as API key (kproxy_xxx format)
+    if (token.startsWith("kproxy_")) {
       const result = await validateApiKey(token);
       if (result) {
         return {
@@ -586,8 +586,8 @@ export async function validateApiKeyForAgent(rawKey: string): Promise<{
     return { valid: false, reason: "API key is required" };
   }
 
-  // Must be a proper kproxy_ prefixed key (jrok_ accepted for backward compatibility)
-  if (!rawKey.startsWith('kproxy_') && !rawKey.startsWith('jrok_')) {
+  // Must be a proper kproxy_ prefixed key
+  if (!rawKey.startsWith('kproxy_')) {
     return { valid: false, reason: "Invalid API key format" };
   }
 
