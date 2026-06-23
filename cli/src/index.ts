@@ -690,13 +690,25 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   });
   let heartbeatInterval: NodeJS.Timeout;
   let pingInterval: NodeJS.Timeout;
+  let watchdogInterval: NodeJS.Timeout;
   let reconnectAttempts = 0;
+  let reconnectScheduled = false;
+
+  // Last time we saw ANY sign of life from the server (pong, heartbeat_ack, or
+  // any message). Used by the watchdog to detect a half-open connection: a
+  // TCP link that a proxy/LB silently dropped without a FIN. In that state
+  // ws.readyState stays OPEN forever, onclose never fires, and the agent would
+  // otherwise never reconnect — leaving the server with no agent for the domain
+  // (X-Jrok-Tunnel: down) while this process happily believes it's connected.
+  let lastPongAt = Date.now();
+  const DEAD_CONNECTION_TIMEOUT = 75000; // ~2.5 missed ping cycles (30s each)
 
   // Store TCP port when received from server
   let tcpPort: number | null = null;
 
   ws.onopen = () => {
     reconnectAttempts = 0;
+    lastPongAt = Date.now();
     console.log("✅ Connected to server!");
 
     if (protocol === 'http') {
@@ -720,9 +732,33 @@ async function connectAgent(config: ClientConfig): Promise<void> {
         ws.ping();
       }
     }, 30000);
+
+    // Watchdog: if we haven't heard back from the server (pong/ack/message)
+    // within DEAD_CONNECTION_TIMEOUT, the link is half-open. Force-terminate so
+    // onclose fires and we reconnect — instead of silently staying "connected"
+    // while the server has no agent for this domain.
+    watchdogInterval = setInterval(() => {
+      if (Date.now() - lastPongAt > DEAD_CONNECTION_TIMEOUT) {
+        console.warn(`⚠️  No response from server for ${Math.round((Date.now() - lastPongAt) / 1000)}s — connection is dead, forcing reconnect`);
+        try {
+          ws.terminate(); // hard close → triggers onclose → reconnect
+        } catch {
+          // If terminate isn't available/fails, fall back to close
+          try { ws.close(); } catch { /* ignore */ }
+        }
+      }
+    }, 15000);
   };
 
+  // Any pong from the server resets the liveness clock.
+  ws.on('pong', () => {
+    lastPongAt = Date.now();
+  });
+
   ws.onmessage = async (event) => {
+    // Any inbound traffic proves the link is alive (covers servers that don't
+    // emit a protocol-level pong but do send heartbeat_ack / requests).
+    lastPongAt = Date.now();
     try {
       const message = JSON.parse(event.data.toString());
 
@@ -809,6 +845,13 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   ws.onclose = () => {
     clearInterval(heartbeatInterval);
     clearInterval(pingInterval);
+    clearInterval(watchdogInterval);
+
+    // Guard against scheduling two reconnects for the same socket (e.g. the
+    // watchdog terminates AND an error/close races in). Only the first wins.
+    if (reconnectScheduled) return;
+    reconnectScheduled = true;
+
     reconnectAttempts++;
     const delay = Math.min(5000 * reconnectAttempts, 30000); // Max 30s delay
 
