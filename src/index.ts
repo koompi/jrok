@@ -1599,12 +1599,18 @@ async function startServer() {
             // Re-check after potential fallback
             const finalWs = agentService.getAgentSocket(agent.id);
             if (!finalWs || finalWs.readyState !== 1) {
+              // X-Jrok-Tunnel: "reconnecting" (NOT "down") — the agent record
+              // still exists, its websocket is just not open right now (server
+              // restart, half-open link the CLI watchdog is about to fix).
+              // The deploy worker only force-restarts tunnels on "down";
+              // reporting "down" here made it kill healthy tunnels that were
+              // seconds away from reconnecting on their own.
               return addCors(new Response(
                 JSON.stringify({
                   success: false,
                   message: `Agent for ${subdomain} is not connected (readyState: ${finalWs?.readyState || 'null'}). ${isGroupDomain ? 'All agents in the group are unavailable.' : 'Attempting reconnection...'}`,
                 }),
-                { status: 503, headers: { "Content-Type": "application/json", "X-Jrok-Tunnel": "down" } }
+                { status: 503, headers: { "Content-Type": "application/json", "X-Jrok-Tunnel": "reconnecting" } }
               ));
             }
           }
