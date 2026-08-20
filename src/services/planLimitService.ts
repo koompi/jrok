@@ -14,6 +14,27 @@ import type { Plan, PlanLimits, Organization } from "../types/index";
 const planCache = new Map<string, { plan: Plan; timestamp: number }>();
 const PLAN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
+// Fully-resolved plan info per organization, so the hot path costs no queries
+// at all. Bounded by organization count, so it needs no eviction sweep.
+//
+// TTL is short because this gates rate limits and bandwidth quotas: an upgrade
+// should take effect promptly, and a downgrade shouldn't stay unenforced for
+// long. Call invalidateOrgPlan() to make a change visible immediately.
+const orgPlanCache = new Map<string, { info: PlanInfo; timestamp: number }>();
+const ORG_PLAN_CACHE_TTL = 60 * 1000; // 1 minute
+
+/**
+ * Drop the cached plan for an organization (or all of them). Call after a
+ * subscription changes so the new tier applies without waiting out the TTL.
+ */
+export function invalidateOrgPlan(organizationId?: string): void {
+  if (organizationId) {
+    orgPlanCache.delete(organizationId);
+  } else {
+    orgPlanCache.clear();
+  }
+}
+
 // Default limits for free plan (fallback)
 const DEFAULT_FREE_LIMITS: PlanLimits = {
   maxTunnels: 1,
@@ -52,7 +73,31 @@ export interface PlanInfo {
  * Get plan information for an organization
  */
 export async function getOrganizationPlan(organizationId: string): Promise<PlanInfo> {
+  // Serve the fully-resolved answer from cache when it's fresh.
+  //
+  // This runs on EVERY tunneled request, and planCache below only covers the
+  // plan document — the subscription lookup in front of it was uncached, and
+  // ran TWICE whenever the org id is a Mongo ObjectId (the string match misses,
+  // then the ObjectId match runs). Worst of all, an org with no subscription at
+  // all — the free tier, i.e. most of them — paid both queries on every request
+  // only to be told 'free' again.
+  //
+  // Those queries competed with agent heartbeat writes, and a delayed heartbeat
+  // expires an agentConnections record and gets a healthy tunnel killed
+  // (Fix-065). Caching here protects tunnel liveness, not just latency.
+  const cachedInfo = orgPlanCache.get(organizationId);
+  if (cachedInfo && Date.now() - cachedInfo.timestamp < ORG_PLAN_CACHE_TTL) {
+    return cachedInfo.info;
+  }
+
   const collections = getCollections();
+
+  // Resolve, then cache whatever we concluded — including the negative result,
+  // which is the hot path for free-tier orgs.
+  const remember = (info: PlanInfo): PlanInfo => {
+    orgPlanCache.set(organizationId, { info, timestamp: Date.now() });
+    return info;
+  };
 
   try {
     // Get subscription - try string ID first
@@ -77,34 +122,34 @@ export async function getOrganizationPlan(organizationId: string): Promise<PlanI
     }
 
     if (!subscription) {
-      return { plan: null, limits: DEFAULT_FREE_LIMITS, tier: 'free' };
+      return remember({ plan: null, limits: DEFAULT_FREE_LIMITS, tier: 'free' });
     }
 
     // Check cache
     const cached = planCache.get(subscription.planId);
     if (cached && Date.now() - cached.timestamp < PLAN_CACHE_TTL) {
-      return {
+      return remember({
         plan: cached.plan,
         limits: cached.plan.limits || DEFAULT_FREE_LIMITS,
         tier: cached.plan.tier
-      };
+      });
     }
 
     // Fetch plan
     const plan = await collections.plans.findOne({ id: subscription.planId }) as Plan | null;
 
     if (!plan) {
-      return { plan: null, limits: DEFAULT_FREE_LIMITS, tier: 'free' };
+      return remember({ plan: null, limits: DEFAULT_FREE_LIMITS, tier: 'free' });
     }
 
     // Update cache
     planCache.set(subscription.planId, { plan, timestamp: Date.now() });
 
-    return {
+    return remember({
       plan,
       limits: plan.limits || DEFAULT_FREE_LIMITS,
       tier: plan.tier
-    };
+    });
   } catch (error) {
     console.error("Error getting organization plan:", error);
     return { plan: null, limits: DEFAULT_FREE_LIMITS, tier: 'free' };
