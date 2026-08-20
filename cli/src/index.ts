@@ -364,6 +364,30 @@ function nextReconnectDelayMs(attempt: number): number {
   return Math.round(capped / 2 + Math.random() * (capped / 2));
 }
 
+// =============================================================================
+// STRUCTURED EVENTS (machine-readable stdout)
+// =============================================================================
+// The process that spawns this CLI consumes stdout to build per-request
+// analytics. It used to do that by regex-matching the emoji log lines and
+// pairing 📥 with 📤 through a single-slot pointer, which mis-paired or dropped
+// records whenever two requests were in flight at once — so the numbers it
+// produced quietly undercounted under exactly the load you'd want to measure.
+// Any change to the human log wording also silently zeroed the analytics.
+//
+// One event per COMPLETED request carries its own id, so no pairing is needed
+// and nothing depends on how the human-readable lines are worded. The sentinel
+// prefix keeps these unambiguous even if an app's own output ever reaches this
+// stream.
+const EVENT_PREFIX = '@jrok:';
+
+function emitEvent(kind: string, payload: Record<string, unknown>): void {
+  try {
+    console.log(`${EVENT_PREFIX}${kind} ${JSON.stringify(payload)}`);
+  } catch {
+    // Never let telemetry break request handling.
+  }
+}
+
 // Server capabilities from the welcome message. Streaming responses are only
 // used when the server advertises support — otherwise fall back to the legacy
 // single-message buffered response (safe with old servers).
@@ -395,12 +419,26 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
   const { requestId, method, path, query, headers, body, bodyIsBase64, clientIp } = message;
   const streaming = serverFeatures.has('stream');
   let responseStarted = false;
+  const startedAt = Date.now();
+  let bytesOut = 0;
+
+  /** One event per completed request — see EVENT_PREFIX above. */
+  const emitRequestEvent = (status: number, outcome: string) => {
+    emitEvent('req', {
+      id: requestId,
+      method,
+      path,
+      status,
+      ip: clientIp || 'unknown',
+      ms: Date.now() - startedAt,
+      bytes: bytesOut,
+      outcome,
+    });
+  };
 
   try {
     // Build URL to local service
     const localUrl = `http://${config.localHost}:${config.port}${path}${query || ''}`;
-
-    console.log(`📥 ${method} ${path} → ${localUrl} [${clientIp || 'unknown'}]`);
 
     // Filter out hop-by-hop headers that shouldn't be forwarded
     const forwardHeaders: Record<string, string> = {};
@@ -458,19 +496,22 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
         for await (const chunk of localResponse.body as any) {
           if (abortController.signal.aborted || ws.readyState !== 1) break;
           await wsBufferDrained(ws);
+          const chunkBuf = Buffer.from(chunk);
+          bytesOut += chunkBuf.length;
           ws.send(JSON.stringify({
             type: "http_response_chunk",
             requestId,
-            data: Buffer.from(chunk).toString('base64'),
+            data: chunkBuf.toString('base64'),
           }));
         }
       }
 
       ws.send(JSON.stringify({ type: "http_response_end", requestId }));
-      console.log(`📤 ${localResponse.status} ${localResponse.statusText} (streamed)`);
+      emitRequestEvent(localResponse.status, 'streamed');
     } else {
       // Legacy path (old server): buffer the whole response into one message
       const responseBuffer = await localResponse.arrayBuffer();
+      bytesOut = responseBuffer.byteLength;
       const responseBody = Buffer.from(responseBuffer).toString('base64');
 
       ws.send(JSON.stringify({
@@ -483,16 +524,19 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
         isBase64: true,
       }));
 
-      console.log(`📤 ${localResponse.status} ${localResponse.statusText}`);
+      emitRequestEvent(localResponse.status, 'buffered');
     }
   } catch (error) {
     const aborted = error instanceof Error && error.name === 'AbortError';
     if (aborted && responseStarted) {
-      // Normal: the server told us the client went away mid-stream
-      console.log(`🛑 Response stream aborted [${requestId}]`);
+      // Normal: the server told us the client went away mid-stream. Still an
+      // event — a request that vanished mid-response is a real outcome, and
+      // omitting it would make totals disagree with what the server saw.
+      emitRequestEvent(0, 'aborted');
       return;
     }
     console.error(`❌ Error forwarding request:`, error);
+    emitRequestEvent(responseStarted ? 0 : 502, responseStarted ? 'stream_error' : 'error');
 
     if (responseStarted) {
       // Headers already sent — signal a mid-stream failure
@@ -924,6 +968,11 @@ async function connectAgent(config: ClientConfig): Promise<void> {
           const serverHost = new URL(config.serverUrl).hostname;
           const actualDomain = message.domain || config.domain;
           console.log(`\n🚀 TCP tunnel ready!`);
+          // Structured first: the spawning process reads this to record the
+          // customer's real database/SSH endpoint. It used to recover the port
+          // by trying three different regexes against this human text, which
+          // is a fragile way to source a value stored nowhere else.
+          emitEvent('tcp', { port: tcpPort, host: serverHost });
           console.log(`📡 Connect to: ${serverHost}:${tcpPort}`);
           console.log(`   Example: ssh user@${serverHost} -p ${tcpPort}`);
           console.log(`   Example: mongo --host ${serverHost} --port ${tcpPort}`);
