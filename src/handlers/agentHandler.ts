@@ -24,6 +24,10 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   const instanceId = url.searchParams.get("instanceId");
   const requestedOrgId = url.searchParams.get("organizationId");
 
+  // CLI capabilities (e.g. "stream,b64body") — absent for older CLIs, which
+  // then get the legacy buffered/text-body protocol
+  const caps = url.searchParams.get("caps")?.split(",").map(c => c.trim()).filter(Boolean);
+
   // IP Security parameters from CLI
   const ipSecurityMode = url.searchParams.get("ipSecurityMode") as TunnelIpSecurity['mode'] | null;
   const allowedIpsParam = url.searchParams.get("allowedIps");
@@ -196,6 +200,8 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
       // Multi-agent group settings
       groupMode,
       instanceId,
+      // CLI capabilities
+      caps,
       // IP Security settings from CLI
       ipSecurity: ipSecurityMode ? {
         mode: ipSecurityMode,

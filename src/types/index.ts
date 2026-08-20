@@ -19,6 +19,7 @@ export interface Agent {
   groupId?: string; // ID of the agent group this agent belongs to
   instanceId?: string; // Unique identifier for this agent instance within a group
   groupMode?: boolean; // True if this agent is part of a load-balanced group
+  caps?: string[]; // CLI capabilities advertised at connect (e.g. "stream", "b64body")
 }
 
 // ============ Multi-Agent Group Types ============

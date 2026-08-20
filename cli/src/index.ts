@@ -341,11 +341,39 @@ const HOP_BY_HOP_HEADERS = new Set([
   'content-length', // Let fetch handle this
 ]);
 
+// Server capabilities from the welcome message. Streaming responses are only
+// used when the server advertises support — otherwise fall back to the legacy
+// single-message buffered response (safe with old servers).
+const serverFeatures = new Set<string>();
+
+// In-flight streamed responses, so the server can abort one (client
+// disconnected / request timed out) and we stop reading from the local app.
+const activeHttpStreams = new Map<string, AbortController>();
+
+// Backpressure: don't let a fast local app flood the agent→server WebSocket
+// buffer when tunneling large bodies.
+const WS_BACKPRESSURE_LIMIT = 8 * 1024 * 1024; // 8MB buffered
+
+function wsBufferDrained(ws: WebSocket): Promise<void> {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (ws.readyState !== 1 || ws.bufferedAmount < WS_BACKPRESSURE_LIMIT) {
+        resolve();
+      } else {
+        setTimeout(check, 20);
+      }
+    };
+    check();
+  });
+}
+
 // Handle incoming HTTP request from server and proxy to local service
 async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConfig): Promise<void> {
-  try {
-    const { requestId, method, path, query, headers, body, clientIp } = message;
+  const { requestId, method, path, query, headers, body, bodyIsBase64, clientIp } = message;
+  const streaming = serverFeatures.has('stream');
+  let responseStarted = false;
 
+  try {
     // Build URL to local service
     const localUrl = `http://${config.localHost}:${config.port}${path}${query || ''}`;
 
@@ -362,53 +390,109 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
       }
     }
 
+    // Decode base64-encoded request bodies (binary-safe uploads). Legacy
+    // servers send plain text with no flag.
+    const requestBody = bodyIsBase64 && typeof body === 'string'
+      ? Buffer.from(body, 'base64')
+      : body;
+
     // Forward request to local service.
-    // Timeout matches the server-side TUNNEL_REQUEST_TIMEOUT_MS (default 30s) minus a small
-    // buffer so the CLI sends a clean 502 before the server gives up and sends a 504.
+    // The timeout only covers time-to-response-headers. Once the local app
+    // starts responding we stream for as long as it does (SSE, slow SSR) —
+    // matching the server, which also clears its timeout on response start.
     const localFetchTimeout = parseInt(process.env.TUNNEL_REQUEST_TIMEOUT_MS || '30000') - 2000;
     const abortController = new AbortController();
     const localFetchTimer = setTimeout(() => abortController.abort(), localFetchTimeout);
+    activeHttpStreams.set(requestId, abortController);
 
     const localResponse = await fetch(localUrl, {
       method,
       headers: forwardHeaders,
-      body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
+      body: method !== 'GET' && method !== 'HEAD' ? requestBody : undefined,
       redirect: 'manual', // Don't follow redirects automatically
       signal: abortController.signal,
     }).finally(() => clearTimeout(localFetchTimer));
 
-    // Read response - use ArrayBuffer for binary content
-    const responseBuffer = await localResponse.arrayBuffer();
-    const responseBody = Buffer.from(responseBuffer).toString('base64');
     const responseHeaders: Record<string, string> = {};
     localResponse.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
 
-    // Send response back to server
-    ws.send(JSON.stringify({
-      type: "http_response",
-      requestId,
-      status: localResponse.status,
-      statusText: localResponse.statusText,
-      headers: responseHeaders,
-      body: responseBody,
-      isBase64: true,
-    }));
+    if (streaming) {
+      // Streaming path: send headers immediately, then relay body chunks as
+      // the local app produces them. This is what makes SSE and streaming SSR
+      // work through the tunnel, and removes the response-size ceiling.
+      ws.send(JSON.stringify({
+        type: "http_response_start",
+        requestId,
+        status: localResponse.status,
+        statusText: localResponse.statusText,
+        headers: responseHeaders,
+      }));
+      responseStarted = true;
 
-    console.log(`📤 ${localResponse.status} ${localResponse.statusText}`);
+      if (localResponse.body) {
+        for await (const chunk of localResponse.body as any) {
+          if (abortController.signal.aborted || ws.readyState !== 1) break;
+          await wsBufferDrained(ws);
+          ws.send(JSON.stringify({
+            type: "http_response_chunk",
+            requestId,
+            data: Buffer.from(chunk).toString('base64'),
+          }));
+        }
+      }
+
+      ws.send(JSON.stringify({ type: "http_response_end", requestId }));
+      console.log(`📤 ${localResponse.status} ${localResponse.statusText} (streamed)`);
+    } else {
+      // Legacy path (old server): buffer the whole response into one message
+      const responseBuffer = await localResponse.arrayBuffer();
+      const responseBody = Buffer.from(responseBuffer).toString('base64');
+
+      ws.send(JSON.stringify({
+        type: "http_response",
+        requestId,
+        status: localResponse.status,
+        statusText: localResponse.statusText,
+        headers: responseHeaders,
+        body: responseBody,
+        isBase64: true,
+      }));
+
+      console.log(`📤 ${localResponse.status} ${localResponse.statusText}`);
+    }
   } catch (error) {
+    const aborted = error instanceof Error && error.name === 'AbortError';
+    if (aborted && responseStarted) {
+      // Normal: the server told us the client went away mid-stream
+      console.log(`🛑 Response stream aborted [${requestId}]`);
+      return;
+    }
     console.error(`❌ Error forwarding request:`, error);
 
-    // Send error response
-    ws.send(JSON.stringify({
-      type: "http_response",
-      requestId: message.requestId,
-      status: 502,
-      statusText: "Bad Gateway",
-      headers: { "Content-Type": "text/plain" },
-      body: `Error connecting to local service: ${error instanceof Error ? error.message : String(error)}`,
-    }));
+    if (responseStarted) {
+      // Headers already sent — signal a mid-stream failure
+      try {
+        ws.send(JSON.stringify({
+          type: "http_response_error",
+          requestId,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+      } catch { /* socket gone */ }
+    } else {
+      // Send error response
+      ws.send(JSON.stringify({
+        type: "http_response",
+        requestId: message.requestId,
+        status: 502,
+        statusText: "Bad Gateway",
+        headers: { "Content-Type": "text/plain" },
+        body: `Error connecting to local service: ${error instanceof Error ? error.message : String(error)}`,
+      }));
+    }
+  } finally {
+    activeHttpStreams.delete(requestId);
   }
 }
 
@@ -633,6 +717,10 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   wsUrl.searchParams.set("serviceType", config.serviceType || 'port');
   wsUrl.searchParams.set("auth", config.authToken);
   wsUrl.searchParams.set("protocol", protocol);
+  // Advertise protocol capabilities: streaming HTTP responses and base64
+  // request bodies. Old servers ignore this; the server confirms its own
+  // support via `features` in the welcome message.
+  wsUrl.searchParams.set("caps", "stream,b64body");
   if (config.organizationId) {
     wsUrl.searchParams.set("organizationId", config.organizationId);
   }
@@ -766,6 +854,13 @@ async function connectAgent(config: ClientConfig): Promise<void> {
         console.log(`✨ ${message.message}`);
         console.log(`🆔 Agent ID: ${message.agentId}`);
 
+        // Record server capabilities (streaming responses, base64 bodies).
+        // Reset first — a reconnect may land on an older server.
+        serverFeatures.clear();
+        if (Array.isArray(message.features)) {
+          for (const f of message.features) serverFeatures.add(String(f));
+        }
+
         // Check if domain was modified due to conflict
         if (message.domainModified && message.domain) {
           console.log(`\n⚠️  Requested subdomain "${message.requestedDomain}" was taken`);
@@ -810,6 +905,14 @@ async function connectAgent(config: ClientConfig): Promise<void> {
       } else if (message.type === "http_request") {
         // Handle incoming HTTP request from server
         await handleHttpRequest(message, ws, config);
+      } else if (message.type === "http_response_abort") {
+        // Server no longer wants this response (client disconnected or the
+        // request timed out) — stop reading from the local service.
+        const controller = activeHttpStreams.get(message.requestId);
+        if (controller) {
+          controller.abort();
+          activeHttpStreams.delete(message.requestId);
+        }
       } else if (message.type === "ws_connect") {
         // Handle WebSocket connection request from server
         await handleWsConnect(message, ws, config);

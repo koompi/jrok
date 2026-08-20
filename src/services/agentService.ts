@@ -51,6 +51,7 @@ interface AgentConnection {
   groupId?: string;
   instanceId?: string;
   groupMode?: boolean;
+  caps?: string[]; // CLI capabilities (needed when Agent is rebuilt from this record)
 }
 
 export interface RegisterAgentOptions {
@@ -68,6 +69,7 @@ export interface RegisterAgentOptions {
   // Multi-agent group options
   groupMode?: boolean; // If true, join existing agents instead of taking over
   instanceId?: string; // Unique identifier for this agent instance in a group
+  caps?: string[]; // CLI capabilities advertised at connect (e.g. "stream", "b64body")
 }
 
 export interface RegisterAgentResult {
@@ -169,6 +171,7 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     isCustomDomain = false,
     groupMode = false,
     instanceId,
+    caps,
   } = options;
 
   const collections = getCollections();
@@ -292,6 +295,7 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     groupId,
     instanceId: effectiveInstanceId,
     groupMode,
+    caps,
   };
 
   if (groupMode && groupId) {
@@ -339,6 +343,7 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     groupId,
     instanceId: effectiveInstanceId,
     groupMode,
+    caps,
   };
 
   // Populate domain cache for fast O(1) lookup on every request
@@ -860,6 +865,7 @@ function connectionToAgent(conn: any): Agent {
     groupId: conn.groupId,
     instanceId: conn.instanceId,
     groupMode: conn.groupMode,
+    caps: conn.caps,
   };
 }
 

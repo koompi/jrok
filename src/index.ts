@@ -43,6 +43,49 @@ const pendingRequests = new Map<string, {
   tunnelId?: string;
 }>();
 
+// Streaming responses: agents that support the "stream" capability send
+// http_response_start / http_response_chunk / http_response_end instead of a
+// single buffered http_response. Entries live here from start until end/error.
+// This is what makes SSE, streaming SSR, and >16MB bodies work through the
+// tunnel — the browser starts receiving bytes as soon as the local app sends
+// them, instead of waiting for the agent to buffer the entire response.
+const streamingResponses = new Map<string, {
+  controller: ReadableStreamDefaultController<Uint8Array>;
+  agentWs: WebSocket;
+  agent: Agent;
+  tunnelId?: string;
+  bytesIn: number;
+  bytesOut: number;
+}>();
+
+function abortStreamingResponse(requestId: string, entry: { controller: ReadableStreamDefaultController<Uint8Array> }, reason: string) {
+  try {
+    entry.controller.error(new Error(reason));
+  } catch {
+    // Controller may already be closed/errored
+  }
+  streamingResponses.delete(requestId);
+}
+
+function finishStreamingBandwidth(entry: { agent: Agent; tunnelId?: string; bytesIn: number; bytesOut: number }) {
+  if (entry.agent.organizationId) {
+    statsService.recordBandwidth({
+      organizationId: entry.agent.organizationId,
+      tunnelId: entry.tunnelId,
+      agentId: entry.agent.id,
+      bytesIn: entry.bytesIn,
+      bytesOut: entry.bytesOut,
+      requests: 1,
+    }).catch(err => console.error("Failed to record bandwidth:", err));
+  }
+  // Streamed responses have no Content-Length, so the per-request tracking at
+  // the fetch handler sees 0 — account for monthly quota here instead.
+  securityService.trackMonthlyBandwidth(
+    entry.agent.apiKeyOrgId || entry.agent.organizationId || entry.agent.domain,
+    entry.bytesOut
+  );
+}
+
 // Memory safety: Limit pending requests to prevent memory exhaustion
 const MAX_PENDING_REQUESTS = 10000;
 
@@ -126,10 +169,31 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
       headers[key] = value;
     });
 
+    // Tell the local app it's actually being served over HTTPS on the tunnel
+    // domain. Without these, frameworks that build absolute URLs or validate
+    // request origin (Next.js, NextAuth, Rails, Django) see plain http on
+    // localhost and misbehave (http:// redirects, secure cookies dropped).
+    headers["x-forwarded-proto"] = "https";
+    if (headers["host"]) {
+      headers["x-forwarded-host"] = headers["host"];
+    }
+    if (clientIp && clientIp !== "unknown" && !headers["x-forwarded-for"]) {
+      headers["x-forwarded-for"] = clientIp;
+    }
+
     try {
-      // Read request body
-      const body = await req.text();
-      const bytesIn = new TextEncoder().encode(body).length +
+      // Read request body as raw bytes. Agents that advertise the "b64body"
+      // capability get it base64-encoded so binary payloads (file uploads,
+      // multipart/form-data) survive the JSON transport intact. Older agents
+      // fall back to the legacy lossy text path.
+      const bodyBuffer = Buffer.from(await req.arrayBuffer());
+      const agentSupportsB64 = agent.caps?.includes("b64body") ?? false;
+      const body = bodyBuffer.length === 0
+        ? ""
+        : agentSupportsB64
+          ? bodyBuffer.toString("base64")
+          : bodyBuffer.toString();
+      const bytesIn = bodyBuffer.length +
         new TextEncoder().encode(JSON.stringify(headers)).length;
 
       // Memory safety: Cleanup oldest request if map is full
@@ -150,6 +214,7 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
         query: reqUrl.search,
         headers,
         body,
+        bodyIsBase64: agentSupportsB64 && body.length > 0,
         clientIp: clientIp || "unknown",
       }));
     } catch (error) {
@@ -353,6 +418,10 @@ async function startServer() {
     // HTTP Server
     const server = Bun.serve({
       port: process.env.PORT ? parseInt(process.env.PORT) : 3000,
+      // Bun's default idleTimeout is 10s — it kills any client connection
+      // with no data flowing for 10s, which breaks slow SSR pages and quiet
+      // SSE streams mid-response. 255s is the maximum Bun allows.
+      idleTimeout: 255,
       websocket: {
         open(ws: any) {
           // Handle client-tunnel WebSocket (from browser/client to tunneled service)
@@ -386,6 +455,7 @@ async function startServer() {
           const isCustomDomain = ws.data?.isCustomDomain || false;
           const groupMode = ws.data?.groupMode || false;
           const instanceId = ws.data?.instanceId;
+          const caps = ws.data?.caps;
 
           if (!domain || !localPort) return;
 
@@ -404,6 +474,7 @@ async function startServer() {
             isCustomDomain,
             groupMode,
             instanceId,
+            caps,
           }).then(async ({ agent, finalDomain, wasModified, groupId, groupMemberCount }) => {
             const groupInfo = groupMode ? ` [GROUP: ${groupMemberCount} members]` : '';
             console.log(
@@ -438,6 +509,9 @@ async function startServer() {
               domain: finalDomain,
               requestedDomain: wasModified ? domain : undefined,
               domainModified: wasModified,
+              // Server capabilities: the CLI only streams responses when the
+              // server says it can handle them (safe rollout with old servers).
+              features: ["stream", "b64body"],
             };
 
             // Include group info if in group mode
@@ -527,6 +601,91 @@ async function startServer() {
               console.error(`❌ WebSocket error from agent [${wsId}]: ${error}`);
               if (wsId) {
                 wsProxyService.closeClientConnection(wsId, 1011, error || 'Internal error');
+              }
+            } else if (message.type === "http_response_start") {
+              // Streaming response: headers arrived — resolve the client request
+              // with a ReadableStream immediately; body chunks follow.
+              const pending = pendingRequests.get(message.requestId);
+              if (pending) {
+                clearTimeout(pending.timeout);
+                pendingRequests.delete(message.requestId);
+
+                const responseHeaders = new Headers(message.headers || {});
+                responseHeaders.set('X-Jrok-Agent-Id', pending.agent.id);
+                if (pending.agent.instanceId) {
+                  responseHeaders.set('X-Jrok-Instance-Id', pending.agent.instanceId);
+                }
+                // The agent's fetch already decompressed the body and the length
+                // changes as we re-stream it — these headers would now be wrong.
+                responseHeaders.delete('Content-Encoding');
+                responseHeaders.delete('Content-Length');
+                responseHeaders.delete('Transfer-Encoding');
+
+                const requestId = message.requestId;
+                const stream = new ReadableStream<Uint8Array>({
+                  start(controller) {
+                    streamingResponses.set(requestId, {
+                      controller,
+                      agentWs: ws,
+                      agent: pending.agent,
+                      tunnelId: pending.tunnelId,
+                      bytesIn: pending.bytesIn,
+                      bytesOut: 0,
+                    });
+                  },
+                  cancel() {
+                    // Client disconnected mid-stream — tell the agent to stop
+                    // reading from the local service and drop our state.
+                    streamingResponses.delete(requestId);
+                    try {
+                      ws.send(JSON.stringify({ type: "http_response_abort", requestId }));
+                    } catch {
+                      // Agent socket may be gone; nothing to abort then
+                    }
+                  },
+                });
+
+                pending.resolve(new Response(stream, {
+                  status: message.status || 200,
+                  statusText: message.statusText || "OK",
+                  headers: responseHeaders,
+                }));
+              } else {
+                // Request already timed out — tell the agent not to bother streaming
+                try {
+                  ws.send(JSON.stringify({ type: "http_response_abort", requestId: message.requestId }));
+                } catch { /* ignore */ }
+              }
+            } else if (message.type === "http_response_chunk") {
+              const entry = streamingResponses.get(message.requestId);
+              if (entry && typeof message.data === 'string') {
+                const chunk = Buffer.from(message.data, 'base64');
+                entry.bytesOut += chunk.length;
+                try {
+                  entry.controller.enqueue(new Uint8Array(chunk));
+                } catch {
+                  // Stream already closed (client gone) — drop state, abort agent side
+                  streamingResponses.delete(message.requestId);
+                  try {
+                    ws.send(JSON.stringify({ type: "http_response_abort", requestId: message.requestId }));
+                  } catch { /* ignore */ }
+                }
+              }
+            } else if (message.type === "http_response_end") {
+              const entry = streamingResponses.get(message.requestId);
+              if (entry) {
+                streamingResponses.delete(message.requestId);
+                try {
+                  entry.controller.close();
+                } catch { /* already closed */ }
+                finishStreamingBandwidth(entry);
+              }
+            } else if (message.type === "http_response_error") {
+              const entry = streamingResponses.get(message.requestId);
+              if (entry) {
+                console.error(`❌ Agent stream error [${message.requestId}]: ${message.error}`);
+                finishStreamingBandwidth(entry);
+                abortStreamingResponse(message.requestId, entry, message.error || 'Agent stream error');
               }
             } else if (message.type === "http_response") {
               // Handle HTTP response from agent
@@ -630,6 +789,15 @@ async function startServer() {
           // Handle agent WebSocket close
           const agentId = agentService.getAgentIdBySocket(ws);
           const clientIp = ws.data?.clientIp || "unknown";
+
+          // Abort any in-flight streaming responses owned by this agent so
+          // clients get a clean error instead of a connection that hangs open.
+          for (const [requestId, entry] of streamingResponses.entries()) {
+            if (entry.agentWs === ws) {
+              finishStreamingBandwidth(entry);
+              abortStreamingResponse(requestId, entry, 'Agent disconnected mid-response');
+            }
+          }
 
           // ALWAYS unregister from monitoring service to prevent connection count leak
           monitoringService.unregisterAgentConnection(clientIp);
