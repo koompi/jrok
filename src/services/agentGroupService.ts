@@ -244,18 +244,65 @@ export async function updateMemberHealth(agentId: string, healthy: boolean): Pro
 /**
  * Increment active connections for a member
  */
-export async function incrementMemberConnections(agentId: string): Promise<void> {
+// Outstanding increments this process has issued, per agent. Only the
+// 'least-connections' strategy reads activeConnections, so we only pay for the
+// counter when something actually consumes it — but once we HAVE incremented,
+// the matching decrement must still run, or the counter drifts upward forever
+// and that member stops being selected. This map is what keeps the pair honest
+// without needing a group lookup on the decrement path.
+const outstandingConnectionIncrements = new Map<string, number>();
+
+/**
+ * Increment active connections for a member.
+ *
+ * No-op unless the group actually balances on connection count. This runs on
+ * EVERY request through a grouped domain, and every kconsole HTTP tunnel is
+ * grouped — so for the default round-robin strategy this was a MongoDB write
+ * per request that nothing ever read. Paired with the decrement below, that was
+ * two wasted writes per request, competing with the agent heartbeat writes whose
+ * delay expires agentConnections records and gets healthy tunnels killed
+ * (see Fix-065).
+ */
+export async function incrementMemberConnections(
+  agentId: string,
+  strategy?: LoadBalanceStrategy
+): Promise<void> {
+  if (strategy !== 'least-connections') return;
+
   const collections = getCollections();
   await collections.agentGroupMembers.updateOne(
     { agentId },
     { $inc: { activeConnections: 1 } }
   );
+  outstandingConnectionIncrements.set(
+    agentId,
+    (outstandingConnectionIncrements.get(agentId) ?? 0) + 1
+  );
 }
 
 /**
- * Decrement active connections for a member
+ * Decrement active connections for a member.
+ *
+ * Only writes if THIS process actually issued a matching increment, so the
+ * write disappears alongside the increment for strategies that don't balance on
+ * connection count — without the caller needing to know the strategy (the
+ * request-completion path in index.ts doesn't, and looking it up there would
+ * just trade one query for another).
+ *
+ * Guarding on our own outstanding count also stops the counter being driven
+ * negative by unmatched decrements, which would permanently bias
+ * least-connections selection toward that member.
  */
 export async function decrementMemberConnections(agentId: string): Promise<void> {
+  const outstanding = outstandingConnectionIncrements.get(agentId) ?? 0;
+  if (outstanding <= 0) return;
+
+  if (outstanding === 1) {
+    outstandingConnectionIncrements.delete(agentId);
+  } else {
+    outstandingConnectionIncrements.set(agentId, outstanding - 1);
+  }
+
   const collections = getCollections();
   await collections.agentGroupMembers.updateOne(
     { agentId },
@@ -347,8 +394,9 @@ export async function selectAgent(domain: string): Promise<Agent | null> {
   console.log(`⚖️  Selected: instanceId=${selectedMember.instanceId}, agentId=${selectedMember.agentId}, agentFound=${!!agent}`);
 
   if (agent) {
-    // Track connection for least-connections strategy
-    await incrementMemberConnections(selectedMember.agentId);
+    // Track connection for least-connections strategy. No-op for every other
+    // strategy — nothing else reads activeConnections.
+    await incrementMemberConnections(selectedMember.agentId, group.strategy);
   }
 
   return agent;

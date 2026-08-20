@@ -5,9 +5,11 @@
  * routing HTTP requests to the correct server where the agent WebSocket is connected.
  */
 
-import { 
-  getAgentServerInfo, 
+import {
+  getAgentServerInfo,
   getAllAgentsAsync,
+  getAgentByDomainLocal,
+  getAgentSocket,
   currentServerId as SERVER_ID,
   currentServerHost as SERVER_HOST,
   currentServerPort as SERVER_PORT,
@@ -298,11 +300,35 @@ export async function getClusterStats(): Promise<{
  */
 export async function findServerForDomain(subdomain: string): Promise<RouteResult> {
   const collections = getCollections();
-  
+
+  // FAST PATH: if we already hold a live WebSocket for this domain, the agent is
+  // on THIS server by definition — no database round trip can tell us anything
+  // we don't already know from the socket in our own hand.
+  //
+  // This is an exact check, not a cached guess: `localDomainCache` is populated
+  // when an agent registers here and cleared when it disconnects, and we further
+  // require the socket to be OPEN. A stale entry therefore falls through to the
+  // MongoDB path below rather than routing wrongly.
+  //
+  // This matters because findServerForDomain runs on EVERY tunneled request. On
+  // a single-node deployment it was a guaranteed Mongo query per request; on a
+  // multi-node one it's still the common case, since traffic usually reaches the
+  // node holding the agent. Those queries competed with agent heartbeat writes —
+  // and a starved heartbeat is what expires an agentConnections record and gets
+  // a healthy tunnel killed (see Fix-065). Cutting this query protects tunnel
+  // liveness as much as it protects throughput.
+  const localAgent = getAgentByDomainLocal(subdomain);
+  if (localAgent) {
+    const ws = getAgentSocket(localAgent.id);
+    if (ws && ws.readyState === 1) {
+      return { isLocal: true };
+    }
+  }
+
   // First check agentConnections (most reliable for active connections)
-  const agentConn = await collections.agentConnections.findOne({ 
-    domain: subdomain, 
-    active: true 
+  const agentConn = await collections.agentConnections.findOne({
+    domain: subdomain,
+    active: true
   });
   
   if (agentConn) {
