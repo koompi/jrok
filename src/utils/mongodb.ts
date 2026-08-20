@@ -186,6 +186,29 @@ async function createSecurityIndexes(): Promise<void> {
   await createDistributedStateIndexes();
 }
 
+// =============================================================================
+// AGENT LIVENESS THRESHOLDS
+// =============================================================================
+// These two MUST stay ordered: the database must never forget an agent before
+// the application does.
+//
+// They used to drift — the Mongo TTL expired agentConnections at 120s while the
+// app-level sweep only disconnected at 150s. That left a 30s window where an
+// agent still held a healthy open socket but its record was already gone, so
+// domain lookups missed and jrok served its maintenance page stamped
+// `X-Jrok-Tunnel: down`. The deploy worker treats that header as authoritative
+// and killed a perfectly healthy tunnel. Since every heartbeat is a Mongo
+// write, the window opened precisely when Mongo was under load.
+//
+// Heartbeats arrive every 15s, so the sweep below tolerates 10 consecutive
+// misses before declaring an agent stale.
+export const AGENT_STALE_MS = parseInt(process.env.AGENT_STALE_MS || "150000");
+
+// The TTL is only a safety net for records whose owning server died without
+// cleaning up. Derived from the sweep so it can never again be the first to
+// fire — change AGENT_STALE_MS and this follows.
+export const AGENT_CONNECTION_TTL_SECONDS = Math.ceil((AGENT_STALE_MS * 2) / 1000);
+
 // Helper to safely create an index, dropping conflicting ones first
 async function safeCreateIndex(
   collection: Collection,
@@ -236,8 +259,16 @@ export async function createDistributedStateIndexes(): Promise<void> {
   await safeCreateIndex(collections.agentConnections, { domain: 1 });
   await safeCreateIndex(collections.agentConnections, { serverId: 1 });
   await safeCreateIndex(collections.agentConnections, { organizationId: 1 });
-  // Auto-expire stale connections after 2 minutes of no heartbeat
-  await safeCreateIndex(collections.agentConnections, { lastHeartbeat: 1 }, { expireAfterSeconds: 120 });
+  // Safety net for records orphaned by a server that died without cleanup.
+  // Must expire AFTER the app-level sweep (AGENT_STALE_MS) — see the comment
+  // on these constants above; the two firing out of order used to kill healthy
+  // tunnels. safeCreateIndex drops and recreates on an options conflict, so
+  // changing this value does take effect on existing deployments.
+  await safeCreateIndex(
+    collections.agentConnections,
+    { lastHeartbeat: 1 },
+    { expireAfterSeconds: AGENT_CONNECTION_TTL_SECONDS }
+  );
 
   // TCP port allocations - distributed port management
   await safeCreateIndex(collections.tcpPortAllocations, { port: 1, serverId: 1 }, { unique: true });

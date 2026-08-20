@@ -18,7 +18,7 @@ import * as securityService from "./services/securityService";
 import * as crossServerService from "./services/crossServerService";
 import * as certSyncService from "./services/certificateSyncService";
 import * as monitoringService from "./services/monitoringService";
-import { connectDatabase, closeDatabase, createDistributedStateIndexes, cleanupStaleConnectionsOnStartup } from "./utils/mongodb";
+import { connectDatabase, closeDatabase, createDistributedStateIndexes, cleanupStaleConnectionsOnStartup, AGENT_STALE_MS } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { purgeExpiredCaches } from "./utils/database";
 import { initTelegram } from "./services/notificationService";
@@ -2155,11 +2155,13 @@ async function startServer() {
       }
     }, 30_000);
 
-    // Cleanup stale agents every 30 seconds
-    // Disconnect if no heartbeat for 150 seconds (allows 10 missed 15s heartbeats)
-    // This provides better resilience for long-running idle tunnels
+    // Cleanup stale agents every 30 seconds.
+    // AGENT_STALE_MS (default 150s) allows 10 missed 15s heartbeats, which gives
+    // long-running idle tunnels room to survive a blip. The Mongo TTL on
+    // agentConnections is derived from this same constant so the database can
+    // never expire a record before this sweep runs — see utils/mongodb.ts.
     setInterval(() => {
-      agentService.disconnectStaleAgents(150000);
+      agentService.disconnectStaleAgents(AGENT_STALE_MS);
     }, 30000);
 
     // Cleanup expired tunnels every 5 minutes

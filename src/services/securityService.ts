@@ -717,7 +717,16 @@ export function trackTcpConnection(
     if (isOpen) {
       tcpConnectionsPerClient.set(clientKey, clientCurrent + 1);
     } else {
-      tcpConnectionsPerClient.set(clientKey, Math.max(0, clientCurrent - 1));
+      // Drop the key at zero instead of leaving a 0 behind. This map is keyed
+      // by client IP, so retaining spent entries meant one slot per remote IP
+      // that ever opened a TCP connection — unbounded growth on a public
+      // endpoint, which sees continuous internet scanning.
+      const next = clientCurrent - 1;
+      if (next > 0) {
+        tcpConnectionsPerClient.set(clientKey, next);
+      } else {
+        tcpConnectionsPerClient.delete(clientKey);
+      }
     }
   }
 }
@@ -1282,6 +1291,12 @@ function incrementBandwidth(
 // Track suspicious patterns
 const suspiciousPatterns = new Map<string, { count: number; firstSeen: number }>();
 
+// How long an abuse-pattern entry stays relevant. Entries older than this are
+// swept in cleanupExpiredEntries — without that sweep this map grows forever,
+// since a key is only deleted when its IP actually crosses a block threshold.
+// Every scanner that probes once and leaves used to occupy a slot permanently.
+const ABUSE_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
 /**
  * Detect potential abuse patterns
  */
@@ -1292,11 +1307,10 @@ export function detectAbuse(
 ): void {
   const key = `${ip}:${pattern}`;
   const now = Date.now();
-  const WINDOW_MS = 5 * 60 * 1000; // 5 minutes
 
   const entry = suspiciousPatterns.get(key);
 
-  if (!entry || now - entry.firstSeen > WINDOW_MS) {
+  if (!entry || now - entry.firstSeen > ABUSE_WINDOW_MS) {
     suspiciousPatterns.set(key, { count: 1, firstSeen: now });
     return;
   }
@@ -1443,10 +1457,21 @@ export function cleanupExpiredEntries(): void {
 
   // Cleanup old suspicious patterns
   for (const [key, entry] of suspiciousPatterns.entries()) {
-    if (now - entry.firstSeen > 5 * 60 * 1000) suspiciousPatterns.delete(key);
+    if (now - entry.firstSeen > ABUSE_WINDOW_MS) suspiciousPatterns.delete(key);
   }
 
-  console.log(`🧹 Security cleanup: httpBuckets=${httpTokenBuckets.size} tcpBuckets=${tcpTokenBuckets.size} blocked=${blockedIps.size}`);
+  // Safety net for per-client TCP connection counts. These are keyed by client
+  // IP and are now deleted at zero on the decrement path, but a connection that
+  // closes without its handler running would otherwise strand a slot forever —
+  // and on a public endpoint that means one slot per scanning IP.
+  for (const [key, count] of tcpConnectionsPerClient.entries()) {
+    if (count <= 0) tcpConnectionsPerClient.delete(key);
+  }
+
+  console.log(
+    `🧹 Security cleanup: httpBuckets=${httpTokenBuckets.size} tcpBuckets=${tcpTokenBuckets.size} ` +
+    `blocked=${blockedIps.size} abuse=${suspiciousPatterns.size} tcpClients=${tcpConnectionsPerClient.size}`
+  );
 }
 
 // ============ Initialization ============
