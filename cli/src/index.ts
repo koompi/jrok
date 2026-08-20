@@ -13,7 +13,7 @@ import { createInterface } from 'readline';
 import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 
-const VERSION = "2.5.0"; // Streaming HTTP responses + binary-safe bodies (capability-negotiated)
+const VERSION = "2.7.0"; // Streaming HTTP responses + binary-safe bodies (capability-negotiated)
 const DEFAULT_SERVER = "https://tunnel.koompi.cloud";
 const GITHUB_API = "https://api.github.com/repos/koompi/jrok";
 const GITHUB_RAW = "https://raw.githubusercontent.com/koompi/jrok";

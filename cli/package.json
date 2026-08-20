@@ -1,6 +1,6 @@
 {
   "name": "jrok",
-  "version": "2.5.0",
+  "version": "2.7.0",
   "description": "Expose local services (ports, Docker, Kubernetes) to the internet via secure reverse proxy with WebSocket and TCP tunnel support",
   "main": "dist/index.js",
   "bin": {
