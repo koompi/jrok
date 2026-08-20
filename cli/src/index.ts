@@ -13,7 +13,7 @@ import { createInterface } from 'readline';
 import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 
-const VERSION = "2.4.0"; // Updated for TCP tunnel support (SSH, MongoDB, etc.)
+const VERSION = "2.5.0"; // Streaming HTTP responses + binary-safe bodies (capability-negotiated)
 const DEFAULT_SERVER = "https://tunnel.koompi.cloud";
 const GITHUB_API = "https://api.github.com/repos/koompi/jrok";
 const GITHUB_RAW = "https://raw.githubusercontent.com/koompi/jrok";
@@ -340,6 +340,29 @@ const HOP_BY_HOP_HEADERS = new Set([
   'te', 'trailers', 'transfer-encoding', 'upgrade',
   'content-length', // Let fetch handle this
 ]);
+
+// Reconnect backoff state.
+//
+// This MUST live outside connectAgent: reconnecting calls connectAgent again,
+// so a counter declared inside it was reset to 0 on every attempt and the
+// "exponential" backoff was a flat 5s forever, with no jitter and no ceiling on
+// attempts. A jrok restart therefore had every agent in the fleet retrying in
+// lockstep every 5 seconds, which kept the server saturated and prolonged
+// exactly the outage it was trying to recover from.
+let reconnectAttempts = 0;
+
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30000;
+
+/**
+ * Equal-jitter exponential backoff: half the window is fixed, half is random.
+ * The randomness is what actually breaks up the thundering herd — a fleet of
+ * agents reconnecting after a server restart must not arrive together.
+ */
+function nextReconnectDelayMs(attempt: number): number {
+  const capped = Math.min(RECONNECT_BASE_MS * 2 ** (attempt - 1), RECONNECT_MAX_MS);
+  return Math.round(capped / 2 + Math.random() * (capped / 2));
+}
 
 // Server capabilities from the welcome message. Streaming responses are only
 // used when the server advertises support — otherwise fall back to the legacy
@@ -779,7 +802,6 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   let heartbeatInterval: NodeJS.Timeout;
   let pingInterval: NodeJS.Timeout;
   let watchdogInterval: NodeJS.Timeout;
-  let reconnectAttempts = 0;
   let reconnectScheduled = false;
 
   // Last time we saw ANY sign of life from the server (pong, heartbeat_ack, or
@@ -853,6 +875,12 @@ async function connectAgent(config: ClientConfig): Promise<void> {
       if (message.type === "welcome") {
         console.log(`✨ ${message.message}`);
         console.log(`🆔 Agent ID: ${message.agentId}`);
+
+        // Backoff resets only once the server has actually accepted us — not
+        // merely on TCP connect, which succeeds against a server that is up but
+        // still failing to register agents, and would keep us hammering it at
+        // the minimum delay.
+        reconnectAttempts = 0;
 
         // Record server capabilities (streaming responses, base64 bodies).
         // Reset first — a reconnect may land on an older server.
@@ -956,7 +984,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
     reconnectScheduled = true;
 
     reconnectAttempts++;
-    const delay = Math.min(5000 * reconnectAttempts, 30000); // Max 30s delay
+    const delay = nextReconnectDelayMs(reconnectAttempts);
 
     // Close all local WebSocket connections
     for (const [wsId, localWs] of localWsConnections.entries()) {
