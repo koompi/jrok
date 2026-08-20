@@ -24,6 +24,35 @@ const TCP_PORT_MIN = parseInt(process.env.TCP_PORT_MIN || "10000");
 const TCP_PORT_MAX = parseInt(process.env.TCP_PORT_MAX || "20000");
 
 // =============================================================================
+// FLOW CONTROL
+// =============================================================================
+// A TCP tunnel bridges two links with independent speeds. Without flow control
+// the faster side's data piles up in this process's heap until the box runs out
+// of memory — and because this is a shared multi-tenant server, one customer
+// with a slow client could take down every other customer's tunnel.
+//
+// Note this is memory pressure, not throughput: a single large transfer to one
+// slow reader is enough. Volume of tunnels is not what triggers it.
+
+// Public client -> agent. When the agent's WebSocket has this much queued, we
+// pause reading from the public socket; the kernel then shrinks its receive
+// window and the remote sender slows down on its own. Resumed on drain.
+const WS_HIGH_WATER_MARK = 8 * 1024 * 1024; // 8MB
+const WS_DRAIN_POLL_MS = 20;
+
+// Agent -> public client. socket.write() returns false once Node is buffering,
+// but the agent has no flow-control message to obey, so we cap how much may
+// accumulate. A connection past this cap is genuinely pathological (a reader
+// that has effectively stopped) and is dropped rather than allowed to consume
+// the server's heap.
+const CLIENT_WRITE_LIMIT = 16 * 1024 * 1024; // 16MB
+
+// Bytes may arrive before the agent confirms the connection. That window is
+// short, so this bound is generous — but it must exist, or a client that
+// blasts data at a tunnel whose agent never answers grows the heap unchecked.
+const PRECONNECT_BUFFER_LIMIT = 4 * 1024 * 1024; // 4MB
+
+// =============================================================================
 // LOCAL STATE (must be per-server for socket management)
 // =============================================================================
 
@@ -416,6 +445,29 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
       remotePort: clientSocket.remotePort,
     }));
 
+    // Tracks how many bytes are sitting in dataBuffer, so the pre-connect
+    // window is bounded without walking the array on every packet.
+    let bufferedBytes = 0;
+    let paused = false;
+
+    // Pause reading from the public socket while the agent's WebSocket is
+    // backed up. The kernel shrinks the receive window and the remote sender
+    // throttles itself — real backpressure, rather than us buffering for it.
+    const resumeWhenDrained = () => {
+      const ws = agentConnections.get(allocation.agentId);
+      if (!ws || ws.readyState !== 1) {
+        // Agent went away while we were paused; nothing left to drain into.
+        clientSocket.destroy();
+        return;
+      }
+      if (ws.bufferedAmount < WS_HIGH_WATER_MARK) {
+        paused = false;
+        clientSocket.resume();
+        return;
+      }
+      setTimeout(resumeWhenDrained, WS_DRAIN_POLL_MS);
+    };
+
     clientSocket.on('data', (data: Buffer) => {
       totalBytesIn += data.length;
       securityService.trackTcpBandwidth(allocation.tunnelId, allocation.organizationId, data.length);
@@ -428,7 +480,19 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
       }
 
       if (!isAgentConnected) {
+        // Bounded: a client that floods a tunnel whose agent never confirms
+        // must not be able to grow this process's heap without limit.
+        if (bufferedBytes + data.length > PRECONNECT_BUFFER_LIMIT) {
+          console.warn(
+            `🚫 TCP [${connectionId}] exceeded ${PRECONNECT_BUFFER_LIMIT} bytes buffered before the agent connected — dropping connection`
+          );
+          dataBuffer = [];
+          bufferedBytes = 0;
+          clientSocket.destroy();
+          return;
+        }
         dataBuffer.push(data);
+        bufferedBytes += data.length;
         return;
       }
 
@@ -439,6 +503,12 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
           connectionId,
           data: data.toString('base64'),
         }));
+
+        if (!paused && ws.bufferedAmount >= WS_HIGH_WATER_MARK) {
+          paused = true;
+          clientSocket.pause();
+          setTimeout(resumeWhenDrained, WS_DRAIN_POLL_MS);
+        }
       } else {
         clientSocket.end();
       }
@@ -475,6 +545,7 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
           }
         }
         dataBuffer = [];
+        bufferedBytes = 0;
       },
     });
   });
@@ -527,6 +598,24 @@ export function handleAgentTcpData(connectionId: string, data: string): void {
   try {
     const buffer = Buffer.from(data, 'base64');
     conn.socket.write(buffer);
+
+    // The agent has no flow-control message to obey, so we can't ask it to slow
+    // down. What we can do is refuse to hoard bytes on its behalf: once Node is
+    // buffering more than the cap for a client that has effectively stopped
+    // reading, drop that one connection instead of letting it consume the heap
+    // shared by every other tenant on this server.
+    if (conn.socket.writableLength > CLIENT_WRITE_LIMIT) {
+      console.warn(
+        `🚫 TCP [${connectionId}] client is not draining (${conn.socket.writableLength} bytes queued > ${CLIENT_WRITE_LIMIT}) — dropping connection`
+      );
+      conn.socket.destroy();
+      tcpConnections.delete(connectionId);
+
+      const ws = agentConnections.get(conn.allocation.agentId);
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "tcp_close", connectionId }));
+      }
+    }
   } catch (error) {
     console.error(`❌ Failed to write TCP data [${connectionId}]:`, error);
   }
