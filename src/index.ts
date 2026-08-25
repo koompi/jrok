@@ -26,6 +26,39 @@ import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
 import * as planLimitService from "./services/planLimitService";
 
+// =============================================================================
+// PROCESS-LEVEL SURVIVAL
+// =============================================================================
+// This process is the ingress for every tunnel. If it exits, every customer's
+// site goes down at once — so an error it could have survived is far more
+// costly here than in an ordinary service.
+//
+// Bun terminates on an unhandled promise rejection, where Node only warns. The
+// MongoDB driver rejects from inside its connection pool during a background
+// reconnect, with no caller awaiting it: a transient Atlas timeout therefore
+// killed the whole service, well outside any try/catch, with
+// `Socket 'secureConnect' timed out after 30018ms` as the only clue.
+//
+// These handlers are deliberately broad. Staying up with a logged error beats
+// dropping every tunnel, and the alternative — classifying which driver errors
+// are recoverable — is guesswork that fails closed at the worst moment. The
+// tradeoff is real: a genuinely corrupt state now persists instead of being
+// cleared by a restart, so these MUST be loud, and the health endpoint is what
+// should decide whether a restart is warranted.
+process.on("unhandledRejection", (reason: any) => {
+  console.error(
+    "🚨 Unhandled rejection (process kept alive):",
+    reason?.stack || reason?.message || reason
+  );
+});
+
+process.on("uncaughtException", (err: any) => {
+  console.error(
+    "🚨 Uncaught exception (process kept alive):",
+    err?.stack || err?.message || err
+  );
+});
+
 // Module-level constants — created once, never re-allocated per request
 const WS_SKIP_HEADERS = new Set(['upgrade', 'connection', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions']);
 

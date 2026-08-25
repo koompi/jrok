@@ -38,7 +38,33 @@ let collections: Collections;
 export async function connectDatabase(): Promise<void> {
   const mongoUri = process.env.MONGODB_URI || "mongodb://localhost:27017/jrok";
 
-  client = new MongoClient(mongoUri);
+  // Explicit resilience options. The default client waits 30s to select a
+  // server and surfaces pool failures as rejections nobody is awaiting — which
+  // under Bun terminates the process, taking every tunnel with it. Failing fast
+  // and retrying is strictly better than a 30s stall followed by a crash.
+  client = new MongoClient(mongoUri, {
+    serverSelectionTimeoutMS: 10000,
+    connectTimeoutMS: 10000,
+    heartbeatFrequencyMS: 10000,
+    maxPoolSize: 20,
+    minPoolSize: 1,
+    retryWrites: true,
+    retryReads: true,
+  });
+
+  // The driver emits pool and topology errors on the client. WITHOUT a listener
+  // these can surface as unhandled rejections, and a background reconnect
+  // (connectionGeneration > 0) happens far outside the try/catch below — which
+  // is exactly how a transient Atlas blip killed the whole service.
+  client.on("error", (err) => {
+    console.error("⚠️ MongoDB client error (continuing):", err?.message || err);
+  });
+  client.on("serverHeartbeatFailed", (ev: any) => {
+    console.warn(`⚠️ MongoDB heartbeat failed: ${ev?.failure?.message || "unknown"}`);
+  });
+  client.on("topologyClosed", () => {
+    console.warn("⚠️ MongoDB topology closed");
+  });
 
   try {
     await client.connect();
