@@ -3,6 +3,7 @@ import * as agentService from "../services/agentService";
 import { validateApiKeyForAgent } from "../services/authService";
 import * as monitoringService from "../services/monitoringService";
 import * as planLimitService from "../services/planLimitService";
+import { PROXY_MODE } from "../config/proxyMode";
 import * as securityService from "../services/securityService";
 import * as db from "../utils/database";
 
@@ -88,7 +89,10 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   const planLimitOrgId = authResult.organizationId;
 
   // ====== PLAN LIMIT CHECK: Tunnel Count ======
-  if (planLimitOrgId) {
+  // Proxy mode skips these entirely — kconsole decides who may run how many
+  // tunnels; jrok just carries the traffic. checkTunnelLimit alone cost three
+  // MongoDB queries per agent connect.
+  if (!PROXY_MODE && planLimitOrgId) {
     console.log(`[AgentHandler] Checking tunnel limit for org: ${planLimitOrgId}, domain: ${domain}, effectiveOrg: ${effectiveOrgId}`);
     const tunnelLimit = await planLimitService.checkTunnelLimit(planLimitOrgId, domain, instanceId || undefined);
     if (!tunnelLimit.allowed) {

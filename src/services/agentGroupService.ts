@@ -13,10 +13,14 @@ import * as agentService from "./agentService";
 // Local cache for round-robin counters (per group)
 const roundRobinCounters = new Map<string, number>();
 
-// Short-lived cache for isGroupedDomain checks — eliminates MongoDB query on every request.
-// TTL is intentionally short (5s) so that newly created/deleted groups are picked up quickly.
+// Cache for isGroupedDomain checks — eliminates a MongoDB query on every request.
+// Both group creation (createOrJoinGroup) and deletion invalidate the entry for
+// their domain, so the TTL only has to cover changes made outside this process
+// (another node in the cluster); it does not need to be short for correctness.
+// It used to be 5s, which meant one request in every 5-second window per domain
+// still paid a database round trip on the proxy path for no benefit.
 const groupedDomainCache = new Map<string, { result: boolean; expires: number }>();
-const GROUP_DOMAIN_CACHE_TTL = 5_000; // 5 seconds
+const GROUP_DOMAIN_CACHE_TTL = 60_000; // 60 seconds
 
 // =============================================================================
 // GROUP MANAGEMENT
@@ -153,15 +157,25 @@ export async function addAgentToGroup(
     { upsert: true }
   );
 
-  // Update group's agent list and count
-  await collections.agentGroups.updateOne(
+  // Update group's agent list and count. findOneAndUpdate (rather than
+  // updateOne) so we get the domain back without a second query — the
+  // isGroupedDomain cache must be invalidated here, not just in
+  // getOrCreateGroup: creating a group leaves it with zero agents, so a request
+  // arriving in between caches "not a group" and would otherwise keep routing
+  // around the load balancer until the entry expired.
+  const updated = await collections.agentGroups.findOneAndUpdate(
     { id: groupId },
     {
       $addToSet: { agentIds: agentId },
       $inc: { activeAgentCount: 1 },
       $set: { updatedAt: Date.now() }
-    }
+    },
+    { returnDocument: 'after' }
   );
+
+  if (updated?.domain) {
+    groupedDomainCache.delete(updated.domain);
+  }
 
   console.log(`➕ Agent ${agentId} (instance: ${instanceId}) joined group ${groupId}`);
 
@@ -193,6 +207,10 @@ export async function removeAgentFromGroup(agentId: string): Promise<void> {
     },
     { returnDocument: 'after' }
   );
+
+  if (updateResult?.domain) {
+    groupedDomainCache.delete(updateResult.domain);
+  }
 
   console.log(`➖ Agent ${agentId} left group ${groupId}`);
 

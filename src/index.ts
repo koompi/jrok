@@ -25,6 +25,7 @@ import { initTelegram } from "./services/notificationService";
 import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
 import * as planLimitService from "./services/planLimitService";
+import { PROXY_MODE } from "./config/proxyMode";
 
 // =============================================================================
 // PROCESS-LEVEL SURVIVAL
@@ -361,6 +362,21 @@ async function requireSuperAdmin(req: Request): Promise<Response | null> {
   }
 
   return null; // Auth passed
+}
+
+/**
+ * Auth for the suspension endpoints: a super-admin session, or a shared secret
+ * that kconsole holds. kconsole calls these machine-to-machine (it meters usage
+ * and decides who to cut off), so it needs an auth path that isn't a user login.
+ * Set JROK_ADMIN_KEY; falls back to API_KEY.
+ */
+async function requireAdminOrServerKey(req: Request): Promise<Response | null> {
+  const serverKey = process.env.JROK_ADMIN_KEY || config.apiKey;
+  const presented = req.headers.get("x-admin-key");
+  if (presented && serverKey && presented === serverKey) {
+    return null;
+  }
+  return requireSuperAdmin(req);
 }
 
 // Register local VPS server on startup
@@ -885,7 +901,7 @@ async function startServer() {
         const corsHeaders: Record<string, string> = {
           "Access-Control-Allow-Origin": corsOrigin || allowedOrigins[0],
           "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key, X-Admin-Key",
           "Access-Control-Max-Age": "86400", // Cache preflight for 24 hours
         };
 
@@ -1355,6 +1371,58 @@ async function startServer() {
                 serverId: a.serverId,
               })),
             }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // ============ Suspension Endpoints (kconsole enforcement) ============
+        //
+        // jrok no longer computes quotas — kconsole meters usage and decides
+        // who gets cut off, then pushes the verdict here. Suspensions are held
+        // in memory so the request path stays free of I/O; kconsole re-pushes
+        // active suspensions after a jrok restart.
+
+        if (path === "/security/suspensions" && method === "GET") {
+          const authError = await requireAdminOrServerKey(req);
+          if (authError) return addCors(authError);
+          return addCors(new Response(
+            JSON.stringify({ success: true, ...securityService.getSuspensions() }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        if (path === "/security/suspensions" && method === "POST") {
+          const authError = await requireAdminOrServerKey(req);
+          if (authError) return addCors(authError);
+          const body = await req.json() as { organizationId?: string; domain?: string; reason?: string };
+          if (!body.organizationId && !body.domain) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Provide organizationId or domain" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          if (body.organizationId) securityService.suspendOrganization(body.organizationId, body.reason);
+          if (body.domain) securityService.suspendDomain(body.domain, body.reason);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: "Suspended" }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        if (path === "/security/suspensions" && method === "DELETE") {
+          const authError = await requireAdminOrServerKey(req);
+          if (authError) return addCors(authError);
+          const body = await req.json() as { organizationId?: string; domain?: string };
+          if (!body.organizationId && !body.domain) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Provide organizationId or domain" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          if (body.organizationId) securityService.unsuspendOrganization(body.organizationId);
+          if (body.domain) securityService.unsuspendDomain(body.domain);
+          return addCors(new Response(
+            JSON.stringify({ success: true, message: "Unsuspended" }),
             { status: 200, headers: { "Content-Type": "application/json" } }
           ));
         }
@@ -1838,12 +1906,32 @@ async function startServer() {
           // Get User-Agent for layered client identification (differentiates devices on same IP)
           const userAgent = req.headers.get("user-agent") || undefined;
 
-          // Get plan tier for rate limit calculation (defaults to 'free')
-          // Use API key's org (apiKeyOrgId) for plan limits, not the tunnel owner's org
-          const planTier = agent.apiKeyOrgId ? (await planLimitService.getOrganizationPlan(agent.apiKeyOrgId)).tier : 'free';
+          // Plan tier only exists to scale jrok's own rate limits. In proxy mode
+          // there are none, so skip the lookup entirely rather than resolving a
+          // multiplier nothing will read.
+          const planTier = (!PROXY_MODE && agent.apiKeyOrgId)
+            ? (await planLimitService.getOrganizationPlan(agent.apiKeyOrgId)).tier
+            : 'free';
 
-          // Check security limits (rate limits) with layered client identification
-          // This uses Token Bucket algorithm to allow burst while preventing abuse
+          // Suspension is kconsole's enforcement lever: it meters bandwidth and
+          // pricing, and pushes a suspension here when an org must be cut off.
+          // Two Map lookups, no I/O.
+          const suspension = securityService.checkSuspension(
+            agent.apiKeyOrgId || agent.organizationId,
+            subdomain
+          );
+          if (suspension.suspended) {
+            return addCors(new Response(
+              JSON.stringify({
+                success: false,
+                message: suspension.reason || "This tunnel is suspended.",
+              }),
+              { status: 402, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+
+          // Remaining checks are abuse control only (blocked IPs, per-tunnel IP
+          // allow/blocklist); rate limiting is skipped in proxy mode.
           const securityCheck = await securityService.checkHttpRequest(
             tunnelId || subdomain,
             agent.organizationId,
@@ -1872,9 +1960,9 @@ async function startServer() {
           }
 
           // ============ Bandwidth Limit Check ============
-          // Block requests if organization has exceeded monthly bandwidth
-          // Use API key's org (apiKeyOrgId) for plan limits
-          if (agent.apiKeyOrgId || agent.organizationId) {
+          // Legacy standalone mode only. In proxy mode kconsole owns the quota
+          // and expresses the verdict as a suspension, checked above.
+          if (!PROXY_MODE && (agent.apiKeyOrgId || agent.organizationId)) {
             const bandwidthCheckOrgId = agent.apiKeyOrgId || agent.organizationId;
             const bandwidthCheck = securityService.checkMonthlyBandwidth(bandwidthCheckOrgId!, planTier);
 
@@ -2175,6 +2263,11 @@ async function startServer() {
     });
 
     console.log(`🚀 Server running at http://localhost:${server.port}`);
+    console.log(
+      PROXY_MODE
+        ? "🔀 Proxy mode: plan limits, rate limits and quotas disabled (kconsole enforces). Usage still metered."
+        : "🔒 Standalone mode: jrok is enforcing its own plan limits (JROK_PROXY_MODE=false)."
+    );
     console.log(`📝 Base domain: ${config.baseDomain}`);
     console.log(`🔐 Auth enabled with API key`);
     console.log(`🔌 WebSocket agent endpoint: ws://localhost:${server.port}/ws/agent`);

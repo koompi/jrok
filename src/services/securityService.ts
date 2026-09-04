@@ -12,6 +12,8 @@ import type { Organization, Plan, Tunnel, TunnelIpSecurity } from "../types/inde
 
 // Default limits (can be overridden by plan)
 // NOTE: These limits are multiplied by plan tier (free=1x, starter=5x, pro=20x, enterprise=100x)
+import { PROXY_MODE } from "../config/proxyMode";
+
 const DEFAULT_LIMITS = {
   // HTTP Limits - Increased to handle modern web apps with HMR, asset loading, API calls
   maxHttpRequestsPerMinute: 300,     // Per tunnel (was 60, increased for burst support)
@@ -394,6 +396,61 @@ export interface HttpSecurityOptions {
  * Rate limits are applied per-client (session > apiKey > IP+UA > IP) within each tunnel,
  * with a secondary global tunnel limit as DDoS protection.
  */
+
+// ============ Suspensions (pushed in by kconsole) ============
+//
+// In proxy mode jrok enforces no quotas of its own, so kconsole needs a way to
+// actually cut traffic off when a customer is over their bandwidth allowance or
+// unpaid. It pushes a suspension here and jrok refuses that org's (or domain's)
+// traffic until it is lifted. Two in-memory Sets — a lookup costs nothing on
+// the request path, which is the whole point of moving the policy out.
+const suspendedOrganizations = new Map<string, { reason: string; since: number }>();
+const suspendedDomains = new Map<string, { reason: string; since: number }>();
+
+export function suspendOrganization(organizationId: string, reason = "Suspended"): void {
+  suspendedOrganizations.set(organizationId, { reason, since: Date.now() });
+}
+
+export function unsuspendOrganization(organizationId: string): void {
+  suspendedOrganizations.delete(organizationId);
+}
+
+export function suspendDomain(domain: string, reason = "Suspended"): void {
+  suspendedDomains.set(domain, { reason, since: Date.now() });
+}
+
+export function unsuspendDomain(domain: string): void {
+  suspendedDomains.delete(domain);
+}
+
+export function getSuspensions(): {
+  organizations: Array<{ organizationId: string; reason: string; since: number }>;
+  domains: Array<{ domain: string; reason: string; since: number }>;
+} {
+  return {
+    organizations: Array.from(suspendedOrganizations.entries()).map(([organizationId, v]) => ({ organizationId, ...v })),
+    domains: Array.from(suspendedDomains.entries()).map(([domain, v]) => ({ domain, ...v })),
+  };
+}
+
+/**
+ * Is this traffic suspended? Checked on every proxied request and TCP connect.
+ */
+export function checkSuspension(
+  organizationId?: string,
+  domain?: string
+): { suspended: boolean; reason?: string } {
+  if (organizationId) {
+    const org = suspendedOrganizations.get(organizationId);
+    if (org) return { suspended: true, reason: org.reason };
+  }
+  if (domain) {
+    const d = suspendedDomains.get(domain);
+    if (d) return { suspended: true, reason: d.reason };
+  }
+  return { suspended: false };
+}
+
 export async function checkHttpRequest(
   tunnelId: string,
   organizationId: string | undefined,
@@ -439,6 +496,13 @@ export async function checkHttpRequest(
     options?.sessionToken,
     options?.apiKeyId
   );
+
+  // Proxy mode stops here: blocked IPs and per-tunnel IP rules above are abuse
+  // control and stay, but rate limits, burst buckets and connection caps are
+  // plan policy — kconsole's job now. Everything below this line is skipped.
+  if (PROXY_MODE) {
+    return { allowed: true, clientId: clientInfo.id };
+  }
 
   // === Token Bucket Rate Limiting (per-client within tunnel) ===
   // 
@@ -604,6 +668,12 @@ export async function checkTcpConnection(
     return { allowed: false, reason: ipSecurityCheck.reason, clientId: clientInfo.id };
   }
 
+  // Proxy mode: connection quotas are plan policy, enforced by kconsole. IP
+  // blocks and per-tunnel IP rules above still apply.
+  if (PROXY_MODE) {
+    return { allowed: true, clientId: clientInfo.id };
+  }
+
   // === Per-client TCP connection limit ===
   // Prevents one client from using all connections
   const clientKey = `${tunnelId}:${clientInfo.id}`;
@@ -740,6 +810,8 @@ export function checkTcpBandwidth(
   bytes: number,
   planTier?: string
 ): { allowed: boolean; reason?: string } {
+  if (PROXY_MODE) return { allowed: true };
+
   const now = Date.now();
   const multiplier = getMultiplier(planTier);
 
@@ -825,6 +897,11 @@ export function checkMonthlyBandwidth(
   organizationId: string,
   planTier?: string
 ): { allowed: boolean; usedBytes: number; limitBytes: number; percentUsed: number } {
+  // Proxy mode: usage is still counted (kconsole bills off it) but never capped here.
+  if (PROXY_MODE) {
+    return { allowed: true, usedBytes: getMonthlyBandwidth(organizationId), limitBytes: -1, percentUsed: 0 };
+  }
+
   const multiplier = getMultiplier(planTier);
   const limitBytes = DEFAULT_LIMITS.maxBandwidthBytesPerMonth * multiplier;
   const usedBytes = getMonthlyBandwidth(organizationId);

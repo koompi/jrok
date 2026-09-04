@@ -8,6 +8,7 @@
 
 import { getCollections } from "../utils/mongodb";
 import * as securityService from "./securityService";
+import { ENFORCE_PLAN_LIMITS } from "../config/proxyMode";
 import type { Plan, PlanLimits, Organization } from "../types/index";
 
 // Cache for plan info to avoid repeated DB lookups
@@ -52,6 +53,28 @@ const DEFAULT_FREE_LIMITS: PlanLimits = {
   maxTcpBandwidthMbPerMinute: 10,
 };
 
+// Proxy mode: jrok enforces nothing, so every limit reads as unlimited (-1) and
+// every capability is on. kconsole owns quotas and pricing.
+const UNLIMITED_LIMITS: PlanLimits = {
+  maxTunnels: -1,
+  maxDomains: -1,
+  maxApiKeys: -1,
+  maxMembers: -1,
+  maxBandwidthGb: -1,
+  sslIncluded: true,
+  customDomains: true,
+  prioritySupport: true,
+  maxHttpRequestsPerMinute: -1,
+  maxHttpRequestsPerHour: -1,
+  maxTcpConnectionsPerTunnel: -1,
+  maxTcpConnectionsPerOrg: -1,
+  maxTcpBandwidthMbPerMinute: -1,
+};
+
+const UNLIMITED_PLAN: PlanInfo = { plan: null, limits: UNLIMITED_LIMITS, tier: 'unlimited' };
+
+const ALLOWED: LimitCheckResult = { allowed: true, current: 0, limit: -1, percentUsed: 0 };
+
 export interface LimitCheckResult {
   allowed: boolean;
   reason?: string;
@@ -73,6 +96,11 @@ export interface PlanInfo {
  * Get plan information for an organization
  */
 export async function getOrganizationPlan(organizationId: string): Promise<PlanInfo> {
+  // Proxy mode: answer without touching MongoDB at all. This is the single
+  // hottest call in the server — it ran on every tunneled request purely to
+  // decide a rate-limit multiplier that no longer exists.
+  if (!ENFORCE_PLAN_LIMITS) return UNLIMITED_PLAN;
+
   // Serve the fully-resolved answer from cache when it's fresh.
   //
   // This runs on EVERY tunneled request, and planCache below only covers the
@@ -164,6 +192,7 @@ export async function checkTunnelLimit(
   intendedDomain?: string,
   instanceId?: string
 ): Promise<LimitCheckResult> {
+  if (!ENFORCE_PLAN_LIMITS) return { ...ALLOWED };
   const collections = getCollections();
   const { limits, tier } = await getOrganizationPlan(organizationId);
 
@@ -242,6 +271,7 @@ export async function checkTunnelLimit(
  * Check if organization can register a new custom domain
  */
 export async function checkDomainLimit(organizationId: string): Promise<LimitCheckResult> {
+  if (!ENFORCE_PLAN_LIMITS) return { ...ALLOWED };
   const collections = getCollections();
   const { limits, tier } = await getOrganizationPlan(organizationId);
 
@@ -283,6 +313,7 @@ export async function checkDomainLimit(organizationId: string): Promise<LimitChe
  * Check if organization can create a new API key
  */
 export async function checkApiKeyLimit(organizationId: string): Promise<LimitCheckResult> {
+  if (!ENFORCE_PLAN_LIMITS) return { ...ALLOWED };
   const collections = getCollections();
   const { limits, tier } = await getOrganizationPlan(organizationId);
 
@@ -313,6 +344,7 @@ export async function checkApiKeyLimit(organizationId: string): Promise<LimitChe
  * Check if organization can add a new member
  */
 export async function checkMemberLimit(organizationId: string): Promise<LimitCheckResult> {
+  if (!ENFORCE_PLAN_LIMITS) return { ...ALLOWED };
   const collections = getCollections();
   const { limits, tier } = await getOrganizationPlan(organizationId);
 
@@ -344,6 +376,7 @@ export async function checkBandwidthLimit(
   organizationId: string,
   additionalBytes: number = 0
 ): Promise<LimitCheckResult & { suspended: boolean }> {
+  if (!ENFORCE_PLAN_LIMITS) return { ...ALLOWED, suspended: false };
   const { limits, tier } = await getOrganizationPlan(organizationId);
 
   // -1 means unlimited (enterprise)

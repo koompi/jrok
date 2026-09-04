@@ -11,6 +11,7 @@
  */
 
 import { getClient, getCollections } from "../utils/mongodb";
+import { PROXY_MODE } from "../config/proxyMode";
 import os from "os";
 
 // ============ Configuration ============
@@ -106,6 +107,11 @@ let metricsInterval: Timer | null = null;
  * Check if a new agent connection can be accepted
  */
 export function canAcceptAgentConnection(clientIp: string): { allowed: boolean; reason?: string } {
+  // Proxy mode: connections are still counted for metrics, never refused. The
+  // per-IP cap in particular broke real deployments — every agent behind one
+  // NAT egress IP, or a kconsole node running many tunnels, shares an IP.
+  if (PROXY_MODE) return { allowed: true };
+
   // Check per-server limit
   if (agentConnectionCount >= MAX_AGENT_CONNECTIONS_PER_SERVER) {
     return {
@@ -130,6 +136,8 @@ export function canAcceptAgentConnection(clientIp: string): { allowed: boolean; 
  * Check if a new client WebSocket connection can be accepted
  */
 export function canAcceptClientConnection(clientIp: string): { allowed: boolean; reason?: string } {
+  if (PROXY_MODE) return { allowed: true };
+
   // Check per-server limit
   if (clientConnectionCount >= MAX_CLIENT_CONNECTIONS_PER_SERVER) {
     return {

@@ -401,6 +401,15 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
     const remoteIp = clientSocket.remoteAddress || 'unknown';
     console.log(`🔌 TCP connection [${connectionId}] on port ${allocation.port} from ${remoteIp}`);
 
+    // Suspension is how kconsole cuts off an org that is over quota or unpaid;
+    // jrok itself enforces no TCP quotas in proxy mode.
+    const suspension = securityService.checkSuspension(allocation.organizationId);
+    if (suspension.suspended) {
+      console.log(`🚫 TCP connection refused [${connectionId}]: ${suspension.reason}`);
+      clientSocket.end();
+      return;
+    }
+
     // Security check
     const securityCheck = await securityService.checkTcpConnection(
       allocation.tunnelId,
