@@ -48,43 +48,77 @@
   ignore_errors: yes
 
 - name: Create Certbot renewal hook directory
+  # "deploy" rather than "post": deploy hooks run ONCE PER RENEWED CERTIFICATE
+  # with $RENEWED_LINEAGE naming which one, whereas post hooks run once after
+  # the whole run with no way to tell what was renewed. The hook used to live in
+  # post/ with a single hardcoded domain, so every CUSTOM domain's renewal was
+  # silently never uploaded — each server kept renewing its own copy locally and
+  # the copies drifted apart.
   file:
-    path: /etc/letsencrypt/renewal-hooks/post
+    path: /etc/letsencrypt/renewal-hooks/deploy
     state: directory
     mode: '0755'
+  tags: ["certbot"]
+
+- name: Remove superseded post-renewal hook
+  # Left behind it would keep re-uploading only the base domain on every run.
+  file:
+    path: /etc/letsencrypt/renewal-hooks/post/mongodb-sync.sh
+    state: absent
   tags: ["certbot"]
 
 - name: Create certificate MongoDB sync hook script
   copy:
     content: |
       #!/bin/bash
-      # Certificate renewal hook: Sync to MongoDB after renewal
-      
-      DOMAIN="{{ domain_name }}"
+      # Certificate renewal hook: publish the renewed certificate to MongoDB so
+      # every other jrok server can pull it.
+      #
+      # Runs once per renewed certificate. Certbot sets:
+      #   RENEWED_LINEAGE  /etc/letsencrypt/live/<name>   (this certificate)
+      #   RENEWED_DOMAINS  space-separated names on it
+      #
+      # Using RENEWED_LINEAGE instead of a hardcoded domain is what makes CUSTOM
+      # domains sync: the previous version only ever uploaded the base domain,
+      # so a customer's certificate renewed on one server never reached the
+      # others and their copy expired.
+
+      set -u
+
       API_KEY="{{ cert_sync_api_key }}"
-      CONTROL_SERVER="http://localhost:3000"
-      CERT_PATH="/etc/letsencrypt/live/$DOMAIN"
+      CONTROL_SERVER="http://localhost:{{ jrok_port | default('3000') }}"
       LOG_FILE="/var/log/certbot-sync.log"
-      
-      echo "$(date): Starting certificate sync to MongoDB" >> "$LOG_FILE"
-      
-      # Read certificate files
-      CERT=$(cat "$CERT_PATH/cert.pem")
-      CHAIN=$(cat "$CERT_PATH/chain.pem")
-      FULLCHAIN=$(cat "$CERT_PATH/fullchain.pem")
-      PRIVKEY=$(cat "$CERT_PATH/privkey.pem")
-      
-      # Base64 encode
-      CERT_B64=$(echo -n "$CERT" | base64 | tr -d '\n')
-      CHAIN_B64=$(echo -n "$CHAIN" | base64 | tr -d '\n')
-      FULLCHAIN_B64=$(echo -n "$FULLCHAIN" | base64 | tr -d '\n')
-      PRIVKEY_B64=$(echo -n "$PRIVKEY" | base64 | tr -d '\n')
-      
-      # Upload to MongoDB via API
-      RESPONSE=$(curl -s -X POST "$CONTROL_SERVER/certificates/upload" \
+
+      log() { echo "$(date -Is): $*" >> "$LOG_FILE"; }
+
+      CERT_PATH="${RENEWED_LINEAGE:-}"
+      if [ -z "$CERT_PATH" ]; then
+        log "❌ RENEWED_LINEAGE not set - hook must be in renewal-hooks/deploy/. Skipping."
+        exit 0
+      fi
+
+      # The lineage directory name is the key certificates are stored under, and
+      # is what other servers write to on disk when they pull.
+      DOMAIN="$(basename "$CERT_PATH")"
+
+      for f in cert.pem chain.pem fullchain.pem privkey.pem; do
+        if [ ! -r "$CERT_PATH/$f" ]; then
+          log "❌ $DOMAIN: $CERT_PATH/$f missing or unreadable. Skipping."
+          exit 0
+        fi
+      done
+
+      CERT_B64=$(base64 -w0 < "$CERT_PATH/cert.pem")
+      CHAIN_B64=$(base64 -w0 < "$CERT_PATH/chain.pem")
+      FULLCHAIN_B64=$(base64 -w0 < "$CERT_PATH/fullchain.pem")
+      PRIVKEY_B64=$(base64 -w0 < "$CERT_PATH/privkey.pem")
+
+      # --data-binary @- with a heredoc: the payload holds base64 blobs several
+      # KB long, far past a safe argv length.
+      RESPONSE=$(curl -s --max-time 30 -X POST "$CONTROL_SERVER/certificates/upload" \
         -H "Authorization: Bearer $API_KEY" \
         -H "Content-Type: application/json" \
-        -d @- <<EOF
+        --data-binary @- <<EOF
       {
         "domain": "$DOMAIN",
         "certPem": "$CERT_B64",
@@ -94,14 +128,22 @@
       }
       EOF
       )
-      
+
       if echo "$RESPONSE" | jq -e '.success' > /dev/null 2>&1; then
-        echo "$(date): ✅ Certificate synced to MongoDB" >> "$LOG_FILE"
+        log "✅ $DOMAIN synced to MongoDB (v$(echo "$RESPONSE" | jq -r '.version // "?"'))"
       else
-        echo "$(date): ❌ Failed to sync certificate: $RESPONSE" >> "$LOG_FILE"
+        # Loud: an un-synced certificate means other servers keep serving an
+        # older copy of this domain until it expires.
+        log "❌ $DOMAIN FAILED to sync - other servers will serve a stale certificate: $RESPONSE"
       fi
-    dest: /etc/letsencrypt/renewal-hooks/post/mongodb-sync.sh
+    dest: /etc/letsencrypt/renewal-hooks/deploy/mongodb-sync.sh
     mode: '0755'
+  tags: ["certbot"]
+
+- name: Ensure jq is available for the sync hook
+  apt:
+    name: jq
+    state: present
   tags: ["certbot"]
 
 - name: Setup Certbot auto-renewal timer

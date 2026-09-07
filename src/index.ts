@@ -26,6 +26,7 @@ import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
 import * as planLimitService from "./services/planLimitService";
 import { PROXY_MODE } from "./config/proxyMode";
+import { matchBaseDomain, isTunnelSubdomain as hostIsTunnelSubdomain, extractSubdomain, allBaseDomains } from "./utils/baseDomains";
 
 // =============================================================================
 // PROCESS-LEVEL SURVIVAL
@@ -471,8 +472,27 @@ async function startServer() {
       // with no data flowing for 10s, which breaks slow SSR pages and quiet
       // SSE streams mid-response. 255s is the maximum Bun allows.
       idleTimeout: 255,
+      // Request bodies are read fully into memory and base64-encoded before
+      // being forwarded to the agent (see forwardRequestToAgent), so a body
+      // costs roughly 2.5x its size in RAM while in flight. Bun's default cap
+      // is 128MB, which one client could use to push ~350MB through a single
+      // request — on the process that fronts every tunnel.
+      //
+      // Jrok proxies APIs and web pages; large files belong in object storage.
+      // 25MB leaves room for legitimate JSON payloads with embedded base64
+      // images while making the memory ceiling bounded and predictable.
+      // Oversized requests are rejected by Bun with a 413 BEFORE any of the
+      // body is buffered. Raise MAX_REQUEST_BODY_MB if a real workload needs it.
+      maxRequestBodySize: parseInt(process.env.MAX_REQUEST_BODY_MB || '25') * 1024 * 1024,
       websocket: {
         open(ws: any) {
+          // Cross-server relay: this server accepted a visitor's WebSocket, but
+          // the agent lives on a peer. Dial the peer and pipe frames both ways.
+          if (ws.data?.type === 'cross-server') {
+            crossServerService.openCrossServerRelay(ws);
+            return;
+          }
+
           // Handle client-tunnel WebSocket (from browser/client to tunneled service)
           if (ws.data?.type === 'client-tunnel') {
             const { agentWs, agent, subdomain, path, headers } = ws.data;
@@ -594,6 +614,14 @@ async function startServer() {
                     message: "TCP tunnel ready",
                     protocol,
                     tcpPort: allocation.port,
+                    // The per-server hostname this port actually listens on.
+                    // The agent used to derive the endpoint from its own
+                    // --server URL, which is the round-robin name: correct on a
+                    // single server, but with several it hands the customer an
+                    // address that resolves to a machine not listening on this
+                    // port, so connections fail at random. Older agents ignore
+                    // this field and keep their previous behaviour.
+                    tcpHost: tcpService.tcpPublicHost(),
                     domain: finalDomain,
                   }));
                 }
@@ -610,6 +638,12 @@ async function startServer() {
         },
 
         message(ws: any, data: string | Buffer) {
+          // Cross-server relay: pass the visitor's frame on to the peer server.
+          if (ws.data?.type === 'cross-server') {
+            crossServerService.relayVisitorFrame(ws, data);
+            return;
+          }
+
           // Handle client-tunnel WebSocket messages (forward to agent)
           if (ws.data?.type === 'client-tunnel') {
             const wsId = ws.data.wsId;
@@ -823,6 +857,12 @@ async function startServer() {
         },
 
         close(ws: any, code: number, reason: string) {
+          // Cross-server relay: the visitor hung up, so drop the peer link too.
+          if (ws.data?.type === 'cross-server') {
+            crossServerService.closeCrossServerRelay(ws, code, reason?.toString());
+            return;
+          }
+
           // Handle client-tunnel WebSocket close
           if (ws.data?.type === 'client-tunnel') {
             const wsId = ws.data.wsId;
@@ -921,9 +961,10 @@ async function startServer() {
         // Handle preflight OPTIONS request — only for Jrok management API
         // Tunnel domain traffic should pass through so the backend app handles CORS itself
         if (method === "OPTIONS") {
-          const baseDomain = config.baseDomain;
-          const isTunnelSubdomain = hostname.endsWith(baseDomain) && hostname !== baseDomain;
-          const isCustomDomain = !hostname.endsWith(baseDomain) && hostname !== baseDomain && hostname !== 'localhost';
+          // Accepts any configured base domain, so a renamed primary and the
+          // legacy name behave identically here.
+          const isTunnelSubdomain = hostIsTunnelSubdomain(hostname);
+          const isCustomDomain = matchBaseDomain(hostname) === null && hostname !== 'localhost';
 
           if (!isTunnelSubdomain && !isCustomDomain) {
             // Management API — Jrok handles CORS
@@ -1767,15 +1808,16 @@ async function startServer() {
         // ============ Tunnel Domain Routing ============
         // Check if this is a tunnel domain request (extract subdomain or custom domain)
         // MUST be before auth check to allow public tunnel access
-        const baseDomain = config.baseDomain; // e.g., "tunnel.koompi.cloud"
-
-        // First, check if this is a registered custom domain
+        // A request matches if its host is a subdomain of ANY accepted base
+        // domain (primary or legacy), so URLs issued under the old name keep
+        // resolving after a rename.
         let tunnelDomain: string | null = null;
         let isCustomDomainRequest = false;
 
-        // Check for custom domain (not a subdomain of baseDomain and not the baseDomain itself)
-        if (!hostname.endsWith(baseDomain) && hostname !== baseDomain && hostname !== 'localhost') {
-          // This might be a custom domain - check if it's registered
+        const matchedBase = matchBaseDomain(hostname);
+
+        if (matchedBase === null && hostname !== 'localhost') {
+          // Not one of ours — might be a registered custom domain.
           const { getCustomDomainByName } = await import("./utils/database");
           const customDomain = await getCustomDomainByName(hostname);
 
@@ -1784,9 +1826,9 @@ async function startServer() {
             tunnelDomain = hostname;
             isCustomDomainRequest = true;
           }
-        } else if (hostname.endsWith(baseDomain) && hostname !== baseDomain) {
-          // Extract subdomain (e.g., "demo" from "demo.tunnel.koompi.cloud")
-          tunnelDomain = hostname.replace(`.${baseDomain}`, '');
+        } else {
+          // Extract subdomain (e.g., "demo" from "demo.public.koompi.cloud")
+          tunnelDomain = extractSubdomain(hostname);
         }
 
         if (tunnelDomain) {
@@ -1797,10 +1839,42 @@ async function startServer() {
 
           // If agent is on another server, proxy the request
           if (!routeResult.isLocal && routeResult.targetServer) {
+            // Same derivation the local path uses below, but undefined rather
+            // than "unknown" when nothing is known — the forwarder omits the
+            // header entirely instead of asserting a bogus address.
+            const visitorIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+              req.headers.get("x-real-ip") ||
+              undefined;
+
+            // A WebSocket upgrade cannot go through the HTTP forwarder — fetch()
+            // has no way to carry an upgrade. Accept the visitor's socket here
+            // and relay frames to the server that holds the agent.
+            if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+              const target = crossServerService.buildCrossServerWsTarget(
+                routeResult.targetServer,
+                req,
+                url.pathname + url.search,
+                visitorIp
+              );
+
+              const upgraded = server.upgrade(req, {
+                data: {
+                  type: 'cross-server',
+                  targetUrl: target.url,
+                  targetHeaders: target.headers,
+                  subdomain,
+                },
+              });
+
+              if (upgraded) return undefined;
+              return new Response("Failed to upgrade WebSocket connection", { status: 400 });
+            }
+
             return crossServerService.forwardRequest(
               routeResult.targetServer,
               req,
-              url.pathname + url.search
+              url.pathname + url.search,
+              visitorIp
             );
           }
 
@@ -2161,6 +2235,56 @@ async function startServer() {
           }
         }
 
+        // Upload a certificate into MongoDB so other servers can pull it.
+        //
+        // certbot's post-renewal hook (ansible/roles/certbot) has POSTed here
+        // after every renewal since the hook was written, but the route did not
+        // exist — so every renewal logged "Failed to sync certificate" and the
+        // renewed certificate never left the machine that issued it.
+        //
+        // Values arrive already base64-encoded, matching what the hook sends and
+        // what domainService passes when it calls the service directly.
+        if (path === "/certificates/upload" && method === "POST") {
+          try {
+            const body = await req.json() as {
+              domain?: string;
+              certPem?: string;
+              chainPem?: string;
+              fullchainPem?: string;
+              privkeyPem?: string;
+            };
+
+            const missing = ["domain", "certPem", "chainPem", "fullchainPem", "privkeyPem"]
+              .filter((field) => !body[field as keyof typeof body]);
+            if (missing.length > 0) {
+              return addCors(new Response(
+                JSON.stringify({ success: false, error: `Missing required fields: ${missing.join(", ")}` }),
+                { status: 400, headers: { "Content-Type": "application/json" } }
+              ));
+            }
+
+            const serverId = process.env.VPS_ID || process.env.SERVER_ID || process.env.HOSTNAME || "unknown";
+            const saved = await certSyncService.uploadCertificateToMongoDB(
+              body.domain!,
+              body.certPem!,
+              body.chainPem!,
+              body.fullchainPem!,
+              body.privkeyPem!,
+              serverId
+            );
+
+            return addCors(new Response(
+              JSON.stringify({ success: true, domain: saved.domain, version: saved.version }),
+              { status: 200, headers: { "Content-Type": "application/json" } }
+            ));
+          } catch (error) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, error: String(error) }),
+              { status: 500, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+        }
+
         // List all certificates
         if (path === "/certificates/list" && method === "GET") {
           try {
@@ -2268,7 +2392,7 @@ async function startServer() {
         ? "🔀 Proxy mode: plan limits, rate limits and quotas disabled (kconsole enforces). Usage still metered."
         : "🔒 Standalone mode: jrok is enforcing its own plan limits (JROK_PROXY_MODE=false)."
     );
-    console.log(`📝 Base domain: ${config.baseDomain}`);
+    console.log(`📝 Base domains: ${allBaseDomains().join(", ")} (new URLs use the first)`);
     console.log(`🔐 Auth enabled with API key`);
     console.log(`🔌 WebSocket agent endpoint: ws://localhost:${server.port}/ws/agent`);
 
@@ -2330,45 +2454,26 @@ async function startServer() {
       }
     }, 60 * 60 * 1000);
 
-    // Check certificate sync queue every 5 minutes (pull new certs to local storage)
-    setInterval(async () => {
-      try {
-        const { getClient } = await import("./utils/mongodb");
-        const queue = getClient()?.db("jrok").collection("cert_sync_queue");
-        if (!queue) return;
+    // Reconcile certificates against MongoDB: once now, then every 5 minutes.
+    //
+    // The startup run is what makes adding a server to the cluster work. This
+    // previously drained cert_sync_queue instead, which carries a 24h TTL, so a
+    // new server picked up only the last day of renewals and served no
+    // certificate at all for every older custom domain. syncAllCertificatesToDisk
+    // compares what MongoDB holds against what is on local disk, so a server of
+    // any age converges on the full set — and it writes an nginx vhost for any
+    // custom domain that lacks one, which the queue drain never did.
+    //
+    // It never throws and never downgrades a certificate that is currently
+    // serving traffic, so a failure here degrades to "this server keeps serving
+    // what it already had" rather than an outage.
+    void certSyncService.syncAllCertificatesToDisk();
 
-        const serverId = process.env.VPS_ID || process.env.SERVER_ID || "server-1";
-        const pendingCerts = await queue.find({ processed: false }).toArray();
-
-        for (const item of pendingCerts) {
-          try {
-            const cert = await certSyncService.downloadCertificateFromMongoDB(item.domain);
-            if (cert) {
-              // Write certificates to local filesystem
-              const certDir = `/etc/letsencrypt/live/${item.domain}`;
-              await Bun.spawn(["mkdir", "-p", certDir]).exited;
-
-              // Decode base64 and write files
-              await Bun.write(`${certDir}/cert.pem`, Buffer.from(cert.cert, 'base64'));
-              await Bun.write(`${certDir}/chain.pem`, Buffer.from(cert.chain, 'base64'));
-              await Bun.write(`${certDir}/fullchain.pem`, Buffer.from(cert.fullchain, 'base64'));
-              await Bun.write(`${certDir}/privkey.pem`, Buffer.from(cert.privkey, 'base64'));
-
-              // Set proper permissions
-              await Bun.spawn(["chmod", "600", `${certDir}/privkey.pem`]).exited;
-
-              console.log(`🔐 Synced certificate for ${item.domain} (v${cert.version})`);
-            }
-          } catch (syncError) {
-            console.error(`Failed to sync certificate for ${item.domain}:`, syncError);
-          }
-        }
-      } catch (error) {
-        console.error("Certificate sync error:", error);
-      }
+    setInterval(() => {
+      void certSyncService.syncAllCertificatesToDisk();
     }, 5 * 60 * 1000);
 
-    console.log("✅ Certificate sync enabled (check every 5 minutes)");
+    console.log("✅ Certificate sync enabled (reconcile on startup, then every 5 minutes)");
 
     // Graceful shutdown
     process.on("SIGINT", async () => {

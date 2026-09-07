@@ -965,7 +965,14 @@ async function connectAgent(config: ClientConfig): Promise<void> {
         // For TCP tunnels, display the assigned port
         if (message.tcpPort) {
           tcpPort = message.tcpPort;
-          const serverHost = new URL(config.serverUrl).hostname;
+          // Prefer the per-server hostname the server tells us this port is
+          // actually listening on. Deriving it from --server instead yields the
+          // round-robin name, which resolves to an arbitrary server in a
+          // multi-server cluster — and an allocated TCP port exists on exactly
+          // one of them, so the customer's connections fail intermittently.
+          // Servers older than this field send nothing, so fall back to the old
+          // behaviour, which is correct on a single-server deployment.
+          const serverHost = message.tcpHost || new URL(config.serverUrl).hostname;
           const actualDomain = message.domain || config.domain;
           console.log(`\n🚀 TCP tunnel ready!`);
           // Structured first: the spawning process reads this to record the

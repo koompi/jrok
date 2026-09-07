@@ -9,10 +9,15 @@ import { generateId, sanitizeDomainToSubdomain, generateShortSuffix } from "../u
 import { getTunnelByDomain } from "../utils/database";
 import dns from "dns/promises";
 import { writeFile, mkdir } from "fs/promises";
+import { nginxSitesPath, nginxConfigFileName, generateCustomDomainNginxConfig } from "../utils/nginxConfig";
 
 // Get base domain from environment
-const BASE_DOMAIN = process.env.BASE_DOMAIN || "tunnel.koompi.cloud";
-const NGINX_SITES_PATH = process.env.NGINX_SITES_PATH || "/etc/nginx/sites-enabled";
+// New CNAME targets use the primary base domain; verification accepts any
+// configured base, so a customer who pointed their CNAME at the old name before
+// a rename stays verified instead of silently failing.
+import { primaryBaseDomain, matchBaseDomain } from "../utils/baseDomains";
+// NGINX_SITES_PATH and the custom-domain vhost template live in utils/nginxConfig
+// so certificateSyncService produces byte-identical configs on other servers.
 
 /**
  * Verify that a domain's CNAME record points to the expected target
@@ -32,8 +37,9 @@ export async function verifyCname(domain: string, expectedTarget: string): Promi
       if (normalizedRecord === normalizedExpected) {
         return { verified: true, actualCname: record };
       }
-      // Also accept if pointing to base domain or any subdomain of base domain
-      if (normalizedRecord === BASE_DOMAIN.toLowerCase() || normalizedRecord.endsWith(`.${BASE_DOMAIN.toLowerCase()}`)) {
+      // Also accept if pointing to ANY accepted base domain, or a subdomain of
+      // one — including a legacy name from before a rename.
+      if (matchBaseDomain(normalizedRecord) !== null) {
         console.log(`[DNS] CNAME points to ${normalizedRecord} (suffix match), accepting as valid`);
         return { verified: true, actualCname: record };
       }
@@ -173,7 +179,7 @@ export async function registerCustomDomain(
       if (!existing.targetSubdomain || !existing.cnameTarget) {
         const baseSubdomain = request.subdomain || sanitizeDomainToSubdomain(request.domain);
         const targetSubdomain = await generateUniqueSubdomain(baseSubdomain);
-        const cnameTarget = `${targetSubdomain}.${BASE_DOMAIN}`;
+        const cnameTarget = `${targetSubdomain}.${primaryBaseDomain()}`;
 
         await db.updateCustomDomainByName(request.domain, {
           targetSubdomain,
@@ -191,7 +197,7 @@ export async function registerCustomDomain(
   // Generate subdomain: use provided or auto-generate from domain
   const baseSubdomain = request.subdomain || sanitizeDomainToSubdomain(request.domain);
   const targetSubdomain = await generateUniqueSubdomain(baseSubdomain);
-  const cnameTarget = `${targetSubdomain}.${BASE_DOMAIN}`;
+  const cnameTarget = `${targetSubdomain}.${primaryBaseDomain()}`;
 
   // Generate unique verification token for TXT record verification
   const verificationToken = generateVerificationToken();
@@ -310,34 +316,9 @@ export async function verifyAndIssueCertificate(domainName: string): Promise<Cus
     // Issue wildcard certificate for this domain
     const certPath = await issueCertificate(domain.domain, domain.certbotEmail, domain.cloudflareToken);
 
-    // Attempt to become leader and upload certificate to MongoDB
+    // Publish to MongoDB so the other servers can serve this domain too.
     const serverId = process.env.SERVER_ID || process.env.HOSTNAME || "control-1";
-    const isLeader = await certSyncService.attemptBecomeLeader(serverId);
-
-    if (isLeader) {
-      // Read certificate files and upload to MongoDB
-      const certPem = await Bun.file(`${certPath}/cert.pem`).text();
-      const chainPem = await Bun.file(`${certPath}/chain.pem`).text();
-      const fullchainPem = await Bun.file(`${certPath}/fullchain.pem`).text();
-      const privkeyPem = await Bun.file(`${certPath}/privkey.pem`).text();
-
-      // Base64 encode certificates for storage
-      const certB64 = Buffer.from(certPem).toString('base64');
-      const chainB64 = Buffer.from(chainPem).toString('base64');
-      const fullchainB64 = Buffer.from(fullchainPem).toString('base64');
-      const privkeyB64 = Buffer.from(privkeyPem).toString('base64');
-
-      await certSyncService.uploadCertificateToMongoDB(
-        domain.domain,
-        certB64,
-        chainB64,
-        fullchainB64,
-        privkeyB64,
-        serverId
-      );
-    } else {
-      console.warn(`⚠️  Not leader, skipping certificate upload to MongoDB`);
-    }
+    const uploaded = await publishCertificateToMongoDB(domain.domain, certPath, serverId);
 
     // Setup nginx config for the custom domain
     await setupCustomDomainNginx(domain.domain, certPath);
@@ -346,7 +327,7 @@ export async function verifyAndIssueCertificate(domainName: string): Promise<Cus
     const expiry = Date.now() + 90 * 24 * 60 * 60 * 1000; // 90 days
     await db.updateCustomDomainByName(domainName, {
       active: true,
-      synced: true,
+      synced: uploaded,
       certPath,
       certExpiry: expiry,
       lastSyncedAt: Date.now(),
@@ -366,6 +347,59 @@ export async function verifyAndIssueCertificate(domainName: string): Promise<Cus
 
     // Don't delete domain on cert failure - user can retry
     throw new Error(`Certificate issuance failed: ${errorMsg}`);
+  }
+}
+
+/**
+ * Read a certificate off local disk and publish it to MongoDB so every other
+ * server can pull it.
+ *
+ * This is deliberately NOT gated on leader election. The servers are peers:
+ * DNS hands visitors whichever IP it likes, any server may handle the API call
+ * that issues a certificate, and the server that issued it is the only one
+ * that has it. Asking "am I the leader?" first meant a server could issue a
+ * certificate, lose a 30-second lease race to a peer, and silently drop the
+ * only copy — after which no server could ever serve that domain.
+ *
+ * Concurrent uploads are safe on their own: each document is keyed by domain,
+ * so two servers publishing two different domains never interact, and a repeat
+ * upload of the same domain is an upsert that bumps the version.
+ *
+ * Returns whether the certificate actually reached MongoDB. Callers record that
+ * in the domain's `synced` flag rather than assuming success, so an unsynced
+ * domain is visible instead of silently missing on other servers.
+ */
+async function publishCertificateToMongoDB(
+  domainName: string,
+  certPath: string,
+  serverId: string
+): Promise<boolean> {
+  try {
+    const [certPem, chainPem, fullchainPem, privkeyPem] = await Promise.all([
+      Bun.file(`${certPath}/cert.pem`).text(),
+      Bun.file(`${certPath}/chain.pem`).text(),
+      Bun.file(`${certPath}/fullchain.pem`).text(),
+      Bun.file(`${certPath}/privkey.pem`).text(),
+    ]);
+
+    await certSyncService.uploadCertificateToMongoDB(
+      domainName,
+      Buffer.from(certPem).toString("base64"),
+      Buffer.from(chainPem).toString("base64"),
+      Buffer.from(fullchainPem).toString("base64"),
+      Buffer.from(privkeyPem).toString("base64"),
+      serverId
+    );
+    return true;
+  } catch (error) {
+    // Never fatal: the certificate is on this server's disk and this server can
+    // serve the domain. Only cross-server availability is affected, and the
+    // `synced: false` this produces is the signal to retry.
+    console.error(
+      `❌ Certificate for ${domainName} could not be published to MongoDB — other servers will NOT be able to serve this domain until it syncs:`,
+      error
+    );
+    return false;
   }
 }
 
@@ -515,81 +549,15 @@ server {
 }
 
 /**
- * Generate nginx server block config for a custom domain (with SSL)
- */
-function generateCustomDomainNginxConfig(domain: string, certPath: string): string {
-  const jrokPort = process.env.JROK_PORT || "3000";
-
-  return `# Custom domain: ${domain}
-# Auto-generated by jrok server
-# Generated: ${new Date().toISOString()}
-
-# HTTP -> HTTPS redirect
-server {
-    listen 80;
-    listen [::]:80;
-    server_name ${domain};
-    
-    location /.well-known/acme-challenge/ {
-        root /var/www/certbot;
-    }
-    
-    location / {
-        return 301 https://$host$request_uri;
-    }
-}
-
-# HTTPS server
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${domain};
-    
-    # SSL configuration
-    ssl_certificate ${certPath}/fullchain.pem;
-    ssl_certificate_key ${certPath}/privkey.pem;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 1d;
-    ssl_session_tickets off;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
-    
-    # Proxy to jrok server
-    location / {
-        proxy_pass http://localhost:${jrokPort};
-        proxy_http_version 1.1;
-        
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $server_name;
-        
-        # WebSocket support
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        
-        # Timeouts
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-}
-`;
-}
-
-/**
  * Create nginx config file for custom domain and reload nginx
  */
 async function setupCustomDomainNginx(domain: string, certPath: string): Promise<void> {
   const safeDomain = sanitizeDomain(domain);
-  const configFileName = `${safeDomain.replace(/\./g, '_')}.conf`;
-  const configPath = `${NGINX_SITES_PATH}/${configFileName}`;
+  const configPath = `${nginxSitesPath()}/${nginxConfigFileName(safeDomain)}`;
 
   try {
     // Ensure directory exists
-    await mkdir(NGINX_SITES_PATH, { recursive: true });
+    await mkdir(nginxSitesPath(), { recursive: true });
 
     // Generate and write nginx config
     const nginxConfig = generateCustomDomainNginxConfig(safeDomain, certPath);
@@ -629,12 +597,11 @@ async function setupCustomDomainNginx(domain: string, certPath: string): Promise
  */
 async function setupAcmeChallengeNginx(domain: string): Promise<void> {
   const safeDomain = sanitizeDomain(domain);
-  const configFileName = `${safeDomain.replace(/\./g, '_')}.conf`;
-  const configPath = `${NGINX_SITES_PATH}/${configFileName}`;
+  const configPath = `${nginxSitesPath()}/${nginxConfigFileName(safeDomain)}`;
 
   try {
     // Ensure directories exist
-    await mkdir(NGINX_SITES_PATH, { recursive: true });
+    await mkdir(nginxSitesPath(), { recursive: true });
     await mkdir("/var/www/certbot/.well-known/acme-challenge", { recursive: true });
 
     // Generate and write temporary HTTP-only nginx config
@@ -804,34 +771,14 @@ export async function resyncCertificate(domainName: string): Promise<void> {
     throw new Error(`Domain ${domainName} not found or certificate not issued`);
   }
 
-  // Attempt to become leader and re-upload to MongoDB
+  // Re-publish to MongoDB. This is the manual "it didn't sync, try again" path,
+  // so it must always attempt the upload.
   const serverId = process.env.SERVER_ID || process.env.HOSTNAME || "control-1";
-  const isLeader = await certSyncService.attemptBecomeLeader(serverId);
-
-  if (isLeader) {
-    const certPem = await Bun.file(`${domain.certPath}/cert.pem`).text();
-    const chainPem = await Bun.file(`${domain.certPath}/chain.pem`).text();
-    const fullchainPem = await Bun.file(`${domain.certPath}/fullchain.pem`).text();
-    const privkeyPem = await Bun.file(`${domain.certPath}/privkey.pem`).text();
-
-    const certB64 = Buffer.from(certPem).toString('base64');
-    const chainB64 = Buffer.from(chainPem).toString('base64');
-    const fullchainB64 = Buffer.from(fullchainPem).toString('base64');
-    const privkeyB64 = Buffer.from(privkeyPem).toString('base64');
-
-    await certSyncService.uploadCertificateToMongoDB(
-      domainName,
-      certB64,
-      chainB64,
-      fullchainB64,
-      privkeyB64,
-      serverId
-    );
-  }
+  const uploaded = await publishCertificateToMongoDB(domainName, domain.certPath, serverId);
 
   // Update last synced time
   await db.updateCustomDomainByName(domainName, {
-    synced: true,
+    synced: uploaded,
     lastSyncedAt: Date.now(),
   });
 }
@@ -883,36 +830,21 @@ export async function transferDomain(
   }
 
   try {
-    // Ensure certificate is in MongoDB (target VPS will pull from there)
+    // Ensure certificate is in MongoDB (target VPS will pull from there). The
+    // whole point of a transfer is that another server takes over the domain,
+    // so a skipped upload here would transfer it to a server that cannot serve it.
     const serverId = process.env.SERVER_ID || process.env.HOSTNAME || "control-1";
-    const isLeader = await certSyncService.attemptBecomeLeader(serverId);
+    const uploaded = await publishCertificateToMongoDB(domainName, domain.certPath, serverId);
 
-    if (isLeader) {
-      const certPem = await Bun.file(`${domain.certPath}/cert.pem`).text();
-      const chainPem = await Bun.file(`${domain.certPath}/chain.pem`).text();
-      const fullchainPem = await Bun.file(`${domain.certPath}/fullchain.pem`).text();
-      const privkeyPem = await Bun.file(`${domain.certPath}/privkey.pem`).text();
-
-      const certB64 = Buffer.from(certPem).toString('base64');
-      const chainB64 = Buffer.from(chainPem).toString('base64');
-      const fullchainB64 = Buffer.from(fullchainPem).toString('base64');
-      const privkeyB64 = Buffer.from(privkeyPem).toString('base64');
-
-      await certSyncService.uploadCertificateToMongoDB(
-        domainName,
-        certB64,
-        chainB64,
-        fullchainB64,
-        privkeyB64,
-        serverId
-      );
+    if (uploaded) {
+      console.log(`✅ Certificate available in MongoDB for ${domainName} (target VPS will pull on next sync)`);
+    } else {
+      console.error(`❌ Transfer of ${domainName} left the certificate unsynced — the target VPS cannot serve it yet`);
     }
-
-    console.log(`✅ Certificate available in MongoDB for ${domainName} (target VPS will pull on next sync)`);
 
     // Update domain with transfer info
     await db.updateCustomDomainByName(domainName, {
-      synced: true,
+      synced: uploaded,
       lastSyncedAt: Date.now(),
     });
 

@@ -23,6 +23,30 @@ const SERVER_ID = process.env.VPS_ID || process.env.HOSTNAME || "default";
 const TCP_PORT_MIN = parseInt(process.env.TCP_PORT_MIN || "10000");
 const TCP_PORT_MAX = parseInt(process.env.TCP_PORT_MAX || "20000");
 
+/**
+ * The hostname customers use to reach THIS server's TCP tunnels, e.g.
+ * "sgp1.private.koompi.cloud".
+ *
+ * This must be a per-server name that resolves to exactly this machine. It
+ * cannot be the round-robin name (tunnel.koompi.cloud): an allocated port
+ * listens on one server only, so a customer whose DNS lookup lands on a
+ * different server gets connection-refused. Unlike HTTP, a raw TCP connection
+ * carries no hostname, so the receiving server has no way to work out which
+ * tunnel was wanted and forward it — the address handed to the customer has to
+ * be right the first time.
+ *
+ * TCP_PUBLIC_HOST is the correct source. VPS_HOST is accepted as a fallback for
+ * servers provisioned before this split existed.
+ */
+export function tcpPublicHost(): string | null {
+  const host = process.env.TCP_PUBLIC_HOST || process.env.VPS_HOST;
+  // "localhost" is the old ansible default and is never a usable customer
+  // endpoint — treat it as unset so callers fall back rather than hand a
+  // customer an address that resolves to their own machine.
+  if (!host || host === "localhost") return null;
+  return host;
+}
+
 // =============================================================================
 // FLOW CONTROL
 // =============================================================================
@@ -243,7 +267,10 @@ export async function allocatePort(
     createdAt: Date.now(),
     active: true,
     serverId: SERVER_ID,
-    serverHost: process.env.VPS_HOST || "localhost",
+    // The address a customer dials for this port. Null when the server has not
+    // been given a per-server hostname yet; the caller then falls back to the
+    // legacy behaviour rather than advertising "localhost".
+    serverHost: tcpPublicHost() || process.env.VPS_HOST || "localhost",
   };
 
   // Atomic insert with duplicate key handling

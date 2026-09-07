@@ -114,7 +114,14 @@
       Environment=KOOMPI_REDIRECT_URI={{ koompi_redirect_uri }}
       Environment=DASHBOARD_URL={{ dashboard_url }}
       Environment=ALLOWED_ORIGINS={{ dashboard_url }},https://{{ domain_name }}
-      Environment=VPS_HOST=localhost
+      Environment=VPS_HOST={{ tcp_public_host | default(ansible_host) }}
+      # Per-server hostname customers dial for TCP tunnels (databases, SSH),
+      # e.g. "sgp1.private.koompi.cloud". It MUST resolve to this machine alone:
+      # an allocated TCP port listens on one server only, and a raw TCP
+      # connection carries no hostname, so a customer sent to the round-robin
+      # address lands on a server that isn't listening and is simply refused.
+      # Set tcp_public_host per host in the inventory.
+      Environment=TCP_PUBLIC_HOST={{ tcp_public_host | default(ansible_host) }}
       Environment=VPS_ID={{ vps_id | default(ansible_hostname) }}
       Environment=VPS_NAME={{ vps_id | default(ansible_hostname) }}
       Environment=VPS_REGION={{ vps_region | default('default') }}
