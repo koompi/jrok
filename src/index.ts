@@ -993,8 +993,9 @@ async function startServer() {
 
         // ============ Public Routes (no auth required) ============
 
-        // Health check
-        if (path === "/health" && method === "GET") {
+        // Health check. Not on tunnel subdomains: there /health belongs to the
+        // tunneled app, so it falls through to tunnel routing below.
+        if (path === "/health" && method === "GET" && !hostIsTunnelSubdomain(hostname)) {
           return addCors(new Response(
             JSON.stringify({
               success: true,
