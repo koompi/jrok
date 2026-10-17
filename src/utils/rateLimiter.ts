@@ -6,6 +6,7 @@
  */
 
 import { getCollections } from "./mongodb";
+import { getClientIp as resolveClientIp } from "./clientIp";
 
 // =============================================================================
 // CONFIGURATION
@@ -212,21 +213,14 @@ export function checkDomainRateLimit(domain: string): null | { retryAfter: numbe
 // =============================================================================
 
 /**
- * Get client IP from request
+ * Get client IP from request.
+ *
+ * Kept for existing importers; the logic lives in utils/clientIp.ts. This used
+ * to return the LEFTMOST X-Forwarded-For entry — the one the client writes — so
+ * the limits keyed on it could be reset by changing a header.
  */
-export function getClientIp(req: Request): string {
-  const forwarded = req.headers.get("x-forwarded-for");
-  if (forwarded) {
-    return forwarded.split(",")[0]?.trim() || "unknown";
-  }
-
-  const realIp = req.headers.get("x-real-ip");
-  if (realIp) {
-    return realIp;
-  }
-
-  const connectionIp = (req as any).socket?.remoteAddress || "unknown";
-  return connectionIp;
+export function getClientIp(req: Request, socketIp?: string | null): string {
+  return resolveClientIp(req, socketIp);
 }
 
 /**

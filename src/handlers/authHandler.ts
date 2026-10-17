@@ -2,6 +2,7 @@ import * as authService from "../services/authService";
 import * as organizationService from "../services/organizationService";
 import * as monitoringService from "../services/monitoringService";
 import type { User } from "../types/index";
+import { getClientIp } from "../utils/clientIp";
 
 // Helper to create JSON response
 function jsonResponse(data: unknown, status = 200): Response {
@@ -24,8 +25,9 @@ export function handleGetLoginUrl(): Response {
 }
 
 // POST /auth/callback - Handle OAuth callback
-export async function handleOAuthCallback(req: Request): Promise<Response> {
-  const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+// `clientIp` is the verified visitor address from the server (utils/clientIp.ts);
+// the fallback only serves callers that don't pass it.
+export async function handleOAuthCallback(req: Request, clientIp: string = getClientIp(req)): Promise<Response> {
   
   try {
     const body = await req.json();
@@ -47,7 +49,7 @@ export async function handleOAuthCallback(req: Request): Promise<Response> {
 
     // Create session
     const userAgent = req.headers.get("user-agent") || undefined;
-    const ipAddress = req.headers.get("x-forwarded-for") || req.headers.get("x-real-ip") || undefined;
+    const ipAddress = clientIp !== "unknown" ? clientIp : undefined;
     const session = await authService.createSession(user.id, userAgent, ipAddress);
 
     // Get user's organizations

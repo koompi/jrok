@@ -257,7 +257,8 @@ const agent = await agentService.getAgentByDomainAsync(subdomain);
 
 ### Cluster Stats Endpoint
 ```bash
-curl https://api.example.com/cluster/stats
+# Requires the server API_KEY (or a super-admin session)
+curl -H "Authorization: Bearer $API_KEY" https://api.example.com/cluster/stats
 ```
 Returns:
 ```json

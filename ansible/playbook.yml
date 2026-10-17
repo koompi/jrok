@@ -53,7 +53,42 @@
         - "22"
         - "80"
         - "443"
-        - "3000"
+      tags: ["firewall"]
+
+    # jrok's own port (3000) is reached by nginx (whose upstream lists every
+    # server's ansible_host:3000) and by peer jrok servers forwarding
+    # cross-server traffic. Nothing else should reach it: jrok believes the
+    # X-Forwarded-For entry nginx appends, and a caller that skips nginx can
+    # write that entry itself (bypassing IP allowlists, IP blocks and the auth
+    # rate limiter). Loopback is not filtered by UFW.
+    #
+    # Add sources (e.g. a peer's public IP when ansible_host is a private one)
+    # with jrok_port_extra_sources, or set jrok_port_public=true to keep the old
+    # open-to-all rule.
+    - name: Setup firewall (UFW) - jrok port from jrok servers only
+      ufw:
+        rule: allow
+        port: "3000"
+        proto: tcp
+        from_ip: "{{ item }}"
+      loop: "{{ (groups['jrok_servers'] | map('extract', hostvars, 'ansible_host') | list) + (jrok_port_extra_sources | default([])) }}"
+      tags: ["firewall"]
+
+    - name: Setup firewall (UFW) - remove the old open-to-all jrok port rule
+      ufw:
+        rule: allow
+        port: "3000"
+        proto: tcp
+        delete: yes
+      when: not (jrok_port_public | default(false) | bool)
+      tags: ["firewall"]
+
+    - name: Setup firewall (UFW) - jrok port open to all (jrok_port_public=true)
+      ufw:
+        rule: allow
+        port: "3000"
+        proto: tcp
+      when: jrok_port_public | default(false) | bool
       tags: ["firewall"]
 
     - name: Setup firewall (UFW) - TCP tunnel port range
@@ -90,7 +125,7 @@
           
           Access your service at:
           - https://{{ domain_name }}
-          - http://{{ inventory_hostname }}:3000 (direct)
+          - http://localhost:3000 (direct, on the server; port 3000 only accepts jrok servers)
           
           TCP Tunnels:
           - Port range: {{ tcp_port_min | default('10000') }}-{{ tcp_port_max | default('20000') }}

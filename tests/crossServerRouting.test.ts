@@ -114,17 +114,25 @@ test("the visitor's IP reaches the peer, where IP rules are evaluated", async ()
     let got = await (await forwardRequest(peer.target, bare, "/", "203.0.113.9")).json() as any;
     expect(got.xff).toBe("203.0.113.9");
 
-    // An X-Forwarded-For from the edge nginx already leads with the visitor.
+    // An incoming X-Forwarded-For starts with whatever the visitor sent, so it
+    // does not cross as-is: the peer gets only the address this server
+    // verified (the caller derives it with utils/clientIp.ts).
     const viaNginx = new Request("http://shop.customer.com/", {
-      headers: { host: "shop.customer.com", "x-forwarded-for": "198.51.100.7" },
+      headers: { host: "shop.customer.com", "x-forwarded-for": "10.9.9.9, 203.0.113.9" },
     });
     got = await (await forwardRequest(peer.target, viaNginx, "/", "203.0.113.9")).json() as any;
-    expect(got.xff).toBe("198.51.100.7");
+    expect(got.xff).toBe("203.0.113.9");
 
     // Nothing known: send no header at all rather than the string "unknown",
-    // which an allowlist would treat as a real (and never matching) address.
+    // which an allowlist would treat as a real (and never matching) address —
+    // and never the visitor's own unverified claim either.
     const unknown = new Request("http://shop.customer.com/", { headers: { host: "shop.customer.com" } });
     got = await (await forwardRequest(peer.target, unknown, "/", undefined)).json() as any;
+    expect(got.xff).toBeNull();
+    const claimOnly = new Request("http://shop.customer.com/", {
+      headers: { host: "shop.customer.com", "x-forwarded-for": "10.9.9.9" },
+    });
+    got = await (await forwardRequest(peer.target, claimOnly, "/", undefined)).json() as any;
     expect(got.xff).toBeNull();
   } finally {
     peer.stop();
@@ -166,6 +174,7 @@ test("the WS target keeps Host and drops this hop's handshake headers", () => {
       "sec-websocket-key": "abc123",
       "sec-websocket-version": "13",
       cookie: "session=xyz",
+      "x-forwarded-for": "10.9.9.9, 203.0.113.9", // visitor-written first hop
     },
   });
 
@@ -176,7 +185,9 @@ test("the WS target keeps Host and drops this hop's handshake headers", () => {
   expect(url).toBe("ws://10.0.0.2:3000/socket");
   expect(headers["host"]).toBe("shop.customer.com");
   expect(headers["cookie"]).toBe("session=xyz");     // app headers cross
+  // Only the verified address crosses, under one key.
   expect(headers["X-Forwarded-For"]).toBe("203.0.113.9");
+  expect(headers["x-forwarded-for"]).toBeUndefined();
   // The outgoing socket generates its own handshake; reusing ours breaks it.
   expect(headers["upgrade"]).toBeUndefined();
   expect(headers["connection"]).toBeUndefined();

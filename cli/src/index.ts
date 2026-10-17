@@ -772,6 +772,11 @@ function handleTcpClose(message: any): void {
   }
 }
 
+/** Opt-in for servers older than header auth, which only read the key from ?auth=. */
+function useLegacyQueryAuth(): boolean {
+  return (process.env.JROK_LEGACY_QUERY_AUTH || '').toLowerCase() === 'true';
+}
+
 async function connectAgent(config: ClientConfig): Promise<void> {
   const baseDomain = getBaseDomain(config.serverUrl);
   const fullDomain = `${config.domain}.${baseDomain}`;
@@ -782,7 +787,12 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   wsUrl.pathname = "/ws/agent";
   wsUrl.searchParams.set("domain", config.domain);
   wsUrl.searchParams.set("serviceType", config.serviceType || 'port');
-  wsUrl.searchParams.set("auth", config.authToken);
+  // The API key travels in the Authorization header (below), not the URL:
+  // proxies write URLs to their access logs. Servers predating header auth
+  // only read ?auth=; JROK_LEGACY_QUERY_AUTH=true restores that for them.
+  if (useLegacyQueryAuth()) {
+    wsUrl.searchParams.set("auth", config.authToken);
+  }
   wsUrl.searchParams.set("protocol", protocol);
   // Advertise protocol capabilities: streaming HTTP responses and base64
   // request bodies. Old servers ignore this; the server confirms its own
@@ -840,8 +850,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   console.log(`\n${config.serverUrl}\n`);
 
   const ws = new WebSocket(wsUrl.toString(), {
-    // Enable WebSocket-level ping/pong for better connection stability
-    // This helps keep connections alive through proxies and load balancers
+    headers: { Authorization: `Bearer ${config.authToken}` },
   });
   let heartbeatInterval: NodeJS.Timeout;
   let pingInterval: NodeJS.Timeout;
@@ -1026,7 +1035,9 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   };
 
   ws.onerror = (error) => {
-    console.error("❌ Connection error:", error);
+    // Message only: the event object carries the socket, and printing it dumps
+    // the connection URL into whatever collects this process's output.
+    console.error("❌ Connection error:", (error as any)?.message || (error as any)?.error?.message || "unknown error");
   };
 
   ws.onclose = () => {

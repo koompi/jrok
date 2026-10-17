@@ -379,6 +379,8 @@ export interface AuthContext {
   organization?: Organization;
   apiKey?: ApiKey;
   isApiKeyAuth: boolean;
+  /** Authenticated with the server API_KEY (legacy Bearer): operator/cluster access. */
+  isServerKey?: boolean;
 }
 
 // ============ Activity & Stats Types ============

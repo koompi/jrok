@@ -1,5 +1,6 @@
 import type { AuthContext } from "../types/index";
 import * as statsService from "../services/statsService";
+import { isPrivileged, filterOwned } from "../utils/access";
 
 /**
  * GET /api/stats/dashboard - Get dashboard overview stats
@@ -114,7 +115,14 @@ export async function handleEnhancedAgents(
   authContext: AuthContext
 ): Promise<Response> {
   try {
-    const agents = await statsService.getEnhancedAgents(authContext.organization?.id);
+    // getEnhancedAgents returns every agent on the platform. Privileged callers
+    // keep that view; anyone else gets their own orgs' agents, minus the
+    // client IP and the jrok server they sit on (the dashboard shows neither).
+    const all = await statsService.getEnhancedAgents(authContext.organization?.id);
+    const agents = isPrivileged(authContext)
+      ? all
+      : (await filterOwned(authContext, all, (a) => a.organizationId))
+          .map(({ clientIp, serverHost, serverId, ...rest }) => rest);
 
     return new Response(
       JSON.stringify({ success: true, agents }),

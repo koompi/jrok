@@ -194,16 +194,17 @@ export async function forwardRequest(
     // this did before) makes an allowlist reject a legitimate visitor and a
     // blocklist let a blocked one through.
     //
-    // An X-Forwarded-For set by the edge nginx already leads with the visitor's
-    // address, so it crosses unchanged; only when there is none do we supply
-    // what we worked out ourselves.
-    if (!originalRequest.headers.get('x-forwarded-for')) {
-      if (clientIp) {
-        headers.set('X-Forwarded-For', clientIp);
-      } else {
-        // Nothing trustworthy to forward — say nothing rather than assert 'unknown'.
-        headers.delete('X-Forwarded-For');
-      }
+    // Always the address this server verified (utils/clientIp.ts), replacing
+    // what came in. The incoming X-Forwarded-For starts with whatever the
+    // visitor chose to send; the target counts hops from the right, so as a
+    // single entry the verified address is exactly what it picks.
+    headers.delete('X-Real-IP');
+    if (clientIp) {
+      headers.set('X-Forwarded-For', clientIp);
+      headers.set('X-Real-IP', clientIp);
+    } else {
+      // Nothing trustworthy to forward — say nothing rather than assert 'unknown'.
+      headers.delete('X-Forwarded-For');
     }
 
     const hasBody = originalRequest.method !== 'GET' && originalRequest.method !== 'HEAD';
@@ -274,6 +275,8 @@ export function buildCrossServerWsTarget(
   originalRequest.headers.forEach((value, key) => {
     const k = key.toLowerCase();
     if (k === 'upgrade' || k === 'connection' || k.startsWith('sec-websocket-')) return;
+    // Replaced below with the address this server verified.
+    if (k === 'x-forwarded-for' || k === 'x-real-ip') return;
     headers[key] = value;
   });
 
@@ -281,8 +284,10 @@ export function buildCrossServerWsTarget(
   if (originalHost) headers['host'] = originalHost;
 
   headers['X-Forwarded-From'] = SERVER_ID;
-  if (!originalRequest.headers.get('x-forwarded-for') && clientIp) {
+  // Same rule as forwardRequest: the verified address, never the incoming chain.
+  if (clientIp) {
     headers['X-Forwarded-For'] = clientIp;
+    headers['X-Real-IP'] = clientIp;
   }
 
   return { url, headers };
