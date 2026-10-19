@@ -1,6 +1,7 @@
-import type { TunnelResponse, ListTunnelsResponse, CreateTunnelRequest } from "../types/index";
+import type { AuthContext, TunnelResponse, ListTunnelsResponse, CreateTunnelRequest } from "../types/index";
 import * as tunnelService from "../services/tunnelService";
 import * as authService from "../services/authService";
+import { checkOrgAccess } from "../utils/access";
 
 // Helper to create JSON response
 function jsonResponse(data: unknown, status = 200): Response {
@@ -85,9 +86,9 @@ export async function handleListTunnels(req: Request): Promise<Response> {
   }
 }
 
-export async function handleGetTunnel(id: string, req?: Request): Promise<Response> {
-  // Auth is optional for get - but if provided, verify ownership
-  const authContext = req ? await authService.authenticateRequest(req) : null;
+export async function handleGetTunnel(id: string, req?: Request, ctx?: AuthContext): Promise<Response> {
+  // The server passes its own auth context (which also knows the server key).
+  const authContext = ctx ?? (req ? await authService.authenticateRequest(req) : null);
 
   try {
     const tunnel = await tunnelService.getTunnel(id);
@@ -96,11 +97,10 @@ export async function handleGetTunnel(id: string, req?: Request): Promise<Respon
       return jsonResponse({ success: false, message: "Tunnel not found" } as TunnelResponse, 404);
     }
 
-    // If using API key auth, verify tunnel belongs to their org
-    if (authContext?.isApiKeyAuth && authContext.organization) {
-      if (tunnel.organizationId && tunnel.organizationId !== authContext.organization.id) {
-        return jsonResponse({ success: false, message: "Forbidden" }, 403);
-      }
+    // Ownership (utils/access.ts). This used to be checked for API keys only,
+    // so any signed-in dashboard account could read any tenant's tunnel.
+    if (!(await checkOrgAccess(authContext, tunnel.organizationId)).allowed) {
+      return jsonResponse({ success: false, message: "Tunnel not found" } as TunnelResponse, 404);
     }
 
     return jsonResponse({
@@ -117,9 +117,10 @@ export async function handleGetTunnel(id: string, req?: Request): Promise<Respon
   }
 }
 
-export async function handleDeleteTunnel(id: string, req?: Request): Promise<Response> {
-  // Auth required for delete
-  const authContext = req ? await authService.authenticateRequest(req) : null;
+export async function handleDeleteTunnel(id: string, req?: Request, ctx?: AuthContext): Promise<Response> {
+  // Auth required for delete. The server passes its own auth context (which
+  // also knows the server key).
+  const authContext = ctx ?? (req ? await authService.authenticateRequest(req) : null);
   if (!authContext) {
     return jsonResponse({ success: false, message: "Unauthorized" }, 401);
   }
@@ -131,11 +132,11 @@ export async function handleDeleteTunnel(id: string, req?: Request): Promise<Res
       return jsonResponse({ success: false, message: "Tunnel not found" } as TunnelResponse, 404);
     }
 
-    // If using API key auth, verify tunnel belongs to their org
-    if (authContext.isApiKeyAuth && authContext.organization) {
-      if (tunnel.organizationId && tunnel.organizationId !== authContext.organization.id) {
-        return jsonResponse({ success: false, message: "Forbidden" }, 403);
-      }
+    // Ownership (utils/access.ts). This used to be checked for API keys only,
+    // so any signed-in dashboard account could delete any tenant's tunnel
+    // (dropping its nginx config or freeing its TCP port).
+    if (!(await checkOrgAccess(authContext, tunnel.organizationId)).allowed) {
+      return jsonResponse({ success: false, message: "Tunnel not found" } as TunnelResponse, 404);
     }
 
     await tunnelService.deleteTunnel(id);

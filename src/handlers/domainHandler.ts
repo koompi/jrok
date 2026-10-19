@@ -1,10 +1,10 @@
-import type { CustomDomain, RegisterCustomDomainRequest } from "../types/index";
+import type { AuthContext, CustomDomain, RegisterCustomDomainRequest } from "../types/index";
 import * as domainService from "../services/domainService";
 import * as database from "../utils/database";
-import { checkGlobalRateLimit, checkDomainRateLimit, getClientIp } from "../utils/rateLimiter";
+import { checkGlobalRateLimit, checkDomainRateLimit } from "../utils/rateLimiter";
 import * as notificationService from "../services/notificationService";
 import * as planLimitService from "../services/planLimitService";
-import * as authService from "../services/authService";
+import { isPrivileged, checkOrgAccess, filterOwned, resolveDomainOwner } from "../utils/access";
 
 export interface DomainResponse {
   success: boolean;
@@ -19,10 +19,28 @@ export interface ListDomainsResponse {
   total: number;
 }
 
-export async function handleRegisterDomain(req: Request): Promise<Response> {
+/**
+ * Ownership gate for every /domains/:domain route (see utils/access.ts). These
+ * used to require only a signed-in caller, so any jrok account or any org's API
+ * key could read, delete, re-sync, transfer or restore any customer's domain.
+ * Privileged callers (kconsole's platform key, the server key, super-admins)
+ * keep access to all of them. Returns a response to send, or null to proceed.
+ */
+async function denyUnlessDomainOwner(domain: string, ctx: AuthContext): Promise<Response | null> {
+  if (!domain || isPrivileged(ctx)) return null;
+  const record = await database.getCustomDomainByName(domain);
+  const decision = await checkOrgAccess(ctx, record?.organizationId);
+  if (decision.allowed) return null;
+  return new Response(
+    JSON.stringify({ success: false, message: "Domain not found" } as DomainResponse),
+    { status: 404, headers: { "Content-Type": "application/json" } }
+  );
+}
+
+// `clientIp` is the verified visitor address from the server (utils/clientIp.ts).
+export async function handleRegisterDomain(req: Request, clientIp: string, authContext: AuthContext): Promise<Response> {
   try {
     // Check global rate limit
-    const clientIp = getClientIp(req);
     const globalLimit = checkGlobalRateLimit(clientIp);
     if (globalLimit) {
       // Send rate limit notification
@@ -88,9 +106,20 @@ export async function handleRegisterDomain(req: Request): Promise<Response> {
       );
     }
 
+    // ====== OWNER ======
+    // Only privileged callers (kconsole registering for its customers) may name
+    // an arbitrary organizationId; anyone else registers under their own org.
+    const owner = await resolveDomainOwner(authContext, body.organizationId);
+    if (!owner.ok) {
+      return new Response(
+        JSON.stringify({ success: false, message: owner.message } as DomainResponse),
+        { status: owner.status, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    body.organizationId = owner.organizationId;
+
     // ====== PLAN LIMIT CHECK: Domain Count ======
     // Get organization from auth context
-    const authContext = await authService.authenticateRequest(req);
     if (authContext?.organization?.id) {
       const domainLimitCheck = await planLimitService.checkDomainLimit(authContext.organization.id);
       if (!domainLimitCheck.allowed) {
@@ -131,8 +160,11 @@ export async function handleRegisterDomain(req: Request): Promise<Response> {
   }
 }
 
-export async function handleGetDomain(domain: string): Promise<Response> {
+export async function handleGetDomain(domain: string, authContext: AuthContext): Promise<Response> {
   try {
+    const denied = await denyUnlessDomainOwner(domain, authContext);
+    if (denied) return denied;
+
     if (!domain) {
       return new Response(
         JSON.stringify({
@@ -175,9 +207,10 @@ export async function handleGetDomain(domain: string): Promise<Response> {
   }
 }
 
-export async function handleListDomains(): Promise<Response> {
+export async function handleListDomains(authContext: AuthContext): Promise<Response> {
   try {
-    const domains = await domainService.listCustomDomains();
+    // Privileged callers see every domain; everyone else only their orgs'.
+    const domains = await filterOwned(authContext, await domainService.listCustomDomains(), (d) => d.organizationId);
 
     return new Response(
       JSON.stringify({
@@ -200,8 +233,11 @@ export async function handleListDomains(): Promise<Response> {
   }
 }
 
-export async function handleDeleteDomain(domain: string): Promise<Response> {
+export async function handleDeleteDomain(domain: string, authContext: AuthContext): Promise<Response> {
   try {
+    const denied = await denyUnlessDomainOwner(domain, authContext);
+    if (denied) return denied;
+
     if (!domain) {
       return new Response(
         JSON.stringify({
@@ -246,8 +282,11 @@ export async function handleDeleteDomain(domain: string): Promise<Response> {
   }
 }
 
-export async function handleResyncDomain(domain: string): Promise<Response> {
+export async function handleResyncDomain(domain: string, authContext: AuthContext): Promise<Response> {
   try {
+    const denied = await denyUnlessDomainOwner(domain, authContext);
+    if (denied) return denied;
+
     if (!domain) {
       return new Response(
         JSON.stringify({
@@ -281,8 +320,11 @@ export async function handleResyncDomain(domain: string): Promise<Response> {
   }
 }
 
-export async function handleTransferDomain(domain: string, req: Request): Promise<Response> {
+export async function handleTransferDomain(domain: string, req: Request, authContext: AuthContext): Promise<Response> {
   try {
+    const denied = await denyUnlessDomainOwner(decodeURIComponent(domain), authContext);
+    if (denied) return denied;
+
     if (!domain) {
       return new Response(
         JSON.stringify({
@@ -335,8 +377,11 @@ export async function handleTransferDomain(domain: string, req: Request): Promis
   }
 }
 
-export async function handleBackupDomain(domain: string): Promise<Response> {
+export async function handleBackupDomain(domain: string, authContext: AuthContext): Promise<Response> {
   try {
+    const denied = await denyUnlessDomainOwner(decodeURIComponent(domain), authContext);
+    if (denied) return denied;
+
     if (!domain) {
       return new Response(
         JSON.stringify({
@@ -370,8 +415,11 @@ export async function handleBackupDomain(domain: string): Promise<Response> {
   }
 }
 
-export async function handleRestoreDomain(domain: string, backupId: string): Promise<Response> {
+export async function handleRestoreDomain(domain: string, backupId: string, authContext: AuthContext): Promise<Response> {
   try {
+    const denied = await denyUnlessDomainOwner(decodeURIComponent(domain), authContext);
+    if (denied) return denied;
+
     if (!domain) {
       return new Response(
         JSON.stringify({
@@ -389,6 +437,17 @@ export async function handleRestoreDomain(domain: string, backupId: string): Pro
           message: "Backup ID is required",
         } as DomainResponse),
         { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // The backup must be one of THIS domain's. backupId is joined onto the
+    // backup directory as a path, so an arbitrary value could restore another
+    // domain's certificate here, or name a directory outside the backups.
+    const ownBackups = await domainService.listDomainBackups(decodeURIComponent(domain));
+    if (!ownBackups.some((b) => b.id === backupId)) {
+      return new Response(
+        JSON.stringify({ success: false, message: "Backup not found for this domain" } as DomainResponse),
+        { status: 404, headers: { "Content-Type": "application/json" } }
       );
     }
 
@@ -415,8 +474,11 @@ export async function handleRestoreDomain(domain: string, backupId: string): Pro
   }
 }
 
-export async function handleListBackups(domain: string): Promise<Response> {
+export async function handleListBackups(domain: string, authContext: AuthContext): Promise<Response> {
   try {
+    const denied = await denyUnlessDomainOwner(decodeURIComponent(domain), authContext);
+    if (denied) return denied;
+
     if (!domain) {
       return new Response(
         JSON.stringify({
@@ -492,8 +554,11 @@ function isValidDomain(domain: string): boolean {
  * Check CNAME verification status for a domain
  * GET /domains/:domain/verify-status
  */
-export async function handleCheckCnameStatus(domain: string): Promise<Response> {
+export async function handleCheckCnameStatus(domain: string, authContext: AuthContext): Promise<Response> {
   try {
+    const denied = await denyUnlessDomainOwner(domain, authContext);
+    if (denied) return denied;
+
     if (!domain) {
       return new Response(
         JSON.stringify({
@@ -529,8 +594,11 @@ export async function handleCheckCnameStatus(domain: string): Promise<Response> 
  * Verify CNAME and issue certificate
  * POST /domains/:domain/verify
  */
-export async function handleVerifyAndIssueCertificate(domain: string): Promise<Response> {
+export async function handleVerifyAndIssueCertificate(domain: string, authContext: AuthContext): Promise<Response> {
   try {
+    const denied = await denyUnlessDomainOwner(domain, authContext);
+    if (denied) return denied;
+
     if (!domain) {
       return new Response(
         JSON.stringify({

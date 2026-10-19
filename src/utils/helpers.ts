@@ -30,6 +30,19 @@ export function validateApiKey(provided: string, expected: string): boolean {
   return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
 }
 
+/**
+ * Constant-time string comparison for secrets. Hashing both sides first makes
+ * the inputs equal-length, so neither the content nor the length of the secret
+ * leaks through timing (timingSafeEqual alone throws on a length mismatch,
+ * which itself reveals the length).
+ */
+export function safeEqual(provided: string, expected: string): boolean {
+  if (typeof provided !== "string" || typeof expected !== "string") return false;
+  const a = crypto.createHash("sha256").update(provided).digest();
+  const b = crypto.createHash("sha256").update(expected).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
 export function createBasicAuthMiddleware(apiKey: string) {
   return (req: Request): boolean => {
     const authHeader = req.headers.get("authorization");
@@ -38,10 +51,6 @@ export function createBasicAuthMiddleware(apiKey: string) {
     }
 
     const token = authHeader.slice(7); // Remove "Bearer "
-    try {
-      return validateApiKey(token, apiKey);
-    } catch {
-      return false;
-    }
+    return safeEqual(token, apiKey);
   };
 }

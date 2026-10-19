@@ -1,4 +1,4 @@
-import { createBasicAuthMiddleware } from "./utils/helpers";
+import { createBasicAuthMiddleware, safeEqual } from "./utils/helpers";
 import { setConfig, cleanupExpiredTunnels } from "./services/tunnelService";
 import * as tunnelHandler from "./handlers/tunnelHandler";
 import * as agentHandler from "./handlers/agentHandler";
@@ -26,7 +26,17 @@ import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
 import * as planLimitService from "./services/planLimitService";
 import { PROXY_MODE } from "./config/proxyMode";
-import { matchBaseDomain, isTunnelSubdomain as hostIsTunnelSubdomain, extractSubdomain, allBaseDomains } from "./utils/baseDomains";
+import { allBaseDomains } from "./utils/baseDomains";
+import { getClientIp, setForwardedClientHeaders, trustedProxyHops, trustedProxyIps } from "./utils/clientIp";
+import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
+import {
+  normalizeHostname,
+  classifyHost,
+  isOwnOAuthRedirect,
+  looksLikeAgentHandshake,
+  strictApiHosts,
+  describeManagementHosts,
+} from "./utils/hostRouting";
 
 // =============================================================================
 // PROCESS-LEVEL SURVIVAL
@@ -148,7 +158,8 @@ async function handleWebSocketTunnel(
   server: any,
   agentWs: WebSocket,
   agent: Agent,
-  subdomain: string
+  subdomain: string,
+  clientIp?: string
 ): Promise<Response | undefined> {
   const url = new URL(req.url);
   const path = url.pathname + url.search;
@@ -158,9 +169,12 @@ async function handleWebSocketTunnel(
   req.headers.forEach((value, key) => {
     // Forward relevant headers (exclude hop-by-hop headers)
     if (!WS_SKIP_HEADERS.has(key.toLowerCase())) {
-      headers[key] = value;
+      headers[key.toLowerCase()] = value;
     }
   });
+  // Same rule as plain HTTP: the app sees the address jrok verified, not a
+  // forwarded-for chain whose first hop the visitor wrote.
+  setForwardedClientHeaders(headers, clientIp);
 
   console.log(`🔌 WebSocket upgrade request for ${subdomain}${path}`);
 
@@ -212,9 +226,11 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
     if (headers["host"]) {
       headers["x-forwarded-host"] = headers["host"];
     }
-    if (clientIp && clientIp !== "unknown" && !headers["x-forwarded-for"]) {
-      headers["x-forwarded-for"] = clientIp;
-    }
+    // Overwrite, never pass through: what arrives from nginx is
+    // "<whatever the visitor sent>, <real IP>", and apps read the first entry.
+    // Passing it on let any visitor choose the IP the customer's app logs,
+    // rate-limits and allowlists on.
+    setForwardedClientHeaders(headers, clientIp);
 
     try {
       // Read request body as raw bytes. Agents that advertise the "b64body"
@@ -322,9 +338,11 @@ async function authenticateRequest(req: Request): Promise<AuthContext | null> {
 
   // Fall back to legacy API key auth
   if (isLegacyAuthenticated(req)) {
-    // Legacy auth - treat as a super admin context for backward compatibility
+    // Legacy auth - treat as a super admin context for backward compatibility.
+    // isServerKey marks it privileged for the ownership checks in utils/access.ts.
     return {
       isApiKeyAuth: true,
+      isServerKey: true,
     } as AuthContext;
   }
 
@@ -374,10 +392,22 @@ async function requireSuperAdmin(req: Request): Promise<Response | null> {
 async function requireAdminOrServerKey(req: Request): Promise<Response | null> {
   const serverKey = process.env.JROK_ADMIN_KEY || config.apiKey;
   const presented = req.headers.get("x-admin-key");
-  if (presented && serverKey && presented === serverKey) {
+  // Constant-time: `===` returns at the first differing byte, which lets a
+  // caller recover the key one character at a time by timing.
+  if (presented && serverKey && safeEqual(presented, serverKey)) {
     return null;
   }
   return requireSuperAdmin(req);
+}
+
+/**
+ * Auth for cluster-internal endpoints (certificate sync): the server API_KEY as
+ * a legacy Bearer token — what the certbot hook and operator scripts send — the
+ * X-Admin-Key, or a super-admin session. Not an ordinary user or org API key.
+ */
+async function requireServerKeyOrSuperAdmin(req: Request): Promise<Response | null> {
+  if (isLegacyAuthenticated(req)) return null;
+  return requireAdminOrServerKey(req);
 }
 
 // Register local VPS server on startup
@@ -921,7 +951,13 @@ async function startServer() {
         const url = new URL(req.url);
         const path = url.pathname;
         const method = req.method;
-        const hostname = url.hostname;
+        const hostname = normalizeHostname(url.hostname);
+
+        // The visitor's real address: the X-Forwarded-For entry our own proxy
+        // appended, never one the client wrote itself. Used for IP allow/block
+        // lists, rate limits, logs and the headers sent on to the customer's
+        // app. See utils/clientIp.ts.
+        const clientIp = getClientIp(req, server.requestIP(req)?.address);
 
         // CORS configuration - whitelist allowed origins
         const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173").split(",").map(o => o.trim());
@@ -958,19 +994,67 @@ async function startServer() {
           "Referrer-Policy": "strict-origin-when-cross-origin",
         };
 
-        // Handle preflight OPTIONS request — only for Jrok management API
-        // Tunnel domain traffic should pass through so the backend app handles CORS itself
-        if (method === "OPTIONS") {
-          // Accepts any configured base domain, so a renamed primary and the
-          // legacy name behave identically here.
-          const isTunnelSubdomain = hostIsTunnelSubdomain(hostname);
-          const isCustomDomain = matchBaseDomain(hostname) === null && hostname !== 'localhost';
+        // ============ Host Classification ============
+        // Decide whose request this is BEFORE looking at the path. On a tunnel
+        // host every path belongs to the customer's app — /auth/*, /plans,
+        // /admin/* and the rest of jrok's API included. Those used to be matched
+        // here by path alone, so jrok answered them on every customer domain:
+        // an app's OAuth callback was redirected to jrok's dashboard with the
+        // app's code and state attached. See utils/hostRouting.ts.
+        //
+        // A request matches a tunnel if its host is a subdomain of ANY accepted
+        // base domain (primary or legacy), so URLs issued under the old name keep
+        // resolving after a rename, or if it is a registered, active custom domain.
+        let tunnelDomain: string | null = null;
+        let isCustomDomainRequest = false;
+        const hostRoute = classifyHost(hostname);
 
-          if (!isTunnelSubdomain && !isCustomDomain) {
-            // Management API — Jrok handles CORS
-            return new Response(null, { status: 204, headers: corsHeaders });
+        if (hostRoute.kind === "tunnel") {
+          // e.g. "demo" from "demo.public.koompi.cloud"
+          tunnelDomain = hostRoute.name;
+        } else if (hostRoute.kind === "custom-candidate") {
+          // Not one of ours by name — might be a registered custom domain.
+          try {
+            const { getCustomDomainByName } = await import("./utils/database");
+            const customDomain = await getCustomDomainByName(hostname);
+            if (customDomain && customDomain.active) {
+              tunnelDomain = hostname;
+              isCustomDomainRequest = true;
+            }
+          } catch (error) {
+            // Fail closed. Without the lookup a customer's domain can't be told
+            // apart from an API host, and guessing "API" would hand the
+            // customer's paths to jrok again. Deliberately no X-Jrok-Tunnel
+            // header: this is not "the agent is gone".
+            console.error(`❌ Custom domain lookup failed for ${hostname}:`, error instanceof Error ? error.message : String(error));
+            return new Response(
+              JSON.stringify({ success: false, message: "Temporarily unable to route this request" }),
+              { status: 503, headers: { "Content-Type": "application/json", "Retry-After": "5" } }
+            );
           }
-          // Tunnel/custom domain — let it fall through to be forwarded to the agent
+        }
+
+        // jrok's own OAuth redirect (KOOMPI_REDIRECT_URI) stays jrok's, whatever
+        // host the operator put it on.
+        const ownOAuthRedirect = isOwnOAuthRedirect(hostname, path);
+        if (ownOAuthRedirect) {
+          tunnelDomain = null;
+          isCustomDomainRequest = false;
+        }
+
+        // JROK_STRICT_API_HOSTS: the management API only on hosts that are ours
+        // by configuration (JROK_API_HOSTS, base domains, localhost, IPs).
+        if (!tunnelDomain && !ownOAuthRedirect && hostRoute.kind === "custom-candidate" && strictApiHosts()) {
+          return new Response(
+            JSON.stringify({ success: false, message: "Not Found" }),
+            { status: 404, headers: { "Content-Type": "application/json" } }
+          );
+        }
+
+        // Handle preflight OPTIONS request — only for Jrok management API.
+        // Tunnel traffic passes through so the backend app handles CORS itself.
+        if (method === "OPTIONS" && !tunnelDomain) {
+          return new Response(null, { status: 204, headers: corsHeaders });
         }
 
         // Helper to add CORS and security headers to response
@@ -986,16 +1070,287 @@ async function startServer() {
           });
         };
 
-        // Agent WebSocket upgrade (authenticated)
-        if (path === "/ws/agent" && req.headers.get("upgrade") === "websocket") {
+        // Agent WebSocket upgrade (authenticated). On a tunnel host only when the
+        // request is unmistakably an agent handshake (an old deploy may point
+        // --server at one); otherwise /ws/agent is the customer app's path.
+        if (path === "/ws/agent" && req.headers.get("upgrade") === "websocket" &&
+          (!tunnelDomain || looksLikeAgentHandshake(url, req.headers))) {
           return await agentHandler.handleAgentUpgrade(req, server);
         }
 
+        // ============ Tunnel Routing ============
+        // MUST be before any auth check to allow public tunnel access. Every
+        // path on a tunnel host ends here; this block always returns.
+        if (tunnelDomain) {
+          const subdomain = tunnelDomain; // For backward compatibility with existing code
+
+          // Check if agent is on this server or needs cross-server routing
+          const routeResult = await crossServerService.findServerForDomain(subdomain);
+
+          // If agent is on another server, proxy the request
+          if (!routeResult.isLocal && routeResult.targetServer) {
+            // The same verified address the local path uses, but undefined
+            // rather than "unknown" when nothing is known — the forwarder omits
+            // the header entirely instead of asserting a bogus address.
+            const visitorIp = clientIp !== "unknown" ? clientIp : undefined;
+
+            // A WebSocket upgrade cannot go through the HTTP forwarder — fetch()
+            // has no way to carry an upgrade. Accept the visitor's socket here
+            // and relay frames to the server that holds the agent.
+            if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+              const target = crossServerService.buildCrossServerWsTarget(
+                routeResult.targetServer,
+                req,
+                url.pathname + url.search,
+                visitorIp
+              );
+
+              const upgraded = server.upgrade(req, {
+                data: {
+                  type: 'cross-server',
+                  targetUrl: target.url,
+                  targetHeaders: target.headers,
+                  subdomain,
+                },
+              });
+
+              if (upgraded) return undefined;
+              return new Response("Failed to upgrade WebSocket connection", { status: 400 });
+            }
+
+            return crossServerService.forwardRequest(
+              routeResult.targetServer,
+              req,
+              url.pathname + url.search,
+              visitorIp
+            );
+          }
+
+          // Import agentGroupService for load-balanced agent selection
+          const agentGroupService = await import("./services/agentGroupService");
+
+          // Check if this domain has a multi-agent group (load-balanced)
+          const isGroupDomain = await agentGroupService.isGroupedDomain(subdomain);
+
+          // Look up agent - use load balancer for groups, direct lookup for single agents
+          let agent;
+          if (isGroupDomain) {
+            // Use load-balanced selection (round-robin, least-connections, etc.)
+            agent = await agentGroupService.selectAgent(subdomain);
+          } else {
+            // Single agent mode — check local cache first (O(1)), fall back to MongoDB
+            // This avoids a duplicate agentConnections query since findServerForDomain
+            // already confirmed this agent is on this server.
+            agent = agentService.getAgentByDomainLocal(subdomain) ?? await agentService.getAgentByDomainAsync(subdomain);
+          }
+
+          if (!agent || !agent.active) {
+            // Serve maintenance HTML page instead of JSON error.
+            // X-Jrok-Tunnel: down is a distinctive marker so the deploy worker's
+            // health monitor can tell "jrok has no agent for this domain" apart
+            // from a user app that merely returns its own 503, and restart the
+            // tunnel only in the former case.
+            const maintenanceHtmlPath = import.meta.dir + "/../index.html";
+            try {
+              const htmlContent = await Bun.file(maintenanceHtmlPath).text();
+              return addCors(new Response(htmlContent, {
+                status: 503,
+                headers: { "Content-Type": "text/html; charset=utf-8", "X-Jrok-Tunnel": "down" }
+              }));
+            } catch {
+              // Fallback if index.html is not found
+              return addCors(new Response(
+                JSON.stringify({
+                  success: false,
+                  message: `No active agent found for domain: ${subdomain}. Please ensure the agent is running: jrok --port <port> --domain ${subdomain}`,
+                }),
+                { status: 503, headers: { "Content-Type": "application/json", "X-Jrok-Tunnel": "down" } }
+              ));
+            }
+          }
+
+          // Get agent's WebSocket (local connections only)
+          const agentWs = agentService.getAgentSocket(agent.id);
+          if (!agentWs || agentWs.readyState !== 1) {  // 1 = WebSocket.OPEN
+            // For group mode, try to get another agent if this one is disconnected
+            if (isGroupDomain) {
+              // Mark this agent as unhealthy
+              await agentGroupService.updateMemberHealth(agent.id, false);
+              // Try to get another agent
+              const fallbackAgent = await agentGroupService.selectAgent(subdomain);
+              if (fallbackAgent && fallbackAgent.id !== agent.id) {
+                const fallbackWs = agentService.getAgentSocket(fallbackAgent.id);
+                if (fallbackWs && fallbackWs.readyState === 1) {
+                  // Use fallback agent
+                  agent = fallbackAgent;
+                }
+              }
+            }
+
+            // Re-check after potential fallback
+            const finalWs = agentService.getAgentSocket(agent.id);
+            if (!finalWs || finalWs.readyState !== 1) {
+              // X-Jrok-Tunnel: "reconnecting" (NOT "down") — the agent record
+              // still exists, its websocket is just not open right now (server
+              // restart, half-open link the CLI watchdog is about to fix).
+              // The deploy worker only force-restarts tunnels on "down";
+              // reporting "down" here made it kill healthy tunnels that were
+              // seconds away from reconnecting on their own.
+              return addCors(new Response(
+                JSON.stringify({
+                  success: false,
+                  message: `Agent for ${subdomain} is not connected (readyState: ${finalWs?.readyState || 'null'}). ${isGroupDomain ? 'All agents in the group are unavailable.' : 'Attempting reconnection...'}`,
+                }),
+                { status: 503, headers: { "Content-Type": "application/json", "X-Jrok-Tunnel": "reconnecting" } }
+              ));
+            }
+          }
+
+          // Get the final WebSocket reference
+          const finalAgentWs = agentService.getAgentSocket(agent.id)!;
+
+          // Use cached tunnelId from agent (set when agent connects)
+          // This avoids MongoDB query on EVERY request - massive performance improvement!
+          let tunnelId = agent.tunnelId;
+
+          // Fallback to DB lookup only if not cached (rare)
+          if (!tunnelId) {
+            const { getTunnelByDomain } = await import("./utils/database");
+            const tunnel = await getTunnelByDomain(subdomain);
+            tunnelId = tunnel?.id;
+          }
+
+          // ============ Security Check for HTTP Requests ============
+          // clientIp (top of fetch) is the verified visitor address, so the
+          // checks below can't be steered by a forged X-Forwarded-For.
+
+          // Get User-Agent for layered client identification (differentiates devices on same IP)
+          const userAgent = req.headers.get("user-agent") || undefined;
+
+          // Plan tier only exists to scale jrok's own rate limits. In proxy mode
+          // there are none, so skip the lookup entirely rather than resolving a
+          // multiplier nothing will read.
+          const planTier = (!PROXY_MODE && agent.apiKeyOrgId)
+            ? (await planLimitService.getOrganizationPlan(agent.apiKeyOrgId)).tier
+            : 'free';
+
+          // Suspension is kconsole's enforcement lever: it meters bandwidth and
+          // pricing, and pushes a suspension here when an org must be cut off.
+          // Two Map lookups, no I/O.
+          const suspension = securityService.checkSuspension(
+            agent.apiKeyOrgId || agent.organizationId,
+            subdomain
+          );
+          if (suspension.suspended) {
+            return addCors(new Response(
+              JSON.stringify({
+                success: false,
+                message: suspension.reason || "This tunnel is suspended.",
+              }),
+              { status: 402, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+
+          // Remaining checks are abuse control only (blocked IPs, per-tunnel IP
+          // allow/blocklist); rate limiting is skipped in proxy mode.
+          const securityCheck = await securityService.checkHttpRequest(
+            tunnelId || subdomain,
+            agent.organizationId,
+            clientIp,
+            planTier,
+            {
+              userAgent,
+              apiKeyId: agent.apiKeyId,
+            }
+          );
+
+          if (!securityCheck.allowed) {
+            const headers: Record<string, string> = {
+              "Content-Type": "application/json",
+            };
+            if (securityCheck.retryAfter) {
+              headers["Retry-After"] = securityCheck.retryAfter.toString();
+            }
+            return addCors(new Response(
+              JSON.stringify({
+                success: false,
+                message: securityCheck.reason || "Rate limit exceeded",
+              }),
+              { status: 429, headers }
+            ));
+          }
+
+          // ============ Bandwidth Limit Check ============
+          // Legacy standalone mode only. In proxy mode kconsole owns the quota
+          // and expresses the verdict as a suspension, checked above.
+          if (!PROXY_MODE && (agent.apiKeyOrgId || agent.organizationId)) {
+            const bandwidthCheckOrgId = agent.apiKeyOrgId || agent.organizationId;
+            const bandwidthCheck = securityService.checkMonthlyBandwidth(bandwidthCheckOrgId!, planTier);
+
+            // Custom domains have unlimited bandwidth
+            if (isCustomDomainRequest) {
+              bandwidthCheck.allowed = true;
+            }
+
+            if (!bandwidthCheck.allowed) {
+              console.warn(`🚫 Bandwidth limit exceeded for org ${bandwidthCheckOrgId}: ${(bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2)}GB / ${(bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2)}GB`);
+              return addCors(new Response(
+                JSON.stringify({
+                  success: false,
+                  message: "Monthly bandwidth limit exceeded. Please upgrade your plan.",
+                  usedGb: (bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2),
+                  limitGb: (bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2),
+                  percentUsed: bandwidthCheck.percentUsed.toFixed(1),
+                }),
+                { status: 402, headers: { "Content-Type": "application/json" } }
+              ));
+            }
+          }
+
+          // Track HTTP connection
+          securityService.trackHttpConnection(tunnelId || subdomain, true);
+
+          // Check if this is a WebSocket upgrade request
+          if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+            // Handle WebSocket tunneling
+            const response = await handleWebSocketTunnel(req, server, finalAgentWs, agent, subdomain, clientIp);
+            if (response) {
+              securityService.trackHttpConnection(tunnelId || subdomain, false);
+              // Decrement connection count for load balancing
+              if (isGroupDomain) {
+                await agentGroupService.decrementMemberConnections(agent.id);
+              }
+              return response;
+            }
+            return undefined; // Handled by upgrade
+          }
+
+          // Forward regular HTTP request to agent via WebSocket (with bandwidth tracking)
+          const response = await forwardRequestToAgent(req, finalAgentWs, agent, tunnelId, clientIp);
+
+          // Track connection close and bandwidth
+          securityService.trackHttpConnection(tunnelId || subdomain, false);
+
+          // Decrement connection count for load balancing
+          if (isGroupDomain) {
+            await agentGroupService.decrementMemberConnections(agent.id);
+          }
+
+          // Track bandwidth usage against API key's org (for quota limits)
+          const responseSize = parseInt(response.headers.get("content-length") || "0");
+          securityService.trackMonthlyBandwidth(agent.apiKeyOrgId || agent.organizationId || subdomain, responseSize);
+
+          return response;
+        }
+
+        // ============ Management API ============
+        // Everything below runs only for hosts that are not a tunnel (the tunnel
+        // block above always returns), so none of it can shadow a customer's app.
+
         // ============ Public Routes (no auth required) ============
 
-        // Health check. Not on tunnel subdomains: there /health belongs to the
-        // tunneled app, so it falls through to tunnel routing below.
-        if (path === "/health" && method === "GET" && !hostIsTunnelSubdomain(hostname)) {
+        // Health check (tunnel hosts never get here: there /health is the app's).
+        if (path === "/health" && method === "GET") {
           return addCors(new Response(
             JSON.stringify({
               success: true,
@@ -1006,8 +1361,13 @@ async function startServer() {
           ));
         }
 
-        // Cluster stats (for monitoring multi-server deployment)
+        // Cluster stats (for monitoring multi-server deployment). Operators only:
+        // it lists every server's internal host and port. No jrok server,
+        // dashboard page or kconsole code calls it; the documented curl now
+        // sends the server API_KEY.
         if (path === "/cluster/stats" && method === "GET") {
+          const authError = await requireServerKeyOrSuperAdmin(req);
+          if (authError) return addCors(authError);
           const clusterStats = await crossServerService.getClusterStats();
           return addCors(new Response(
             JSON.stringify({ success: true, ...clusterStats }),
@@ -1015,11 +1375,10 @@ async function startServer() {
           ));
         }
 
-        // Auth routes - must be before tunnel domain check
-        // Apply rate limiting to prevent brute force attacks
+        // Auth routes. Rate limited per client IP to slow brute force — the
+        // verified clientIp, or the limiter is reset by changing a header.
         if (path === "/auth/login" && method === "GET") {
-          const { checkAuthRateLimit, getClientIp } = await import("./utils/rateLimiter");
-          const clientIp = getClientIp(req);
+          const { checkAuthRateLimit } = await import("./utils/rateLimiter");
           const rateLimit = checkAuthRateLimit(clientIp);
           if (rateLimit) {
             return addCors(new Response(
@@ -1032,8 +1391,7 @@ async function startServer() {
 
         // POST callback - called by dashboard after OAuth redirect
         if (path === "/auth/callback" && method === "POST") {
-          const { checkAuthRateLimit, getClientIp } = await import("./utils/rateLimiter");
-          const clientIp = getClientIp(req);
+          const { checkAuthRateLimit } = await import("./utils/rateLimiter");
           const rateLimit = checkAuthRateLimit(clientIp);
           if (rateLimit) {
             return addCors(new Response(
@@ -1041,7 +1399,7 @@ async function startServer() {
               { status: 429, headers: { "Content-Type": "application/json", "Retry-After": String(rateLimit.retryAfter) } }
             ));
           }
-          return addCors(await authHandler.handleOAuthCallback(req));
+          return addCors(await authHandler.handleOAuthCallback(req, clientIp));
         }
 
         // GET callback - handle direct OAuth redirect (redirect to dashboard with code)
@@ -1395,8 +1753,12 @@ async function startServer() {
           return addCors(await statsHandler.handleBandwidthStats(req, authContext));
         }
 
-        // TCP tunnel stats (public endpoint for monitoring)
+        // TCP tunnel stats (monitoring). Was public: it maps every customer's
+        // database/SSH port to its tunnel and local target. Operators only now;
+        // nothing in jrok, the dashboard or kconsole calls it.
         if (path === "/stats/tcp" && method === "GET") {
+          const authError = await requireServerKeyOrSuperAdmin(req);
+          if (authError) return addCors(authError);
           const stats = await tcpService.getTcpStatsGlobal();
           const allocations = await tcpService.getAllPortAllocationsGlobal();
           return addCors(new Response(
@@ -1565,6 +1927,10 @@ async function startServer() {
               { status: 401, headers: { "Content-Type": "application/json" } }
             ));
           }
+          // The tunnel must be the caller's (or the caller privileged): this
+          // used to accept any signed-in account. See utils/access.ts.
+          const access = await checkTunnelAccess(authContext, tunnelId);
+          if (!access.allowed) return addCors(accessDeniedResponse(access));
           const allowlist = securityService.getIpAllowlist(tunnelId);
           return addCors(new Response(
             JSON.stringify({ success: true, tunnelId, allowlist }),
@@ -1588,6 +1954,8 @@ async function startServer() {
               { status: 401, headers: { "Content-Type": "application/json" } }
             ));
           }
+          const access = await checkTunnelAccess(authContext, tunnelId);
+          if (!access.allowed) return addCors(accessDeniedResponse(access));
           const body = await req.json() as { ips: string[] };
           if (!body.ips || !Array.isArray(body.ips)) {
             return addCors(new Response(
@@ -1621,6 +1989,8 @@ async function startServer() {
               { status: 401, headers: { "Content-Type": "application/json" } }
             ));
           }
+          const access = await checkTunnelAccess(authContext, tunnelId);
+          if (!access.allowed) return addCors(accessDeniedResponse(access));
           const ipSecurity = securityService.getTunnelIpSecurity(tunnelId);
           return addCors(new Response(
             JSON.stringify({ success: true, tunnelId, ipSecurity }),
@@ -1644,6 +2014,8 @@ async function startServer() {
               { status: 401, headers: { "Content-Type": "application/json" } }
             ));
           }
+          const access = await checkTunnelAccess(authContext, tunnelId);
+          if (!access.allowed) return addCors(accessDeniedResponse(access));
 
           const body = await req.json() as {
             mode: 'allow-all' | 'allowlist' | 'blocklist';
@@ -1680,6 +2052,8 @@ async function startServer() {
               { status: 401, headers: { "Content-Type": "application/json" } }
             ));
           }
+          const access = await checkTunnelAccess(authContext, tunnelId ?? "");
+          if (!access.allowed) return addCors(accessDeniedResponse(access));
 
           const body = await req.json() as { ip: string; listType: 'allow' | 'block' };
           if (!body.ip || !body.listType) {
@@ -1706,6 +2080,8 @@ async function startServer() {
               { status: 401, headers: { "Content-Type": "application/json" } }
             ));
           }
+          const access = await checkTunnelAccess(authContext, tunnelId ?? "");
+          if (!access.allowed) return addCors(accessDeniedResponse(access));
 
           const body = await req.json() as { ip: string };
           if (!body.ip) {
@@ -1738,6 +2114,8 @@ async function startServer() {
               { status: 401, headers: { "Content-Type": "application/json" } }
             ));
           }
+          const access = await checkTunnelAccess(authContext, tunnelId);
+          if (!access.allowed) return addCors(accessDeniedResponse(access));
           const urlParams = new URL(req.url).searchParams;
           const limit = parseInt(urlParams.get("limit") || "100");
           const offset = parseInt(urlParams.get("offset") || "0");
@@ -1764,6 +2142,9 @@ async function startServer() {
               { status: 401, headers: { "Content-Type": "application/json" } }
             ));
           }
+          // Only the org's own members/keys, or a privileged caller.
+          const access = await checkOrgAccess(authContext, organizationId);
+          if (!access.allowed) return addCors(accessDeniedResponse(access));
           const { tier: planTier } = await planLimitService.getOrganizationPlan(organizationId);
           const bandwidth = securityService.checkMonthlyBandwidth(organizationId, planTier);
           return addCors(new Response(
@@ -1806,297 +2187,6 @@ async function startServer() {
           return addCors(await statsHandler.handleEnhancedDomains(req, authContext));
         }
 
-        // ============ Tunnel Domain Routing ============
-        // Check if this is a tunnel domain request (extract subdomain or custom domain)
-        // MUST be before auth check to allow public tunnel access
-        // A request matches if its host is a subdomain of ANY accepted base
-        // domain (primary or legacy), so URLs issued under the old name keep
-        // resolving after a rename.
-        let tunnelDomain: string | null = null;
-        let isCustomDomainRequest = false;
-
-        const matchedBase = matchBaseDomain(hostname);
-
-        if (matchedBase === null && hostname !== 'localhost') {
-          // Not one of ours — might be a registered custom domain.
-          const { getCustomDomainByName } = await import("./utils/database");
-          const customDomain = await getCustomDomainByName(hostname);
-
-          if (customDomain && customDomain.active) {
-            // This is a valid custom domain
-            tunnelDomain = hostname;
-            isCustomDomainRequest = true;
-          }
-        } else {
-          // Extract subdomain (e.g., "demo" from "demo.public.koompi.cloud")
-          tunnelDomain = extractSubdomain(hostname);
-        }
-
-        if (tunnelDomain) {
-          const subdomain = tunnelDomain; // For backward compatibility with existing code
-
-          // Check if agent is on this server or needs cross-server routing
-          const routeResult = await crossServerService.findServerForDomain(subdomain);
-
-          // If agent is on another server, proxy the request
-          if (!routeResult.isLocal && routeResult.targetServer) {
-            // Same derivation the local path uses below, but undefined rather
-            // than "unknown" when nothing is known — the forwarder omits the
-            // header entirely instead of asserting a bogus address.
-            const visitorIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-              req.headers.get("x-real-ip") ||
-              undefined;
-
-            // A WebSocket upgrade cannot go through the HTTP forwarder — fetch()
-            // has no way to carry an upgrade. Accept the visitor's socket here
-            // and relay frames to the server that holds the agent.
-            if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-              const target = crossServerService.buildCrossServerWsTarget(
-                routeResult.targetServer,
-                req,
-                url.pathname + url.search,
-                visitorIp
-              );
-
-              const upgraded = server.upgrade(req, {
-                data: {
-                  type: 'cross-server',
-                  targetUrl: target.url,
-                  targetHeaders: target.headers,
-                  subdomain,
-                },
-              });
-
-              if (upgraded) return undefined;
-              return new Response("Failed to upgrade WebSocket connection", { status: 400 });
-            }
-
-            return crossServerService.forwardRequest(
-              routeResult.targetServer,
-              req,
-              url.pathname + url.search,
-              visitorIp
-            );
-          }
-
-          // Import agentGroupService for load-balanced agent selection
-          const agentGroupService = await import("./services/agentGroupService");
-
-          // Check if this domain has a multi-agent group (load-balanced)
-          const isGroupDomain = await agentGroupService.isGroupedDomain(subdomain);
-
-          // Look up agent - use load balancer for groups, direct lookup for single agents
-          let agent;
-          if (isGroupDomain) {
-            // Use load-balanced selection (round-robin, least-connections, etc.)
-            agent = await agentGroupService.selectAgent(subdomain);
-          } else {
-            // Single agent mode — check local cache first (O(1)), fall back to MongoDB
-            // This avoids a duplicate agentConnections query since findServerForDomain
-            // already confirmed this agent is on this server.
-            agent = agentService.getAgentByDomainLocal(subdomain) ?? await agentService.getAgentByDomainAsync(subdomain);
-          }
-
-          if (!agent || !agent.active) {
-            // Serve maintenance HTML page instead of JSON error.
-            // X-Jrok-Tunnel: down is a distinctive marker so the deploy worker's
-            // health monitor can tell "jrok has no agent for this domain" apart
-            // from a user app that merely returns its own 503, and restart the
-            // tunnel only in the former case.
-            const maintenanceHtmlPath = import.meta.dir + "/../index.html";
-            try {
-              const htmlContent = await Bun.file(maintenanceHtmlPath).text();
-              return addCors(new Response(htmlContent, {
-                status: 503,
-                headers: { "Content-Type": "text/html; charset=utf-8", "X-Jrok-Tunnel": "down" }
-              }));
-            } catch {
-              // Fallback if index.html is not found
-              return addCors(new Response(
-                JSON.stringify({
-                  success: false,
-                  message: `No active agent found for domain: ${subdomain}. Please ensure the agent is running: jrok --port <port> --domain ${subdomain}`,
-                }),
-                { status: 503, headers: { "Content-Type": "application/json", "X-Jrok-Tunnel": "down" } }
-              ));
-            }
-          }
-
-          // Get agent's WebSocket (local connections only)
-          const agentWs = agentService.getAgentSocket(agent.id);
-          if (!agentWs || agentWs.readyState !== 1) {  // 1 = WebSocket.OPEN
-            // For group mode, try to get another agent if this one is disconnected
-            if (isGroupDomain) {
-              // Mark this agent as unhealthy
-              await agentGroupService.updateMemberHealth(agent.id, false);
-              // Try to get another agent
-              const fallbackAgent = await agentGroupService.selectAgent(subdomain);
-              if (fallbackAgent && fallbackAgent.id !== agent.id) {
-                const fallbackWs = agentService.getAgentSocket(fallbackAgent.id);
-                if (fallbackWs && fallbackWs.readyState === 1) {
-                  // Use fallback agent
-                  agent = fallbackAgent;
-                }
-              }
-            }
-
-            // Re-check after potential fallback
-            const finalWs = agentService.getAgentSocket(agent.id);
-            if (!finalWs || finalWs.readyState !== 1) {
-              // X-Jrok-Tunnel: "reconnecting" (NOT "down") — the agent record
-              // still exists, its websocket is just not open right now (server
-              // restart, half-open link the CLI watchdog is about to fix).
-              // The deploy worker only force-restarts tunnels on "down";
-              // reporting "down" here made it kill healthy tunnels that were
-              // seconds away from reconnecting on their own.
-              return addCors(new Response(
-                JSON.stringify({
-                  success: false,
-                  message: `Agent for ${subdomain} is not connected (readyState: ${finalWs?.readyState || 'null'}). ${isGroupDomain ? 'All agents in the group are unavailable.' : 'Attempting reconnection...'}`,
-                }),
-                { status: 503, headers: { "Content-Type": "application/json", "X-Jrok-Tunnel": "reconnecting" } }
-              ));
-            }
-          }
-
-          // Get the final WebSocket reference
-          const finalAgentWs = agentService.getAgentSocket(agent.id)!;
-
-          // Use cached tunnelId from agent (set when agent connects)
-          // This avoids MongoDB query on EVERY request - massive performance improvement!
-          let tunnelId = agent.tunnelId;
-
-          // Fallback to DB lookup only if not cached (rare)
-          if (!tunnelId) {
-            const { getTunnelByDomain } = await import("./utils/database");
-            const tunnel = await getTunnelByDomain(subdomain);
-            tunnelId = tunnel?.id;
-          }
-
-          // ============ Security Check for HTTP Requests ============
-          const clientIp = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-            req.headers.get("x-real-ip") ||
-            "unknown";
-
-          // Get User-Agent for layered client identification (differentiates devices on same IP)
-          const userAgent = req.headers.get("user-agent") || undefined;
-
-          // Plan tier only exists to scale jrok's own rate limits. In proxy mode
-          // there are none, so skip the lookup entirely rather than resolving a
-          // multiplier nothing will read.
-          const planTier = (!PROXY_MODE && agent.apiKeyOrgId)
-            ? (await planLimitService.getOrganizationPlan(agent.apiKeyOrgId)).tier
-            : 'free';
-
-          // Suspension is kconsole's enforcement lever: it meters bandwidth and
-          // pricing, and pushes a suspension here when an org must be cut off.
-          // Two Map lookups, no I/O.
-          const suspension = securityService.checkSuspension(
-            agent.apiKeyOrgId || agent.organizationId,
-            subdomain
-          );
-          if (suspension.suspended) {
-            return addCors(new Response(
-              JSON.stringify({
-                success: false,
-                message: suspension.reason || "This tunnel is suspended.",
-              }),
-              { status: 402, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-
-          // Remaining checks are abuse control only (blocked IPs, per-tunnel IP
-          // allow/blocklist); rate limiting is skipped in proxy mode.
-          const securityCheck = await securityService.checkHttpRequest(
-            tunnelId || subdomain,
-            agent.organizationId,
-            clientIp,
-            planTier,
-            {
-              userAgent,
-              apiKeyId: agent.apiKeyId,
-            }
-          );
-
-          if (!securityCheck.allowed) {
-            const headers: Record<string, string> = {
-              "Content-Type": "application/json",
-            };
-            if (securityCheck.retryAfter) {
-              headers["Retry-After"] = securityCheck.retryAfter.toString();
-            }
-            return addCors(new Response(
-              JSON.stringify({
-                success: false,
-                message: securityCheck.reason || "Rate limit exceeded",
-              }),
-              { status: 429, headers }
-            ));
-          }
-
-          // ============ Bandwidth Limit Check ============
-          // Legacy standalone mode only. In proxy mode kconsole owns the quota
-          // and expresses the verdict as a suspension, checked above.
-          if (!PROXY_MODE && (agent.apiKeyOrgId || agent.organizationId)) {
-            const bandwidthCheckOrgId = agent.apiKeyOrgId || agent.organizationId;
-            const bandwidthCheck = securityService.checkMonthlyBandwidth(bandwidthCheckOrgId!, planTier);
-
-            // Custom domains have unlimited bandwidth
-            if (isCustomDomainRequest) {
-              bandwidthCheck.allowed = true;
-            }
-
-            if (!bandwidthCheck.allowed) {
-              console.warn(`🚫 Bandwidth limit exceeded for org ${bandwidthCheckOrgId}: ${(bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2)}GB / ${(bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2)}GB`);
-              return addCors(new Response(
-                JSON.stringify({
-                  success: false,
-                  message: "Monthly bandwidth limit exceeded. Please upgrade your plan.",
-                  usedGb: (bandwidthCheck.usedBytes / 1024 / 1024 / 1024).toFixed(2),
-                  limitGb: (bandwidthCheck.limitBytes / 1024 / 1024 / 1024).toFixed(2),
-                  percentUsed: bandwidthCheck.percentUsed.toFixed(1),
-                }),
-                { status: 402, headers: { "Content-Type": "application/json" } }
-              ));
-            }
-          }
-
-          // Track HTTP connection
-          securityService.trackHttpConnection(tunnelId || subdomain, true);
-
-          // Check if this is a WebSocket upgrade request
-          if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-            // Handle WebSocket tunneling
-            const response = await handleWebSocketTunnel(req, server, finalAgentWs, agent, subdomain);
-            if (response) {
-              securityService.trackHttpConnection(tunnelId || subdomain, false);
-              // Decrement connection count for load balancing
-              if (isGroupDomain) {
-                await agentGroupService.decrementMemberConnections(agent.id);
-              }
-              return response;
-            }
-            return undefined; // Handled by upgrade
-          }
-
-          // Forward regular HTTP request to agent via WebSocket (with bandwidth tracking)
-          const response = await forwardRequestToAgent(req, finalAgentWs, agent, tunnelId, clientIp);
-
-          // Track connection close and bandwidth
-          securityService.trackHttpConnection(tunnelId || subdomain, false);
-
-          // Decrement connection count for load balancing
-          if (isGroupDomain) {
-            await agentGroupService.decrementMemberConnections(agent.id);
-          }
-
-          // Track bandwidth usage against API key's org (for quota limits)
-          const responseSize = parseInt(response.headers.get("content-length") || "0");
-          securityService.trackMonthlyBandwidth(agent.apiKeyOrgId || agent.organizationId || subdomain, responseSize);
-
-          return response;
-        }
-
         // ============ Legacy API Routes (require auth) ============
 
         // Auth check for legacy routes
@@ -2122,78 +2212,92 @@ async function startServer() {
 
         if (path.startsWith("/tunnels/") && method === "GET") {
           const id = path.split("/")[2];
-          return addCors(await tunnelHandler.handleGetTunnel(id, req));
+          return addCors(await tunnelHandler.handleGetTunnel(id, req, authContext));
         }
 
         if (path.startsWith("/tunnels/") && method === "DELETE") {
           const id = path.split("/")[2];
-          return addCors(await tunnelHandler.handleDeleteTunnel(id, req));
+          return addCors(await tunnelHandler.handleDeleteTunnel(id, req, authContext));
         }
 
         if (path === "/agents" && method === "GET") {
-          return await agentHandler.handleListAgents();
+          return await agentHandler.handleListAgents(authContext);
         }
 
-        // Domain routes
+        // Domain routes. Each handler enforces ownership: a caller sees and
+        // changes only its own orgs' domains unless it is privileged (kconsole's
+        // platform key, the server key, a super-admin). See utils/access.ts.
         if ((path === "/domains" || path === "/domains/") && method === "POST") {
-          return await domainHandler.handleRegisterDomain(req);
+          return await domainHandler.handleRegisterDomain(req, clientIp, authContext);
         }
 
         if (path === "/domains" && method === "GET") {
-          return await domainHandler.handleListDomains();
+          return await domainHandler.handleListDomains(authContext);
         }
 
         // Check CNAME verification status - must be BEFORE generic /domains/:domain GET
         if (path.startsWith("/domains/") && path.endsWith("/verify-status") && method === "GET") {
           const domain = path.split("/")[2];
-          return await domainHandler.handleCheckCnameStatus(decodeURIComponent(domain));
+          return await domainHandler.handleCheckCnameStatus(decodeURIComponent(domain), authContext);
         }
 
         // Verify CNAME and issue certificate
         if (path.startsWith("/domains/") && path.endsWith("/verify") && method === "POST") {
           const domain = path.split("/")[2];
-          return await domainHandler.handleVerifyAndIssueCertificate(decodeURIComponent(domain));
+          return await domainHandler.handleVerifyAndIssueCertificate(decodeURIComponent(domain), authContext);
         }
 
         if (path.startsWith("/domains/") && path.endsWith("/resync") && method === "POST") {
           const domain = path.split("/")[2];
-          return await domainHandler.handleResyncDomain(decodeURIComponent(domain));
+          return await domainHandler.handleResyncDomain(decodeURIComponent(domain), authContext);
         }
 
         if (path.startsWith("/domains/") && path.endsWith("/transfer") && method === "POST") {
           const domain = path.split("/")[2];
-          return await domainHandler.handleTransferDomain(decodeURIComponent(domain), req);
+          return await domainHandler.handleTransferDomain(decodeURIComponent(domain), req, authContext);
         }
 
         if (path.startsWith("/domains/") && path.endsWith("/backup") && method === "POST") {
           const domain = path.split("/")[2];
-          return await domainHandler.handleBackupDomain(decodeURIComponent(domain));
+          return await domainHandler.handleBackupDomain(decodeURIComponent(domain), authContext);
         }
 
         if (path.startsWith("/domains/") && path.includes("/backups/") && method === "POST") {
           const parts = path.split("/");
           const domain = parts[2];
           const backupId = parts[4];
-          return await domainHandler.handleRestoreDomain(decodeURIComponent(domain), backupId);
+          return await domainHandler.handleRestoreDomain(decodeURIComponent(domain), backupId, authContext);
         }
 
         if (path.startsWith("/domains/") && path.includes("/backup") && method === "GET") {
           const domain = path.split("/")[2];
-          return await domainHandler.handleListBackups(decodeURIComponent(domain));
+          return await domainHandler.handleListBackups(decodeURIComponent(domain), authContext);
         }
 
         // Generic domain GET/DELETE - must be AFTER specific routes
         if (path.startsWith("/domains/") && method === "GET") {
           const domain = path.split("/")[2];
-          return await domainHandler.handleGetDomain(decodeURIComponent(domain));
+          return await domainHandler.handleGetDomain(decodeURIComponent(domain), authContext);
         }
 
         if (path.startsWith("/domains/") && method === "DELETE") {
           const domain = path.split("/")[2];
-          return await domainHandler.handleDeleteDomain(decodeURIComponent(domain));
+          return await domainHandler.handleDeleteDomain(decodeURIComponent(domain), authContext);
         }
 
         // ============ Certificate Sync API (for multi-server cert distribution) ============
+        //
+        // These hand out — and accept — certificates WITH PRIVATE KEYS for every
+        // domain on the platform, the base-domain wildcard included. They used to
+        // sit behind only the generic auth check above, which any signed-in user
+        // and any organization's API key pass: any customer could download the
+        // platform's TLS key, or push a certificate into the store every server
+        // reconciles its disk from. Their real callers (the certbot hook,
+        // operator scripts) send the server API_KEY.
+        if (path.startsWith("/certificates/")) {
+          const authError = await requireServerKeyOrSuperAdmin(req);
+          if (authError) return addCors(authError);
+        }
 
         // Download certificate from MongoDB (VPS servers call this)
         if (path.startsWith("/certificates/download/") && method === "GET") {
@@ -2394,6 +2498,23 @@ async function startServer() {
         : "🔒 Standalone mode: jrok is enforcing its own plan limits (JROK_PROXY_MODE=false)."
     );
     console.log(`📝 Base domains: ${allBaseDomains().join(", ")} (new URLs use the first)`);
+    console.log(`🧭 Management API hosts: ${describeManagementHosts()}`);
+    console.log(
+      `🌐 Client IP: trusting ${trustedProxyHops()} proxy hop(s) in X-Forwarded-For` +
+      (trustedProxyIps().length > 0 ? ` from ${trustedProxyIps().join(", ")}` : "")
+    );
+    if (trustedProxyHops() > 0 && trustedProxyIps().length === 0) {
+      // Hop counting is only sound if every request comes through our proxy.
+      // A caller that can reach this port directly writes the "trusted"
+      // X-Forwarded-For entry itself and walks past IP allowlists, IP blocks
+      // and the auth rate limiter. The ansible playbook used to open it to all.
+      console.warn("⚠️ ============================================================");
+      console.warn(`⚠️ X-Forwarded-For is trusted from ANY peer that connects to port ${server.port}.`);
+      console.warn("⚠️ Unless this port is firewalled to nginx and the other jrok servers,");
+      console.warn("⚠️ set TRUSTED_PROXY_IPS (e.g. 127.0.0.1,::1,<peer IPs>) so forwarding");
+      console.warn("⚠️ headers from anywhere else are ignored. See utils/clientIp.ts.");
+      console.warn("⚠️ ============================================================");
+    }
     console.log(`🔐 Auth enabled with API key`);
     console.log(`🔌 WebSocket agent endpoint: ws://localhost:${server.port}/ws/agent`);
 
