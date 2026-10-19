@@ -22,6 +22,40 @@ const roundRobinCounters = new Map<string, number>();
 const groupedDomainCache = new Map<string, { result: boolean; expires: number }>();
 const GROUP_DOMAIN_CACHE_TTL = 60_000; // 60 seconds
 
+// The group document itself (id + strategy), read by selectAgent on every
+// request through a grouped domain. Invalidated by every change made in this
+// process; the TTL only bounds how long a change made on another node (e.g. a
+// strategy update) takes to be seen here.
+const groupCache = new Map<string, { group: AgentGroup | null; expires: number }>();
+const GROUP_CACHE_TTL = 30_000; // 30 seconds
+
+function invalidateGroupCaches(domain: string): void {
+  groupedDomainCache.delete(domain);
+  groupCache.delete(domain);
+}
+
+async function getGroupByDomainCached(domain: string): Promise<AgentGroup | null> {
+  const cached = groupCache.get(domain);
+  if (cached && Date.now() < cached.expires) {
+    return cached.group;
+  }
+  const group = await getGroupByDomain(domain);
+  groupCache.set(domain, { group, expires: Date.now() + GROUP_CACHE_TTL });
+  return group;
+}
+
+// Housekeeping: drop expired entries so domains that stopped receiving traffic
+// don't accumulate forever.
+setInterval(() => {
+  const now = Date.now();
+  for (const [domain, entry] of groupCache) {
+    if (now >= entry.expires) groupCache.delete(domain);
+  }
+  for (const [domain, entry] of groupedDomainCache) {
+    if (now >= entry.expires) groupedDomainCache.delete(domain);
+  }
+}, 5 * 60_000).unref?.();
+
 // =============================================================================
 // GROUP MANAGEMENT
 // =============================================================================
@@ -58,7 +92,7 @@ export async function getOrCreateGroup(
   };
 
   await collections.agentGroups.insertOne(group);
-  groupedDomainCache.delete(domain); // invalidate so next request sees the new group
+  invalidateGroupCaches(domain); // so the next request sees the new group
   console.log(`✅ Created agent group for domain: ${domain}`);
 
   return group;
@@ -118,7 +152,7 @@ export async function deleteGroup(groupId: string): Promise<void> {
   // Clean up local caches
   roundRobinCounters.delete(groupId);
   if (group?.domain) {
-    groupedDomainCache.delete(group.domain);
+    invalidateGroupCaches(group.domain);
   }
 
   console.log(`🗑️ Deleted agent group: ${groupId}`);
@@ -174,7 +208,7 @@ export async function addAgentToGroup(
   );
 
   if (updated?.domain) {
-    groupedDomainCache.delete(updated.domain);
+    invalidateGroupCaches(updated.domain);
   }
 
   console.log(`➕ Agent ${agentId} (instance: ${instanceId}) joined group ${groupId}`);
@@ -209,7 +243,7 @@ export async function removeAgentFromGroup(agentId: string): Promise<void> {
   );
 
   if (updateResult?.domain) {
-    groupedDomainCache.delete(updateResult.domain);
+    invalidateGroupCaches(updateResult.domain);
   }
 
   console.log(`➖ Agent ${agentId} left group ${groupId}`);
@@ -337,20 +371,42 @@ export async function decrementMemberConnections(agentId: string): Promise<void>
  * This is the main entry point for load-balanced agent selection
  */
 export async function selectAgent(domain: string): Promise<Agent | null> {
-  const group = await getGroupByDomain(domain);
+  const group = await getGroupByDomainCached(domain);
 
   // If no group exists, fall back to single-agent lookup
   if (!group) {
     return agentService.getAgentByDomainAsync(domain);
   }
 
+  // FAST PATH (no MongoDB): pick among the replicas connected to THIS server.
+  // This runs on every request to every kconsole HTTP tunnel. It used to read
+  // the group, its healthy members and the chosen agent's record — three
+  // queries per request — competing with the writes that keep tunnels alive
+  // (see Fix-065). A request only gets here when this server holds a live
+  // socket for the domain (findServerForDomain), so local replicas are the
+  // right candidates; picking a member on another server only led to it being
+  // marked unhealthy below.
+  //
+  // An open socket is the health signal: the stored `healthy` flag is only
+  // ever cleared when a member's socket isn't open, and the self-heal branch
+  // below already treats an open socket as healthy.
+  //
+  // least-connections and weighted read counters/weights stored per member,
+  // so they keep using the stored members.
+  if (group.strategy !== 'least-connections' && group.strategy !== 'weighted') {
+    const local = agentService.getLocalAgentsForDomain(domain);
+    if (local.length > 0) {
+      if (group.strategy === 'random') {
+        return local[Math.floor(Math.random() * local.length)] ?? null;
+      }
+      const index = roundRobinCounters.get(group.id) ?? 0;
+      roundRobinCounters.set(group.id, (index + 1) % local.length);
+      return local[index % local.length] ?? null;
+    }
+  }
+
   // Get healthy members
   let healthyMembers = await getHealthyGroupMembers(group.id);
-
-  console.log(`⚖️  Load balancer: domain=${domain}, strategy=${group.strategy}, healthyMembers=${healthyMembers.length}`);
-  healthyMembers.forEach((m, i) => {
-    console.log(`   [${i}] instanceId=${m.instanceId}, agentId=${m.agentId}`);
-  });
 
   if (healthyMembers.length === 0) {
     // SELF-HEAL: no member is flagged healthy, but a member's agent socket may
@@ -409,8 +465,6 @@ export async function selectAgent(domain: string): Promise<Agent | null> {
   // Get the actual agent
   const agent = await agentService.getAgentAsync(selectedMember.agentId);
 
-  console.log(`⚖️  Selected: instanceId=${selectedMember.instanceId}, agentId=${selectedMember.agentId}, agentFound=${!!agent}`);
-
   if (agent) {
     // Track connection for least-connections strategy. No-op for every other
     // strategy — nothing else reads activeConnections.
@@ -427,25 +481,18 @@ async function selectRoundRobin(
   group: AgentGroup,
   members: AgentGroupMember[]
 ): Promise<AgentGroupMember> {
-  const collections = getCollections();
-
   // Get current index from local cache or database
   let currentIndex = roundRobinCounters.get(group.id) ?? group.currentIndex ?? 0;
 
   // Select member
   const selectedMember = members[currentIndex % members.length];
 
-  // Increment and wrap index
+  // Increment and wrap index. Not written back to MongoDB: the old "sync every
+  // 10 requests" tested the wrapped index, so a one-replica group wrote on
+  // every request and a two-replica group on every other one. A position that
+  // restarts at 0 after a server restart costs nothing.
   const nextIndex = (currentIndex + 1) % members.length;
   roundRobinCounters.set(group.id, nextIndex);
-
-  // Periodically sync to database (every 10 requests)
-  if (nextIndex % 10 === 0) {
-    await collections.agentGroups.updateOne(
-      { id: group.id },
-      { $set: { currentIndex: nextIndex } }
-    );
-  }
 
   return selectedMember;
 }
@@ -534,10 +581,14 @@ export async function updateGroupStrategy(
   strategy: LoadBalanceStrategy
 ): Promise<void> {
   const collections = getCollections();
-  await collections.agentGroups.updateOne(
+  const updated = await collections.agentGroups.findOneAndUpdate(
     { id: groupId },
-    { $set: { strategy, updatedAt: Date.now() } }
+    { $set: { strategy, updatedAt: Date.now() } },
+    { returnDocument: 'after' }
   );
+  if (updated?.domain) {
+    invalidateGroupCaches(updated.domain);
+  }
 }
 
 /**

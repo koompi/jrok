@@ -28,6 +28,47 @@ const localSockets = new Map<string, WebSocket>();
 // Populated on registerAgent, cleared on unregisterAgent.
 const localDomainCache = new Map<string, Agent>();
 
+// Every agent connected to THIS server, by domain. A grouped domain (every
+// kconsole HTTP tunnel) has one entry per replica, which localDomainCache can't
+// hold: it keeps one agent per domain. The load balancer picks from here
+// without touching MongoDB, and when one replica disconnects the domain cache
+// is pointed at a remaining one instead of being emptied.
+const localAgentsByDomain = new Map<string, Map<string, Agent>>();
+const localAgentDomain = new Map<string, string>(); // agentId → domain
+
+function indexLocalAgent(agent: Agent): void {
+  let agents = localAgentsByDomain.get(agent.domain);
+  if (!agents) {
+    agents = new Map();
+    localAgentsByDomain.set(agent.domain, agents);
+  }
+  agents.set(agent.id, agent);
+  localAgentDomain.set(agent.id, agent.domain);
+}
+
+function unindexLocalAgent(id: string): void {
+  const domain = localAgentDomain.get(id);
+  if (domain === undefined) return;
+  localAgentDomain.delete(id);
+
+  const agents = localAgentsByDomain.get(domain);
+  agents?.delete(id);
+  if (agents && agents.size === 0) {
+    localAgentsByDomain.delete(domain);
+  }
+
+  // Only touch the domain cache if it pointed at the agent that left. A replica
+  // that reconnected under a new agentId has already replaced the entry.
+  if (localDomainCache.get(domain)?.id === id) {
+    const next = agents?.values().next().value;
+    if (next) {
+      localDomainCache.set(domain, next);
+    } else {
+      localDomainCache.delete(domain);
+    }
+  }
+}
+
 // Agent connection record stored in MongoDB
 interface AgentConnection {
   agentId: string;
@@ -348,6 +389,7 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
 
   // Populate domain cache for fast O(1) lookup on every request
   localDomainCache.set(finalDomain, agent);
+  indexLocalAgent(agent);
 
   // Create or update tunnel
   createTunnelForAgent(agent, agentId, organizationId).catch((error) => {
@@ -566,11 +608,12 @@ export async function unregisterAgent(id: string): Promise<void> {
 
   // Remove local socket reference
   localSockets.delete(id);
+  pendingHeartbeats.delete(id);
 
-  // Remove from domain cache
-  if (connection) {
-    localDomainCache.delete(connection.domain);
-  }
+  // Remove from the local indexes. Keyed by agentId, so this also works when
+  // the MongoDB record is already gone (a replica that reconnected under the
+  // same instanceId overwrote it).
+  unindexLocalAgent(id);
 }
 
 // =============================================================================
@@ -609,6 +652,22 @@ export function getAgent(id: string): Agent | null {
  */
 export function getAgentByDomainLocal(domain: string): Agent | null {
   return localDomainCache.get(domain) || null;
+}
+
+/**
+ * Every agent for this domain connected to THIS server with an open socket
+ * (O(replicas), no MongoDB). Used by the load balancer on the request path.
+ */
+export function getLocalAgentsForDomain(domain: string): Agent[] {
+  const agents = localAgentsByDomain.get(domain);
+  if (!agents) return [];
+  const live: Agent[] = [];
+  for (const agent of agents.values()) {
+    if (localSockets.get(agent.id)?.readyState === 1) { // 1 = WebSocket.OPEN
+      live.push(agent);
+    }
+  }
+  return live;
 }
 
 /**
@@ -705,12 +764,43 @@ export async function getAgentServerInfo(domain: string): Promise<{
 // HEARTBEAT & HEALTH
 // =============================================================================
 
+// Agents that sent a heartbeat since the last flush. Every agent heartbeats
+// every 15s; writing each one was N MongoDB writes per 15s. One updateMany per
+// HEARTBEAT_FLUSH_MS covers all of them. lastHeartbeat lags by at most that
+// much, far inside the 150s stale sweep (AGENT_STALE_MS) and the 300s TTL.
+const pendingHeartbeats = new Set<string>();
+const HEARTBEAT_FLUSH_MS = parseInt(process.env.HEARTBEAT_FLUSH_MS || "10000");
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
 export async function updateHeartbeat(id: string): Promise<void> {
-  const collections = getCollections();
-  await collections.agentConnections.updateOne(
-    { agentId: id },
-    { $set: { lastHeartbeat: new Date() } }
-  );
+  pendingHeartbeats.add(id);
+  if (!heartbeatTimer) {
+    heartbeatTimer = setInterval(() => {
+      flushHeartbeats().catch((err) => {
+        console.error("Failed to flush agent heartbeats:", err instanceof Error ? err.message : String(err));
+      });
+    }, HEARTBEAT_FLUSH_MS);
+    heartbeatTimer.unref?.();
+  }
+}
+
+export async function flushHeartbeats(): Promise<void> {
+  if (pendingHeartbeats.size === 0) return;
+  const ids = [...pendingHeartbeats];
+  pendingHeartbeats.clear();
+  try {
+    const collections = getCollections();
+    await collections.agentConnections.updateMany(
+      { agentId: { $in: ids } },
+      { $set: { lastHeartbeat: new Date() } }
+    );
+  } catch (err) {
+    // Retry on the next flush, but only for agents still connected here.
+    for (const id of ids) {
+      if (localSockets.has(id)) pendingHeartbeats.add(id);
+    }
+    throw err;
+  }
 }
 
 export async function isAgentConnected(id: string): Promise<boolean> {

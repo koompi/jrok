@@ -15,6 +15,7 @@ import {
   currentServerPort as SERVER_PORT,
 } from "./agentService";
 import { getCollections } from "../utils/mongodb";
+import { AGENT_WS_BUFFER_LIMIT_BYTES, frameByteLength, isBacklogged } from "../utils/wsFlowControl";
 
 // =============================================================================
 // SERVER HEALTH TRACKING
@@ -346,6 +347,7 @@ export function openCrossServerRelay(ws: RelaySocket): void {
       try { peer.send(frame); } catch { /* peer died mid-drain */ }
     }
     ws.data.pending = [];
+    ws.data.pendingBytes = 0;
     ws.data.peerReady = true;
     console.log(`🔀 Cross-server WebSocket relay open for ${subdomain}`);
   };
@@ -367,15 +369,24 @@ export function openCrossServerRelay(ws: RelaySocket): void {
   };
 }
 
-/** Pass a visitor frame to the peer, queueing until the peer link is open. */
-export function relayVisitorFrame(ws: RelaySocket, data: string | Buffer): void {
+/**
+ * Pass a visitor frame to the peer, queueing until the peer link is open.
+ * False when the peer link is backed up (or the pre-open queue is full): the
+ * caller closes the visitor instead of buffering without limit.
+ */
+export function relayVisitorFrame(ws: RelaySocket, data: string | Buffer): boolean {
   const peer: WebSocket | undefined = ws.data?.peer;
-  if (!peer) return;
+  if (!peer) return true;
   if (ws.data.peerReady && peer.readyState === 1) {
+    if (isBacklogged(peer)) return false;
     try { peer.send(data); } catch { /* peer died; close handler cleans up */ }
   } else {
+    const pendingBytes = (ws.data.pendingBytes ?? 0) + frameByteLength(data);
+    if (AGENT_WS_BUFFER_LIMIT_BYTES > 0 && pendingBytes > AGENT_WS_BUFFER_LIMIT_BYTES) return false;
+    ws.data.pendingBytes = pendingBytes;
     ws.data.pending.push(data);
   }
+  return true;
 }
 
 /**

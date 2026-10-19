@@ -28,6 +28,7 @@ import * as planLimitService from "./services/planLimitService";
 import { PROXY_MODE } from "./config/proxyMode";
 import { allBaseDomains } from "./utils/baseDomains";
 import { getClientIp, setForwardedClientHeaders, trustedProxyHops, trustedProxyIps } from "./utils/clientIp";
+import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "./utils/wsFlowControl";
 import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
 import {
   normalizeHostname,
@@ -256,8 +257,10 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
       // Parse URL once to avoid redundant allocations
       const reqUrl = new URL(req.url);
 
-      // Send request to agent
-      agentWs.send(JSON.stringify({
+      // Send request to agent. Bun drops the message when the agent link is
+      // past its backpressure limit; answer now instead of letting the visitor
+      // wait out the full timeout for a request the agent will never see.
+      const sent = sendOrDrop(agentWs, JSON.stringify({
         type: "http_request",
         requestId,
         method: req.method,
@@ -268,6 +271,14 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
         bodyIsBase64: agentSupportsB64 && body.length > 0,
         clientIp: clientIp || "unknown",
       }));
+      if (!sent) {
+        clearTimeout(timeout);
+        pendingRequests.delete(requestId);
+        resolve(new Response(
+          JSON.stringify({ success: false, message: "Tunnel busy, try again shortly" }),
+          { status: 503, headers: { "Content-Type": "application/json", "Retry-After": "1" } }
+        ));
+      }
     } catch (error) {
       clearTimeout(timeout);
       pendingRequests.delete(requestId);
@@ -535,8 +546,11 @@ async function startServer() {
 
             console.log(`✅ Client WebSocket connected for ${subdomain}${path || '/'} [${wsId}]`);
 
-            // Notify agent about the new WebSocket connection
-            wsProxyService.notifyAgentConnect(wsId, path || '/', headers || {});
+            // Notify agent about the new WebSocket connection. If that message
+            // never reaches the agent, every frame after it would go nowhere.
+            if (!wsProxyService.notifyAgentConnect(wsId, path || '/', headers || {})) {
+              ws.close(1011, "Tunnel unavailable");
+            }
             return;
           }
 
@@ -668,9 +682,23 @@ async function startServer() {
         },
 
         message(ws: any, data: string | Buffer) {
+          // Visitor frames (both kinds below) are rate limited per socket and
+          // refused once the agent link is backed up — see utils/wsFlowControl.
+          // The visitor is closed rather than having frames dropped silently.
+          if (ws.data?.type === 'cross-server' || ws.data?.type === 'client-tunnel') {
+            const limiter: VisitorFrameLimiter = ws.data.frameLimiter ??= new VisitorFrameLimiter();
+            if (!limiter.allow(frameByteLength(data))) {
+              console.warn(`🚫 WebSocket rate limit exceeded for ${ws.data.subdomain} — closing visitor`);
+              ws.close(1008, "Message rate limit exceeded");
+              return;
+            }
+          }
+
           // Cross-server relay: pass the visitor's frame on to the peer server.
           if (ws.data?.type === 'cross-server') {
-            crossServerService.relayVisitorFrame(ws, data);
+            if (!crossServerService.relayVisitorFrame(ws, data)) {
+              ws.close(1013, "Tunnel busy, try again later");
+            }
             return;
           }
 
@@ -678,8 +706,15 @@ async function startServer() {
           if (ws.data?.type === 'client-tunnel') {
             const wsId = ws.data.wsId;
             if (wsId) {
+              if (isBacklogged(ws.data.agentWs)) {
+                console.warn(`🚫 Agent link for ${ws.data.subdomain} is backed up — closing visitor WebSocket`);
+                ws.close(1013, "Tunnel busy, try again later");
+                return;
+              }
               const isBinary = Buffer.isBuffer(data);
-              wsProxyService.forwardToAgent(wsId, data, isBinary);
+              if (!wsProxyService.forwardToAgent(wsId, data, isBinary)) {
+                ws.close(1011, "Tunnel unavailable");
+              }
             }
             return;
           }

@@ -7,6 +7,7 @@
 
 import type { Agent } from "../types/index";
 import { generateId } from "../utils/helpers";
+import { sendOrDrop } from "../utils/wsFlowControl";
 
 // Client WebSocket connection info
 interface ClientWsConnection {
@@ -140,7 +141,9 @@ export function forwardToClient(wsId: string, data: Buffer | string, isBinary: b
 }
 
 /**
- * Forward a message from client to agent
+ * Forward a message from client to agent. False when it didn't reach the
+ * agent's socket (unknown wsId, agent gone, or dropped by Bun's backpressure
+ * limit) — the caller closes the visitor rather than losing frames silently.
  */
 export function forwardToAgent(wsId: string, data: Buffer | string, isBinary: boolean): boolean {
   const connection = clientConnections.get(wsId);
@@ -156,13 +159,12 @@ export function forwardToAgent(wsId: string, data: Buffer | string, isBinary: bo
         ? data.toString('base64') 
         : data.toString();
       
-      connection.agentWs.send(JSON.stringify({
+      return sendOrDrop(connection.agentWs, JSON.stringify({
         type: "ws_message",
         wsId,
         data: encodedData,
         isBinary,
       }));
-      return true;
     }
     return false;
   } catch (error) {
@@ -182,13 +184,12 @@ export function notifyAgentConnect(wsId: string, path: string, headers: Record<s
   
   try {
     if (connection.agentWs.readyState === 1) {
-      connection.agentWs.send(JSON.stringify({
+      return sendOrDrop(connection.agentWs, JSON.stringify({
         type: "ws_connect",
         wsId,
         path,
         headers,
       }));
-      return true;
     }
     return false;
   } catch (error) {
