@@ -18,6 +18,7 @@ import * as securityService from "./services/securityService";
 import * as crossServerService from "./services/crossServerService";
 import * as certSyncService from "./services/certificateSyncService";
 import * as monitoringService from "./services/monitoringService";
+import { initGeoip, lookupGeo } from "./services/geoipService";
 import { connectDatabase, closeDatabase, createDistributedStateIndexes, cleanupStaleConnectionsOnStartup, AGENT_STALE_MS } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { purgeExpiredCaches } from "./utils/database";
@@ -270,6 +271,9 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
         body,
         bodyIsBase64: agentSupportsB64 && body.length > 0,
         clientIp: clientIp || "unknown",
+        // Location of the visitor, for the agent's request events. Older
+        // agents ignore unknown fields; undefined drops out of the JSON.
+        clientGeo: lookupGeo(clientIp),
       }));
       if (!sent) {
         clearTimeout(timeout);
@@ -502,6 +506,9 @@ async function startServer() {
 
     // Initialize monitoring service with map references for size tracking
     monitoringService.initMonitoringService(pendingRequests);
+
+    // Visitor geolocation (optional: requests flow unchanged without it)
+    await initGeoip();
 
     // Register current VPS server if running on a VPS with SSH
     await registerLocalVpsServer();

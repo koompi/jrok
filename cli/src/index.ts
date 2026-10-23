@@ -13,7 +13,7 @@ import { createInterface } from 'readline';
 import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 
-const VERSION = "2.7.0"; // Streaming HTTP responses + binary-safe bodies (capability-negotiated)
+const VERSION = "2.9.0"; // Request events carry visitor location, user agent and referrer
 const DEFAULT_SERVER = "https://tunnel.koompi.cloud";
 const GITHUB_API = "https://api.github.com/repos/koompi/jrok";
 const GITHUB_RAW = "https://raw.githubusercontent.com/koompi/jrok";
@@ -380,6 +380,15 @@ function nextReconnectDelayMs(attempt: number): number {
 // stream.
 const EVENT_PREFIX = '@jrok:';
 
+// Request header for an event field, length-capped: both are visitor-controlled
+// and end up in someone's analytics store.
+function headerValue(headers: unknown, name: string): string | undefined {
+  if (!headers || typeof headers !== 'object') return undefined;
+  const value = (headers as Record<string, unknown>)[name];
+  if (typeof value !== 'string' || !value) return undefined;
+  return value.length > 300 ? value.slice(0, 300) : value;
+}
+
 function emitEvent(kind: string, payload: Record<string, unknown>): void {
   try {
     console.log(`${EVENT_PREFIX}${kind} ${JSON.stringify(payload)}`);
@@ -416,7 +425,7 @@ function wsBufferDrained(ws: WebSocket): Promise<void> {
 
 // Handle incoming HTTP request from server and proxy to local service
 async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConfig): Promise<void> {
-  const { requestId, method, path, query, headers, body, bodyIsBase64, clientIp } = message;
+  const { requestId, method, path, query, headers, body, bodyIsBase64, clientIp, clientGeo } = message;
   const streaming = serverFeatures.has('stream');
   let responseStarted = false;
   const startedAt = Date.now();
@@ -433,6 +442,11 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
       ms: Date.now() - startedAt,
       bytes: bytesOut,
       outcome,
+      // Visitor location, resolved by servers that have GeoIP databases.
+      // Passed through untouched so new fields need no CLI release.
+      geo: clientGeo && typeof clientGeo === 'object' ? clientGeo : undefined,
+      ua: headerValue(headers, 'user-agent'),
+      ref: headerValue(headers, 'referer'),
     });
   };
 
