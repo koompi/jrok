@@ -194,6 +194,21 @@ Status: Certificates synced to all VPS servers
 }
 
 /**
+ * An edge left or rejoined the round-robin DNS records (health-checked DNS,
+ * src/dnsHealth/), or every edge looks down at once (records left as they are).
+ */
+export async function notifyEdgeDns(
+  change: "removed" | "added" | "all-down",
+  detail: { edge?: string; address?: string; records: string[] }
+): Promise<void> {
+  const what =
+    change === "removed" ? `❌ <b>Edge out of DNS</b>: <code>${detail.edge}</code> (${detail.address}) looks down from most checkers`
+    : change === "added" ? `✅ <b>Edge back in DNS</b>: <code>${detail.edge}</code> (${detail.address})`
+    : `🚨 <b>Every edge looks down</b>: DNS left as it is`;
+  await sendTelegramMessage(`${what}\nRecords: <code>${detail.records.join(", ")}</code>`);
+}
+
+/**
  * Notify about VPS server health status change
  */
 export async function notifyVpsHealthChanged(vpsId: string, healthy: boolean): Promise<void> {

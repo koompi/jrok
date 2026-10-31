@@ -23,9 +23,17 @@ INVENTORY=ansible/inventory.staging.ini
 TESTBOX_PRIVATE_IP=${TESTBOX_PRIVATE_IP:-10.130.0.15}
 export MONGODB_URI="mongodb://jrok:${MONGO_PW}@${TESTBOX_PRIVATE_IP}:27017/?authSource=admin"
 export CERT_SYNC_API_KEY JWT_SECRET JROK_PEER_KEY
+# Alerts, if the env file has them (none on staging so far).
+export TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}" TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 export KOOMPI_CLIENT_ID=staging KOOMPI_CLIENT_SECRET=staging
 export KOOMPI_REDIRECT_URI=https://jrok-staging.koompi.cloud/auth/callback DASHBOARD_URL=https://jrok-staging.koompi.cloud
 export CLOUDFLARE_TOKEN=""
+export MAXMIND_ACCOUNT_ID="" MAXMIND_LICENSE_KEY=""
+if [[ ",$TAGS," == *",geoip,"* ]]; then
+  # The MaxMind account production already uses (/etc/GeoIP.conf there).
+  MAXMIND_ACCOUNT_ID=$(ssh -o BatchMode=yes root@152.42.241.139 'sed -n "s/^AccountID *//p" /etc/GeoIP.conf')
+  MAXMIND_LICENSE_KEY=$(ssh -o BatchMode=yes root@152.42.241.139 'sed -n "s/^LicenseKey *//p" /etc/GeoIP.conf')
+fi
 if [[ ",$TAGS," == *",certbot,"* ]]; then
   CLOUDFLARE_TOKEN=$(ssh -o BatchMode=yes root@152.42.241.139 'sed -n "s/^dns_cloudflare_api_token *= *//p" /etc/letsencrypt/secrets/cloudflare.ini')
 fi

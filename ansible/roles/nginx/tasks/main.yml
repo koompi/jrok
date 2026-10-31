@@ -287,9 +287,11 @@
           }
         }
 
-        # HTTPS server
+        # HTTPS server. Also the default for names with no server block of
+        # their own: otherwise nginx answered those with whichever customer's
+        # vhost sorts first, showing a stranger that customer's certificate.
         server {
-          listen 443 ssl http2;
+          listen 443 ssl http2 default_server;
           server_name {% for d in jrok_base_domains %}{{ d }} *.{{ d }} {% endfor %};
 
           # One wildcard certificate covers every base domain.

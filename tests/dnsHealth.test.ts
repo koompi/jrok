@@ -132,7 +132,7 @@ function fakeDns() {
 }
 
 /** A checker on edge `id`; `down` lists the edges its probes fail to reach. */
-function checkerOn(id: string, dns: ReturnType<typeof fakeDns>, down: Set<string>, overrides: Partial<DnsHealthConfig> = {}) {
+function checkerOn(id: string, dns: ReturnType<typeof fakeDns>, down: Set<string>, overrides: Partial<DnsHealthConfig> = {}, notices: string[] = []) {
   const config: DnsHealthConfig = {
     checkerId: id,
     edges: EDGES,
@@ -144,7 +144,8 @@ function checkerOn(id: string, dns: ReturnType<typeof fakeDns>, down: Set<string
     dryRun: false,
     ...overrides,
   };
-  return new DnsHealthChecker(config, db!, dns.client(id), async (edge) => !down.has(edge.id), () => {});
+  return new DnsHealthChecker(config, db!, dns.client(id), async (edge) => !down.has(edge.id), () => {},
+    (n) => notices.push("edge" in n ? `${n.change} ${n.edge.id} ${n.records.length}` : n.change));
 }
 
 async function rounds(n: number, checkers: DnsHealthChecker[]) {
@@ -205,6 +206,28 @@ describe.skipIf(!MONGO)("checkers agreeing through MongoDB", () => {
     await rounds(2, [b]); // only b runs now
     expect(dns.addresses("app.test")).toEqual(["192.0.2.1", "192.0.2.2"]);
     expect(dns.changes.every((c) => c.startsWith("b "))).toBe(true);
+  });
+
+  test("a person is told once per edge per change, not per record or per cycle", async () => {
+    const dns = fakeDns();
+    const unreachable = new Set(["c"]);
+    const notices: string[] = [];
+    const a = checkerOn("a", dns, unreachable, {}, notices);
+    const b = checkerOn("b", dns, unreachable, {}, notices);
+    await rounds(4, [a, b]);
+    unreachable.clear();
+    await rounds(4, [a, b]);
+    expect(notices).toEqual(["removed c 2", "added c 2"]);
+  });
+
+  test("every edge looking down is reported once, and DNS left alone", async () => {
+    const dns = fakeDns();
+    const unreachable = new Set(["a", "b", "c"]);
+    const notices: string[] = [];
+    const checkers = ["a", "b", "c"].map((id) => checkerOn(id, dns, unreachable, {}, notices));
+    await rounds(4, checkers);
+    expect(notices).toEqual(["all-down"]);
+    expect(dns.changes).toEqual([]);
   });
 
   test("dry run changes nothing", async () => {

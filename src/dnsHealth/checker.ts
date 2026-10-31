@@ -30,6 +30,11 @@ export interface DnsHealthConfig {
   dryRun: boolean;
 }
 
+/** Changes worth telling a person about (Telegram in main.ts). */
+export type DnsHealthNotice =
+  | { change: "removed" | "added"; edge: Edge; records: string[] }
+  | { change: "all-down"; records: string[] };
+
 export interface DnsClient {
   addressRecords(name: string): Promise<AddressRecord[]>;
   addAddress(name: string, address: string): Promise<void>;
@@ -41,13 +46,15 @@ const LEASE_ID = "dns-writer";
 export class DnsHealthChecker {
   private states = new Map<string, ProbeState>();
   private leader = false;
+  private allDown = false;
 
   constructor(
     private config: DnsHealthConfig,
     private db: Db,
     private dns: DnsClient,
     private probe: (edge: Edge) => Promise<boolean>,
-    private log: (message: string) => void = (m) => console.log(`[dns-health] ${m}`)
+    private log: (message: string) => void = (m) => console.log(`[dns-health] ${m}`),
+    private notify: (notice: DnsHealthNotice) => void = () => {}
   ) {}
 
   async cycle(): Promise<void> {
@@ -116,6 +123,19 @@ export class DnsHealthChecker {
       .toArray();
     const verdict = verdicts(edges, votes.map((v) => ({ checker: v.checker, edge: v.edge, healthy: v.healthy })));
 
+    // Every edge down at once is more likely the checkers' own trouble than
+    // the edges'; the records are left alone (planRecord), and a person told.
+    const allDown = edges.length > 0 && edges.every((e) => verdict.get(e.id) === "down");
+    if (allDown && !this.allDown) this.notify({ change: "all-down", records });
+    this.allDown = allDown;
+
+    const changed = new Map<string, { change: "removed" | "added"; edge: Edge; records: string[] }>();
+    const note = (change: "removed" | "added", edge: Edge, name: string) => {
+      const entry = changed.get(edge.id) ?? { change, edge, records: [] };
+      entry.records.push(name);
+      changed.set(edge.id, entry);
+    };
+
     for (const name of records) {
       const current = await this.dns.addressRecords(name);
       const plan = planRecord(edges, verdict, current.map((r) => r.content));
@@ -124,12 +144,17 @@ export class DnsHealthChecker {
         this.log(`${dryRun ? "would remove" : "removing"} ${edge.id} (${address}) from ${name}: down`);
         if (dryRun) continue;
         for (const record of current.filter((r) => r.content === address)) await this.dns.removeRecord(name, record.id);
+        note("removed", edge, name);
       }
       for (const address of plan.add) {
         const edge = edges.find((e) => e.address === address)!;
         this.log(`${dryRun ? "would add" : "adding"} ${edge.id} (${address}) to ${name}: up`);
-        if (!dryRun) await this.dns.addAddress(name, address);
+        if (!dryRun) {
+          await this.dns.addAddress(name, address);
+          note("added", edge, name);
+        }
       }
     }
+    for (const notice of changed.values()) this.notify(notice);
   }
 }

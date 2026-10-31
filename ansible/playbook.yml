@@ -18,6 +18,12 @@
     # register without one, as production did (it refuses example.com).
     certbot_email: "{{ lookup('env', 'CERTBOT_EMAIL') }}"
     cloudflare_token: "{{ lookup('env', 'CLOUDFLARE_TOKEN') }}"
+    # MaxMind GeoLite2 (visitor location); unset skips the geoip role.
+    maxmind_account_id: "{{ lookup('env', 'MAXMIND_ACCOUNT_ID') }}"
+    maxmind_license_key: "{{ lookup('env', 'MAXMIND_LICENSE_KEY') }}"
+    # Alerts (edge out of / back in DNS, a deploy stopped); unset: none.
+    telegram_bot_token: "{{ lookup('env', 'TELEGRAM_BOT_TOKEN') }}"
+    telegram_chat_id: "{{ lookup('env', 'TELEGRAM_CHAT_ID') }}"
     mongodb_uri: "{{ lookup('env', 'MONGODB_URI') }}"
     cert_sync_api_key: "{{ lookup('env', 'CERT_SYNC_API_KEY') }}"
     # jrok refuses to start in production with a JWT_SECRET shorter than 32 characters.
@@ -81,6 +87,7 @@
   roles:
     - certbot
     - nginx
+    - geoip
     - app
 
   post_tasks:

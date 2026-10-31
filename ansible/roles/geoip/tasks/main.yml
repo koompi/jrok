@@ -1,0 +1,55 @@
+---
+# Ansible Role: visitor location for Traffic Insights (MaxMind GeoLite2).
+# geoipupdate fetches the databases into /var/lib/GeoIP twice a week; jrok
+# reloads them when they change, without a restart (src/services/geoipService.ts).
+# Skipped without MAXMIND_LICENSE_KEY: jrok then runs without visitor location,
+# which is what an edge without these files did (new edges had none).
+
+- name: Install geoipupdate
+  apt:
+    name: geoipupdate
+    state: present
+  when: maxmind_license_key | length > 0
+  tags: ["geoip"]
+
+- name: MaxMind account for geoipupdate
+  copy:
+    content: |
+      AccountID {{ maxmind_account_id }}
+      LicenseKey {{ maxmind_license_key }}
+      EditionIDs GeoLite2-ASN GeoLite2-City GeoLite2-Country
+      DatabaseDirectory /var/lib/GeoIP
+    dest: /etc/GeoIP.conf
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  when: maxmind_license_key | length > 0
+  tags: ["geoip"]
+
+- name: GeoIP database directory
+  file:
+    path: /var/lib/GeoIP
+    state: directory
+    mode: '0755'
+  when: maxmind_license_key | length > 0
+  tags: ["geoip"]
+
+- name: Fetch the databases now if this edge has none
+  command: /usr/bin/geoipupdate
+  args:
+    creates: /var/lib/GeoIP/GeoLite2-City.mmdb
+  when: maxmind_license_key | length > 0
+  tags: ["geoip"]
+
+- name: Keep them current (MaxMind publishes on Tuesdays and Fridays)
+  copy:
+    content: |
+      # MaxMind publishes GeoLite2 on Tuesdays and Fridays; jrok reloads the files when they change.
+      SHELL=/bin/sh
+      PATH=/usr/sbin:/usr/bin:/sbin:/bin
+      17 4 * * 3,6 root /usr/bin/geoipupdate >> /var/log/geoipupdate.log 2>&1
+    dest: /etc/cron.d/geoipupdate
+    mode: '0644'
+  when: maxmind_license_key | length > 0
+  tags: ["geoip"]

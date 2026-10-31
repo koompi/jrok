@@ -26,6 +26,7 @@ import { hostname } from "os";
 import { parseEdges, type Edge } from "./decide";
 import { CloudflareDns, cloudflareToken } from "./cloudflare";
 import { DnsHealthChecker } from "./checker";
+import { initTelegram, notifyEdgeDns } from "../services/notificationService";
 
 const env = process.env;
 const number = (name: string, fallback: number) => {
@@ -59,6 +60,9 @@ async function probe(edge: Edge): Promise<boolean> {
   }
 }
 
+// Alerts when an edge leaves or rejoins DNS: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
+initTelegram();
+
 const client = new MongoClient(env.MONGODB_URI, { serverSelectionTimeoutMS: 5_000 });
 await client.connect();
 
@@ -75,7 +79,14 @@ const checker = new DnsHealthChecker(
   },
   client.db("jrok"),
   new CloudflareDns(cloudflareToken(), { ttl: number("DNS_HEALTH_TTL", 60), zoneId: env.DNS_HEALTH_ZONE_ID }),
-  probe
+  probe,
+  undefined,
+  (notice) => {
+    const detail = "edge" in notice
+      ? { edge: notice.edge.id, address: notice.edge.address, records: notice.records }
+      : { records: notice.records };
+    notifyEdgeDns(notice.change, detail).catch(() => {});
+  }
 );
 
 console.log(
