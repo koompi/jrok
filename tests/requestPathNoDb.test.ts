@@ -179,6 +179,18 @@ describe("grouped request path", () => {
   });
 });
 
+describe("one replica on several edges", () => {
+  test("its instance id is scoped to the server it connected to, so edges don't overwrite each other", async () => {
+    const agent = await registerReplica("scoped-app", "replica-1");
+    await settle();
+
+    const scoped = `replica-1@${agentService.currentServerId}`;
+    expect(agent.instanceId).toBe(scoped);
+    expect(collections.get("agentConnections")!.docs.find((d) => d.domain === "scoped-app")?.instanceId).toBe(scoped);
+    expect(collections.get("agentGroupMembers")!.docs.find((d) => d.agentId === agent.id)?.instanceId).toBe(scoped);
+  });
+});
+
 describe("agent heartbeats", () => {
   test("are batched into one write per flush", async () => {
     const a = await registerReplica("hb-app", "hb-1");

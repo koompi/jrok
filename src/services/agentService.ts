@@ -197,6 +197,11 @@ async function generateUniqueDomain(baseDomain: string): Promise<string> {
 // AGENT REGISTRATION (MongoDB + Local Socket)
 // =============================================================================
 
+/** An instance id as this server records it: `<instance>@<server>`. */
+export function scopeInstanceId(instanceId: string): string {
+  return `${instanceId}@${SERVER_ID}`;
+}
+
 export async function registerAgent(options: RegisterAgentOptions): Promise<RegisterAgentResult> {
   const {
     socket,
@@ -310,9 +315,13 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
   const agentId = generateId();
   const now = new Date();
   // For single agent mode, use full agentId as instanceId to ensure uniqueness
-  // For group mode, use provided instanceId or generate a short one
+  // For group mode, use provided instanceId or generate a short one, scoped to
+  // this server: a replica connects to every edge in its region with the same
+  // instance id, and its connection and group records are keyed by it. Unscoped,
+  // each edge's registration overwrote the other's, so MongoDB showed one edge
+  // and lost the replica when that one connection dropped (P6).
   const effectiveInstanceId = groupMode
-    ? (instanceId || `instance-${agentId.substring(0, 8)}`)
+    ? scopeInstanceId(instanceId || `instance-${agentId.substring(0, 8)}`)
     : `single-${agentId}`;
 
   // Create agent connection record in MongoDB (distributed state)

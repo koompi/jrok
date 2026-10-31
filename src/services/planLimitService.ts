@@ -233,10 +233,12 @@ export async function checkTunnelLimit(
   // This allows connecting a Custom Domain to an existing instance without consumption of extra tunnel quota.
   let instanceHasActiveAgents = false;
   if (instanceId) {
+    // Stored scoped to the server it connected to (`<instance>@<server>`).
+    const escaped = instanceId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const existingInstanceAgents = await collections.agentConnections.findOne({
       organizationId,
       active: true,
-      instanceId: instanceId
+      instanceId: { $regex: `^${escaped}(@|$)` }
     });
     if (existingInstanceAgents) {
       instanceHasActiveAgents = true;

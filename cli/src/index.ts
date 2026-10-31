@@ -12,6 +12,7 @@ import { join } from 'path';
 import { createInterface } from 'readline';
 import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
+import { lookup as dnsLookup } from 'dns';
 
 const VERSION = "2.9.0"; // Request events carry visitor location, user agent and referrer
 const DEFAULT_SERVER = "https://tunnel.koompi.cloud";
@@ -45,6 +46,10 @@ interface ClientConfig {
   // Multi-agent load balancing options
   groupMode?: boolean; // Enable group mode for load-balanced multi-agent deployments
   instanceId?: string; // Unique instance identifier for this agent in the group
+  // Connect to this edge (hostname or IP) instead of whatever --server's name
+  // resolves to. TLS and the Host header still use --server's name, so its
+  // certificate and the public URL stay right. Run one agent per edge.
+  edge?: string;
   // IP Security options
   ipSecurity?: {
     mode: 'allow-all' | 'allowlist' | 'blocklist';
@@ -299,9 +304,15 @@ function buildConfig(args: Record<string, string>): Partial<ClientConfig> {
     forceNew,
     groupMode,
     instanceId,
+    edge: args["edge"] || process.env.JROK_EDGE || undefined,
     ipSecurity,
     organizationId: args["org"] || storedConfig.organizationId,
   };
+}
+
+/** A net/tls `lookup` that resolves `edge` whatever hostname is asked for. */
+function edgeLookup(edge: string) {
+  return (_hostname: string, options: any, callback: any) => dnsLookup(edge, options, callback);
 }
 
 function validateConnectConfig(config: Partial<ClientConfig>): asserts config is ClientConfig {
@@ -904,10 +915,16 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   if (config.groupMode) {
     console.log(`⚖️  Mode: Load-balanced Group${config.instanceId ? ` (instance: ${config.instanceId})` : ''}`);
   }
+  if (config.edge) {
+    console.log(`🛰️  Edge: ${config.edge}`);
+  }
   console.log(`\n${config.serverUrl}\n`);
 
   const ws = new WebSocket(wsUrl.toString(), {
     headers: { Authorization: `Bearer ${config.authToken}` },
+    // --edge: resolve the edge instead of the server's name; the URL (and so
+    // TLS SNI and Host) is unchanged.
+    ...(config.edge ? { lookup: edgeLookup(config.edge) } : {}),
   });
   let heartbeatInterval: NodeJS.Timeout;
   let pingInterval: NodeJS.Timeout;
@@ -1827,6 +1844,7 @@ OPTIONS:
   --force-new        Force new subdomain (add suffix even if you own the domain)
   --group            Enable group mode for load-balanced multi-agent deployments
   --instance-id      Unique instance identifier (auto-generated if not provided)
+  --edge             Connect to this edge (hostname or IP); TLS and Host still use --server
   --docker-service   Docker Swarm service name
   --k8s-service      Kubernetes service:port
   --org              Organization ID
@@ -1848,6 +1866,7 @@ ENVIRONMENT VARIABLES:
   JROK_HOST          Local host
   JROK_GROUP_MODE    Enable group mode (true/false)
   JROK_INSTANCE_ID   Instance identifier for group mode
+  JROK_EDGE          Edge to connect to (see --edge)
 
 CONFIG FILE:
   ~/.jrok/config.json

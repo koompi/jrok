@@ -1,6 +1,6 @@
 # Plan: Many jrok Edges Across Cambodia (Stateless Apps)
 
-**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 1 steps 1.1–1.4 done and passed on staging the same day (branch `feat/phase1-multi-edge`). **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
+**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 1 steps 1.1–1.4 and 1.6, and the jrok half of 1.7, done and passed on staging the same day (branch `feat/phase1-multi-edge`). **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
 **Date:** 2026-10-30
 **Repos:** jrok (server, CLI, Ansible) and kconsole (deploy worker, backend)
 **Scope:** HTTP and WebSocket traffic to stateless apps (Git and image services).
@@ -93,12 +93,12 @@ Two edges built from the Ansible role on DigitalOcean SGP1, each 1 vCPU / 1 GB "
 | P3 | nginx opens a new connection to jrok for every request | `$connection_upgrade` map; custom-domain template in `domainService.ts` | Wasted CPU at high load | 0 |
 | P4 | Per-app IP allow/block lists are saved to MongoDB but only loaded at startup | `securityService.ts:1114`, `index.ts:492` | With two edges, a customer's allowlist is enforced on only one of them. **Security issue.** **Fixed in 1.1.** | 1 |
 | P5 | Admin IP blocks and suspensions live only in the memory of the edge that received the call | `securityService.ts:1142`, `index.ts:1840` | They reach only one edge, and a restart loses them. **Fixed in 1.1.** | 1 |
-| P6 | If one replica connects to several edges, its group record is overwritten | `agentGroupService.ts:186` (keyed by group + instance ID) | Wrong group state, members removed while still connected | 1 |
+| P6 | If one replica connects to several edges, its group record is overwritten | `agentGroupService.ts:186` (keyed by group + instance ID) | Wrong group state, members removed while still connected. **Fixed (1.7, jrok half).** | 1 |
 | P7 | Every edge saves its own copy of the daily stats | `statsService.ts:448` (`insertOne` with a new id) | Daily totals counted once per edge. **Fixed in 1.2.** | 1 |
 | P8 | The request path's lookups (is the domain grouped, the group record, where another edge's agent is, that edge's address) are cached for 30–60 s, but a request that finds its entry expired waits on MongoDB itself, and fails when MongoDB does. Nothing falls back to what the edge already knows. | `agentGroupService.ts` (group caches), `crossServerService.ts` (route lookup) | **A MongoDB outage takes every app down once the caches expire, even with the agent connected to the edge** (measured on staging: 10 s wait, then 500). **Fixed in 1.3.** | 1 |
 | P9 | Forwarded requests have no hop limit (`X-Forwarded-From` is set but never read) | `crossServerService.ts:184` | If MongoDB's record of an agent is stale, two edges can pass a request back and forth until it times out | 1 |
 | P10 | Forwarding between edges uses plain `http://` / `ws://` | `crossServerService.ts:180`, `:270` | Customer traffic crosses the network unencrypted | 4 |
-| P11 | The CLI builds the printed public URL from the `--server` hostname | `cli/src/index.ts:196` | Per-edge connect addresses would print the wrong URL | 1 |
+| P11 | The CLI builds the printed public URL from the `--server` hostname | `cli/src/index.ts:196` | Per-edge connect addresses would print the wrong URL. **Avoided by `--edge` (1.6).** | 1 |
 | P12 | The worker runs one agent per replica, and its tunnel health check uses the public URL | `JrokService.ts:258`, `:663` | With several edges, DNS picks one at random, so the worker can't tell which edge lost a tunnel | 1 |
 | P13 | The TCP tunnel hostname (`sgp1.private.koompi.cloud`) is the same server that serves HTTP | `ansible/inventory.ini` | Publishes the HTTP edge's real IP, which matters once it sits behind Cloudflare | 3 |
 | P14 | Each forwarded request makes two uncached MongoDB lookups (which edge holds the agent, then that edge's address) | `crossServerService.ts` (`findServerForDomain`, `getServer`) | The forwarding edge maxes out at about 315 requests/s, 2.5× the CPU of a local request (staging). **Fixed in 1.3:** 558 requests/s at half the CPU. | 1 |
@@ -227,13 +227,13 @@ Each phase can ship on its own and leaves production better than before. Time es
 | 1.3 | **Done.** MongoDB off the request path. An edge holding a domain's replicas answers from them: whether the domain is grouped (their own `groupMode`) and which replica serves (round-robin over open sockets), with the group record only supplying the strategy and never waited for. Every request-path lookup now goes through `StaleCache` (`src/utils/staleCache.ts`): an expired answer is served while one background reload runs, and kept if MongoDB fails. Routes to other edges are cached for 3 s, and edge addresses for 5 s with health judged at load time. least-connections and weighted still read MongoDB; nothing uses them. | P8, P14 |
 | 1.4 | **Done.** One hop: an edge never forwards a request another edge forwarded to it (`X-Forwarded-From`); it answers 503 with `X-Jrok-Route: miss`. The sender then drops its cached route, looks it up again and retries once (GET and HEAD only, since a body can't be sent twice). An unreachable edge is retried the same way. | P9 |
 | 1.5 | Edge identity: `EDGE_ID`, `REGION`, `FORWARD_URL` (the HTTPS address other edges use to reach this one) environment variables, recorded in `serverHeartbeats`. Forwarding uses `FORWARD_URL`. | — |
-| 1.6 | CLI: the server sends the public URL in the welcome message (or a `--public-domain` flag), so connect addresses and public URLs are separate. | P11 |
+| 1.6 | **Done, differently:** the agent takes `--edge <host or IP>` (`JROK_EDGE`) and connects there, while TLS and the Host header keep using `--server`'s name. Certificates and the printed public URL stay right without per-edge certificates, and edge names need only plain DNS records (or IPs). | P11 |
 
 **kconsole deploy worker:**
 
 | Step | Work | Fixes |
 |---|---|---|
-| 1.7 | Read a `JROK_EDGES` list and run one agent per home edge for each replica. Extend the instance ID to `<instanceId>@<workerId>@<edgeId>`. Use one CLI process per edge (no CLI refactor). At about 62 MB each that is fine at today's scale; Phase 5 replaces it when replicas reach the thousands. | P6, P12 |
+| 1.7 | Read a `JROK_EDGES` list and run one agent per home edge for each replica, each with `--edge`. Use one CLI process per edge (no CLI refactor). At about 62 MB each that is fine at today's scale; Phase 5 replaces it when replicas reach the thousands. **jrok half done:** a group agent's instance id is recorded as `<instance>@<edge>`, so a replica on several edges gets one record per edge instead of each edge overwriting the other's (P6); the worker needs no id change. **Worker half (kconsole) not started.** | P6, P12 |
 | 1.8 | Check tunnel health per edge, and restart only the agent for the edge that lost its tunnel. Either call each edge directly, or add a small endpoint that reports whether an edge holds a tunnel for an instance. | P12 |
 
 **Tests:**
@@ -257,7 +257,10 @@ Each phase can ship on its own and leaves production better than before. Time es
 | Suspension / IP block set through one edge | Only that edge's memory | Enforced through both edges within 10 s |
 | jrok test suite | 165 pass | 188 pass (`staleCache`, `mongoOutage`, `securitySync` tests) |
 
-Still open from that test: when only the agent's edge loses MongoDB, the other edges stop forwarding to it after 30 s, because its heartbeat (written to MongoDB) looks stale. Step 1.7, every replica connected to every edge in its region, removes the need to forward there.
+| One replica on both edges (`--edge`, a staging unit per edge, as 1.7 will run it); jrok stopped on edge1 for 40 s | App down until the agent reconnected elsewhere | Through edge2: 0 failures of 65. Through edge1: 502 while its jrok was down (P15, Phase 2.6) |
+| Same, MongoDB blocked on edge1 for 40 s | — | 0 failures of 72 through either edge |
+
+With every replica on every edge, the case left open by the first MongoDB test (other edges stop forwarding to an edge whose heartbeat looks stale) no longer needs forwarding at all.
 
 ### Phase 2: Second edge in production, about 3–5 days
 
