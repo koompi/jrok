@@ -471,20 +471,41 @@ export async function aggregateDailyStats(): Promise<void> {
     groups.set(key, current);
   }
   
-  // Insert daily aggregates
-  for (const [key, stats] of groups) {
-    await collection.insertOne({
-      id: generateId(),
-      organizationId: stats.organizationId,
-      tunnelId: stats.tunnelId,
-      periodKey: dateKey,
-      period: "day",
-      bytesIn: stats.bytesIn,
-      bytesOut: stats.bytesOut,
-      requests: stats.requests,
-      timestamp: yesterday.getTime(),
-    });
+  // One record per org + tunnel + day, whichever server writes it and however
+  // often: every jrok server runs this job, and each used to insert its own
+  // copy, so a day's totals were counted once per server (P7 in
+  // docs/plans/jrok-scale-out-plan.md). The totals are recomputed from the
+  // shared hourly records, so every server writes the same values.
+  const ops = Array.from(groups.values()).map((stats) => ({
+    updateOne: {
+      filter: { _id: `day:${dateKey}:${stats.organizationId}:${stats.tunnelId || "global"}` as any },
+      update: {
+        $set: {
+          organizationId: stats.organizationId,
+          tunnelId: stats.tunnelId,
+          periodKey: dateKey,
+          period: "day",
+          bytesIn: stats.bytesIn,
+          bytesOut: stats.bytesOut,
+          requests: stats.requests,
+          timestamp: yesterday.getTime(),
+        },
+        $setOnInsert: { id: generateId() },
+      },
+      upsert: true,
+    },
+  }));
+
+  if (ops.length > 0) {
+    try {
+      await collection.bulkWrite(ops, { ordered: false });
+    } catch (error: any) {
+      // Two servers inserting the same record at the same moment: one wins,
+      // and both carry the same totals. Anything else is a real failure.
+      const writeErrors = error?.writeErrors ?? [];
+      if (writeErrors.length === 0 || writeErrors.some((e: any) => e.code !== 11000)) throw error;
+    }
   }
-  
+
   console.log(`✅ Aggregated ${groups.size} daily stats for ${dateKey}`);
 }
