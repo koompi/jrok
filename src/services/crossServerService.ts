@@ -10,6 +10,7 @@ import {
   getAllAgentsAsync,
   getAgentByDomainLocal,
   getAgentSocket,
+  localAgentCount,
   currentServerId as SERVER_ID,
   currentServerHost as SERVER_HOST,
   currentServerPort as SERVER_PORT,
@@ -42,14 +43,12 @@ const HEARTBEAT_INTERVAL_MS = 10000; // 10 seconds
 const SERVER_TIMEOUT_MS = 30000; // 30 seconds without heartbeat = unhealthy
 
 // Local server health
-let localAgentCount = 0;
 let localTunnelCount = 0;
 
 /**
- * Update local server metrics
+ * Update local server metrics (agents are counted from their sockets)
  */
-export function updateLocalMetrics(agentCount: number, tunnelCount: number): void {
-  localAgentCount = agentCount;
+export function updateLocalMetrics(_agentCount: number, tunnelCount: number): void {
   localTunnelCount = tunnelCount;
 }
 
@@ -74,7 +73,9 @@ export async function sendServerHeartbeat(): Promise<void> {
         forwardUrl: ownForwardUrl(),
         region: process.env.VPS_REGION || 'default',
         lastHeartbeat: now,
-        agentCount: localAgentCount,
+        // Counted from the sockets: updateLocalMetrics is never called, so
+        // this was always 0. A rolling deploy waits on it (Ansible app role).
+        agentCount: localAgentCount(),
         tunnelCount: localTunnelCount,
         memoryUsage,
         healthy: true,

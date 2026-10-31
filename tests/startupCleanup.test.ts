@@ -72,3 +72,19 @@ test.skipIf(!URI)("a restart removes only this server's records, and recounts gr
   // A group left with nobody on any server is removed.
   expect(await c.agentGroups.findOne({ id: "cleanup-test-g2" })).toBeNull();
 });
+
+test.skipIf(!URI)("a domain's replicas registering together all join one group", async () => {
+  // Its own database: the unique index on domain is what the race hits.
+  const groups = client.db("jrok_group_race_test").collection("agentGroups");
+  await groups.drop().catch(() => {});
+  await groups.createIndex({ domain: 1 }, { unique: true });
+  const { upsertGroup } = await import("../src/services/agentGroupService");
+
+  // 50 replicas of a new service, or all of them back after an edge restart.
+  const results = await Promise.all(Array.from({ length: 50 }, () => upsertGroup(groups, "race-app", "org-1")));
+
+  expect(new Set(results.map((r) => r.group.id)).size).toBe(1);
+  expect(results.filter((r) => r.created)).toHaveLength(1);
+  expect(await groups.countDocuments({ domain: "race-app" })).toBe(1);
+  await client.db("jrok_group_race_test").dropDatabase();
+});

@@ -169,6 +169,12 @@
             default $binary_remote_addr;
         }
         limit_req_zone $jrok_limit_key zone=general:10m rate=10r/s;
+        # Agent handshakes (/ws/agent) have their own limit. A worker is one IP
+        # holding hundreds of agents, which all reconnect at once when an edge
+        # restarts: under the general limit 300 of them took 57 s to come back
+        # (staging). The burst lets a whole worker in at once; the rate still
+        # bounds a flood of handshakes from one address.
+        limit_req_zone $binary_remote_addr zone=agents:10m rate={{ jrok_agent_rate | default('20r/s') }};
         limit_req_zone $binary_remote_addr zone=strict:10m rate=5r/s;
 
         # This server's own jrok. Each edge's nginx sends to its local jrok,
@@ -303,6 +309,7 @@
           # The agent endpoint: this edge's jrok only (see upstream jrok_agents).
           location = /ws/agent {
             access_log /var/log/nginx/access.log combined_noquery;
+            limit_req zone=agents burst={{ jrok_agent_burst | default(2000) }} nodelay;
             proxy_pass http://jrok_agents;
             proxy_http_version 1.1;
             proxy_set_header Upgrade $http_upgrade;

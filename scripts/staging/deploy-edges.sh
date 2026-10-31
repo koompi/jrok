@@ -2,6 +2,7 @@
 # Deploy this working tree to the staging edges (docs/plans/staging-runbook.md).
 #
 #   scripts/staging/deploy-edges.sh [ansible tags]     default tags: app
+#   JROK_ANSIBLE_ARGS="-e jrok_agent_wait_seconds=40" scripts/staging/deploy-edges.sh app
 #
 # Copies the repo to each edge's /root/jrok-staging/, then runs the playbook
 # with the given tags against ansible/inventory.staging.ini. Secrets come from
@@ -36,5 +37,6 @@ for ip in $(awk '/^edge[0-9]+ /{for(i=1;i<=NF;i++) if($i ~ /^ansible_host=/){sub
 done
 
 cd ansible
-uvx --from ansible ansible-playbook -i inventory.staging.ini playbook.yml --tags "$TAGS" | \
-  grep -E '^(PLAY RECAP|TASK \[app : (Check application health|Show application status))|fatal|FAILED|ok=|"msg": "✅'
+# shellcheck disable=SC2086
+uvx --from ansible ansible-playbook -i inventory.staging.ini playbook.yml --tags "$TAGS" ${JROK_ANSIBLE_ARGS:-} | \
+  grep -E '^(PLAY RECAP|TASK \[app : (Check application health|Show application status))|fatal|FAILED|ok=|"msg": "✅|agents connected|agents came back'

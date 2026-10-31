@@ -126,6 +126,12 @@
       Environment=VPS_ID={{ vps_id | default(ansible_hostname) }}
       Environment=VPS_NAME={{ vps_id | default(ansible_hostname) }}
       Environment=VPS_REGION={{ vps_region | default('default') }}
+      {% if server_key_sources is defined %}
+      # The server key (API_KEY) is accepted only from these and this machine
+      # (src/utils/serverKeySources.ts): server_key_sources (kconsole's
+      # addresses, comma-separated) plus every edge.
+      Environment=SERVER_KEY_SOURCES={{ ((server_key_sources | string).split(',') | map('trim') | select | list + (groups['jrok_servers'] | map('extract', hostvars, 'ansible_host') | list)) | unique | join(',') }}
+      {% endif %}
       # true: custom-domain certificates from Let's Encrypt's staging service (test environments)
       Environment=CERTBOT_TEST_CERT={{ certbot_test_cert | default(false) | bool | lower }}
       Environment=NGINX_PATH=/etc/nginx/sites-available
@@ -171,6 +177,26 @@
     daemon_reload: yes
   tags: ["app"]
 
+# Rolling deploy (serial): after the restart, wait until this edge has its
+# agents back before the play moves on to the next edge. Otherwise an app whose
+# agent hadn't yet reconnected here would be down while the next edge
+# restarts. The count comes from this edge's heartbeat (every 10 s).
+- name: Agents on this edge before the restart
+  uri:
+    url: "http://127.0.0.1:{{ jrok_port | default('3000') }}/cluster/stats"
+    headers:
+      Authorization: "Bearer {{ cert_sync_api_key }}"
+    return_content: yes
+  register: agents_before
+  failed_when: false
+  no_log: true
+  tags: ["app"]
+
+- name: Count them
+  set_fact:
+    jrok_agents_before: "{{ ((agents_before.json | default({})).serverDetails | default([]) | selectattr('serverId', 'equalto', vps_id | default(ansible_hostname)) | map(attribute='agentCount') | list + [0]) | first | int }}"
+  tags: ["app"]
+
 - name: Stop jrok service (if running)
   systemd:
     name: jrok
@@ -201,6 +227,45 @@
   retries: 3
   delay: 2
   tags: ["app", "verify"]
+
+- name: Wait for this edge's agents to come back (jrok_agent_wait_seconds, default 180)
+  uri:
+    url: "http://127.0.0.1:{{ jrok_port | default('3000') }}/cluster/stats"
+    headers:
+      Authorization: "Bearer {{ cert_sync_api_key }}"
+    return_content: yes
+  register: agents_after
+  until: >-
+    ((agents_after.json | default({})).serverDetails | default([]) | selectattr('serverId', 'equalto', vps_id | default(ansible_hostname))
+    | map(attribute='agentCount') | list + [0]) | first >= (jrok_agents_before | int * (jrok_agent_return | default(0.95) | float)) | int
+  retries: "{{ ((jrok_agent_wait_seconds | default(180)) | int) // 5 }}"
+  delay: 5
+  failed_when: false
+  when: jrok_agents_before | int > 0
+  no_log: true
+  tags: ["app"]
+
+- name: Agents back on this edge
+  set_fact:
+    jrok_agents_after: "{{ ((agents_after.json | default({})).serverDetails | default([]) | selectattr('serverId', 'equalto', vps_id | default(ansible_hostname)) | map(attribute='agentCount') | list + [0]) | first | int }}"
+  when: agents_after is not skipped
+  tags: ["app"]
+
+- name: Report agents on this edge
+  debug:
+    msg: "{{ jrok_agents_after }} agents connected (before the restart: {{ jrok_agents_before }})"
+  when: agents_after is not skipped
+  tags: ["app"]
+
+- name: Stop the rolling deploy if this edge's agents didn't come back
+  fail:
+    msg: >-
+      Only {{ jrok_agents_after }} of {{ jrok_agents_before }} agents came back to {{ inventory_hostname }} within
+      {{ jrok_agent_wait_seconds | default(180) }} s, so the other edges were not restarted: apps whose agents are
+      missing here are being served by them. Find out why the workers' agents aren't reconnecting, then run the
+      deploy again (jrok_agent_return=0 skips this check).
+  when: agents_after is not skipped and (jrok_agents_after | int) < ((jrok_agents_before | int) * (jrok_agent_return | default(0.95) | float)) | int
+  tags: ["app"]
 
 - name: Show application status
   debug:

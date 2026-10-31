@@ -1,6 +1,6 @@
 # Plan: Many jrok Edges Across Cambodia (Stateless Apps)
 
-**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 0.5, Phase 1 and Phase 2.5–2.6 done and passed on staging, 2026-10-31 to 2026-11-01 (branch `feat/phase1-multi-edge`). D1 decided 2026-11-01: no Cloudflare proxy (Phase 3, Option B); Phase 3.1 (health-checked DNS) and 2.3 (custom-domain certificates with several edges) done on staging the same day. **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
+**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 0.5, Phase 1 and Phase 2.5–2.6 done and passed on staging, 2026-10-31 to 2026-11-01 (branch `feat/phase1-multi-edge`). D1 decided 2026-11-01: no Cloudflare proxy (Phase 3, Option B); Phase 3.1 (health-checked DNS), 2.3 (custom-domain certificates with several edges), 3.4 and 3.5 done on staging the same day. **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
 **Date:** 2026-10-30
 **Repos:** jrok (server, CLI, Ansible) and kconsole (deploy worker, backend)
 **Scope:** HTTP and WebSocket traffic to stateless apps (Git and image services).
@@ -109,6 +109,10 @@ Two edges built from the Ansible role on DigitalOcean SGP1, each 1 vCPU / 1 GB "
 | P20 | A forwarded response's body was unzipped by `fetch` while its `Content-Encoding: gzip` went on to the visitor | `crossServerService.ts` (`forwardRequest`) | Every forwarded text response unreadable. Came with Phase 0.5 (the agent compresses in the tunnel); staging only, never shipped. **Fixed:** the body passes through untouched (`decompress: false`, test in `peerLink.test.ts`). | 0.5 |
 | P21 | A custom domain's certificate challenge is answered only by the edge whose certbot asked for it | `domainService.ts` (certbot `--webroot` on the edge taking the verify call) | With several edges Let's Encrypt fetches the challenge through DNS, from several places, and reaches the others: issuance failed with 404 from the other edge (staging). Renewals too. **Fixed (2.3).** | 2 |
 | P22 | A renewed certificate reached nginx late: the other edges pulled it at the next 5-minute reconcile, and the edge that renewed it never reloaded nginx | `index.ts` (reconcile interval), certbot role (no reload hook) | With several edges, a new custom domain got a certificate error through the other edges for up to 5 minutes. The renewing server served the old certificate until some unrelated reload (production is fine today: its 74 certificates all match what nginx serves). **Fixed (2.3):** pulled within 15 s, nginx reloaded by a certbot hook. | 2 |
+| P23 | Replicas of one domain registering together raced to create its group: all but one insert hit the unique index and were disconnected | `agentGroupService.ts` (`getOrCreateGroup`: find, then insert) | 288 of 300 replicas of a new app were dropped and had to retry (staging); the same after every edge restart, which removes that edge's empty groups. **Fixed:** one atomic upsert. | 3 |
+| P24 | Registering a new domain wrote an nginx file per tunnel and reloaded nginx (once per jrok server); the file goes to `sites-available`, which nginx never reads. Replicas registering together also each created their own tunnel record | `tunnelService.ts`, `agentService.ts` (find, then insert) | 300 replicas of a new app: about 600 nginx reloads and 300 tunnel records for one domain (staging); production has 2 duplicated domains. **Fixed:** no file or reload; tunnel setup one at a time per domain on each server (at most one extra record per edge when two edges race on a brand-new domain). | 3 |
+| P25 | The heartbeat's agent count was always 0 (`updateLocalMetrics` is never called) | `crossServerService.ts` | Cluster stats showed no agents; nothing could tell whether an edge had its agents back. **Fixed:** counted from the sockets. | 3 |
+| P26 | A rolling deploy moved to the next edge as soon as jrok answered `/health`, while the restarted edge's agents were still reconnecting | Ansible app role | An app whose agent hadn't returned yet would be down while the next edge restarted. **Fixed:** the deploy waits until the edge has 95% of its agents back (up to 3 minutes) and otherwise stops with the counts. | 2 |
 | P15 | When jrok stops but nginx keeps running, that edge answers 502, and DNS keeps sending visitors to it | nginx `upstream jrok` lists only the local jrok | With two edges in DNS, about half of visitors fail until jrok is back or the edge leaves DNS (staging). **Fixed in 2.6** for jrok down; a whole machine down still needs health-checked DNS. | 2 |
 
 ---
@@ -330,9 +334,9 @@ Found on the way: P19 (the agent turned WebSocket text into binary, in productio
 |---|---|
 | 3.1 | **Done (staging, 2026-11-01).** `src/dnsHealth/`: a checker on every edge (`jrok-dns-health.service`, Ansible, when the inventory sets `dns_health_records`) probes the other edges as a visitor would (HTTPS to their address, `/health`, every 10 s) and records its view in MongoDB; down after 3 failures in a row, up after 3 successes. The checker holding a lease in MongoDB changes the records through Cloudflare's DNS API (DNS only): an edge leaves when most checkers see it down and returns when they see it up. A checker never judges its own edge, a record is never emptied, only the edges' own addresses in the listed names are touched, and nothing changes if MongoDB or Cloudflare can't be reached. It uses certbot's Cloudflare token already on the edges. A checker outside the edges' data centres can join with the same program. |
 | 3.2 | Custom domains: customers already get a CNAME (an ALIAS / flattened CNAME at the apex) to their app's name under a base domain, which the wildcard record covers, so they follow 3.1. Before relying on failover in production, run `scripts/custom-domain-dns-audit.ts` (read-only) and ask the owners of any domain reported `pinned` (A records for one edge) to switch. |
-| 3.3 | Move TCP tunnels (databases, SSH) to their own servers so the HTTP edges' IPs aren't published (P13). |
-| 3.4 | Admin and API endpoints (`/security/*`, admin): accept them only from kconsole's and the other edges' IPs. |
-| 3.5 | Agent endpoint: give it its own hostname, and limit agent registrations per API key and per IP. |
+| 3.3 | Move TCP tunnels (databases, SSH) to their own servers (P13). With DNS-only (D1) the HTTP edges' addresses are public anyway, so this is now about capacity and isolation (TCP ports and traffic off the HTTP edges), not hiding them. Needs servers; not started. |
+| 3.4 | **Done (staging, 2026-11-01).** Every admin and API route already required the server key or a super-admin session (checked). New, opt-in: `SERVER_KEY_SOURCES` (Ansible `server_key_sources`, plus every edge): the server key is then accepted only from those addresses and the machine itself, so a leaked key is useless elsewhere; refusals are logged. Super-admin sessions and API keys are unaffected, and agents never use the server key. Before setting it in production, confirm whether kconsole's `JROK_API_KEY` is the server key, and if so list kconsole's outgoing addresses. |
+| 3.5 | **Done, differently (staging, 2026-11-01).** In proxy mode (the default) jrok enforces no per-key or per-IP agent limits on purpose (kconsole owns quotas); the only limit, nginx's 10 handshakes/s per IP, throttled legitimate workers: 300 agents from one worker took 57 s to come back after a restart. Agent handshakes now have their own limit (20/s per IP, burst 2,000), and four problems found under load are fixed: P23–P26. The own-hostname part is covered by 1.6/1.7: agents connect to each edge's own name (`JROK_EDGES` with the edges' `forward_host`). |
 
 **3.1 drill (staging, 2026-11-01):** edge2 hard powered off through the DigitalOcean API while a visitor on the test droplet requested the app once a second through real DNS (`scripts/staging/dns-probe.sh`), then powered on again.
 
@@ -344,6 +348,16 @@ Found on the way: P19 (the agent turned WebSocket text into binary, in productio
 | edge2 back in both records | about 85 s after power-on (boot, then 3 good probes) |
 
 Browsers and curl try the next address when one doesn't answer, so a dead edge costs them a few seconds per new connection until DNS drops it. Clients that don't (some apps and older libraries) fail for up to about 40 s plus the TTL.
+
+**3.5 on staging (2026-11-01)**, with `scripts/staging/agent-swarm.ts` (many agents from one machine, as a worker):
+
+| 300 agents from one worker IP | Before | After |
+|---|---|---|
+| First connection | 61 s, 1,151 handshakes refused by nginx | 3 s, none refused |
+| Back after jrok restarts on their edge | 57 s | about 13 s |
+| A new app's 300 replicas registering together | 288 dropped (duplicate group), ~600 nginx reloads, 300 tunnel records | none dropped, no reloads, 1 tunnel record |
+| Rolling deploy while the agents can't come back | went on to restart the next edge | stopped at the first edge: "Only 2 of 302 agents came back…" |
+| Rolling deploy with the agents returning | — | waited for 302 of 302, then the next edge; 2 minutes for both |
 
 ### Phase 4: More regions in Cambodia, about 2 weeks, after Phase 2 is stable
 

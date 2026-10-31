@@ -33,6 +33,7 @@ import { allBaseDomains } from "./utils/baseDomains";
 import { getClientIp, setForwardedClientHeaders, trustedProxyHops, trustedProxyIps } from "./utils/clientIp";
 import { stripPeerHeaders } from "./utils/peerLink";
 import * as acmeChallenge from "./services/acmeChallenge";
+import { serverKeyAllowedFrom } from "./utils/serverKeySources";
 import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "./utils/wsFlowControl";
 import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
 import {
@@ -395,6 +396,22 @@ initTelegram();
 // Legacy Auth middleware (for backward compatibility)
 const isLegacyAuthenticated = createBasicAuthMiddleware(config.apiKey);
 
+// The visitor address worked out for each request (see the fetch handler), for
+// the server-key source check, which runs deep inside the auth helpers.
+const requestClientIps = new WeakMap<Request, string>();
+const serverKeyWarned = new Map<string, number>();
+
+/** The server key counts only from SERVER_KEY_SOURCES when that is set (utils/serverKeySources.ts). */
+function serverKeyUsable(req: Request): boolean {
+  const ip = requestClientIps.get(req) ?? "unknown";
+  if (serverKeyAllowedFrom(ip)) return true;
+  if (Date.now() - (serverKeyWarned.get(ip) ?? 0) > 60_000) {
+    serverKeyWarned.set(ip, Date.now());
+    console.warn(`🚫 Server key presented from ${ip}, which isn't in SERVER_KEY_SOURCES: refused`);
+  }
+  return false;
+}
+
 // New auth middleware using JWT/API keys
 async function authenticateRequest(req: Request): Promise<AuthContext | null> {
   // First try new auth
@@ -402,7 +419,7 @@ async function authenticateRequest(req: Request): Promise<AuthContext | null> {
   if (authContext) return authContext;
 
   // Fall back to legacy API key auth
-  if (isLegacyAuthenticated(req)) {
+  if (isLegacyAuthenticated(req) && serverKeyUsable(req)) {
     // Legacy auth - treat as a super admin context for backward compatibility.
     // isServerKey marks it privileged for the ownership checks in utils/access.ts.
     return {
@@ -459,7 +476,7 @@ async function requireAdminOrServerKey(req: Request): Promise<Response | null> {
   const presented = req.headers.get("x-admin-key");
   // Constant-time: `===` returns at the first differing byte, which lets a
   // caller recover the key one character at a time by timing.
-  if (presented && serverKey && safeEqual(presented, serverKey)) {
+  if (presented && serverKey && safeEqual(presented, serverKey) && serverKeyUsable(req)) {
     return null;
   }
   return requireSuperAdmin(req);
@@ -471,7 +488,7 @@ async function requireAdminOrServerKey(req: Request): Promise<Response | null> {
  * X-Admin-Key, or a super-admin session. Not an ordinary user or org API key.
  */
 async function requireServerKeyOrSuperAdmin(req: Request): Promise<Response | null> {
-  if (isLegacyAuthenticated(req)) return null;
+  if (isLegacyAuthenticated(req) && serverKeyUsable(req)) return null;
   return requireAdminOrServerKey(req);
 }
 
@@ -1077,6 +1094,7 @@ async function startServer() {
         // lists, rate limits, logs and the headers sent on to the customer's
         // app. See utils/clientIp.ts.
         const clientIp = getClientIp(req, server.requestIP(req)?.address);
+        requestClientIps.set(req, clientIp);
 
         // A certificate challenge nginx passed on from port 80 (plan step 2.3):
         // answered from this edge's certbot webroot, or another edge's.

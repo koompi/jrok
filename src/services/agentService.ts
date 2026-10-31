@@ -293,9 +293,10 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
         }
 
         // No existing agents - create new group
+        // Several replicas can get here together; getOrCreateGroup gives them
+        // all the one group (and logs when it creates it).
         const newGroup = await agentGroupService.getOrCreateGroup(requestedDomain, organizationId);
         groupId = newGroup.id;
-        console.log(`✨ Created new agent group for domain: ${requestedDomain}`);
       }
     }
   } else if (!isCustomDomain) {
@@ -427,7 +428,25 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
 // TUNNEL CREATION
 // =============================================================================
 
-async function createTunnelForAgent(agent: Agent, agentId: string, organizationId?: string): Promise<void> {
+// One tunnel record per domain. Registrations of the same domain on this
+// server set its tunnel up one after another, so replicas registering together
+// (a new service, or all of them back after an edge restart) update the record
+// the first one created instead of each inserting its own: 300 replicas left
+// 300 records for one domain on staging. Two edges can still race on a new
+// domain, which leaves at most one extra record per edge.
+const tunnelSetups = new Map<string, Promise<void>>();
+
+function createTunnelForAgent(agent: Agent, agentId: string, organizationId?: string): Promise<void> {
+  const key = agent.domain;
+  const run = (tunnelSetups.get(key) ?? Promise.resolve()).then(() => setUpTunnelForAgent(agent, agentId, organizationId));
+  tunnelSetups.set(key, run);
+  void run.finally(() => {
+    if (tunnelSetups.get(key) === run) tunnelSetups.delete(key);
+  });
+  return run;
+}
+
+async function setUpTunnelForAgent(agent: Agent, agentId: string, organizationId?: string): Promise<void> {
   try {
     const collections = getCollections();
     const existingTunnel = await getTunnelByDomain(agent.domain);
@@ -729,6 +748,11 @@ export async function getLocalAgentsAsync(): Promise<Agent[]> {
  */
 export function getAllAgents(): Agent[] {
   return [];
+}
+
+/** Agents connected to this server right now (reported in its heartbeat). */
+export function localAgentCount(): number {
+  return localSockets.size;
 }
 
 /**

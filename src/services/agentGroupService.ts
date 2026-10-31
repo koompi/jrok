@@ -1,5 +1,6 @@
 import type { AgentGroup, AgentGroupMember, Agent, LoadBalanceStrategy } from "../types/index";
 import { getCollections } from "../utils/mongodb";
+import type { Collection } from "mongodb";
 import { generateId } from "../utils/helpers";
 import * as agentService from "./agentService";
 import { StaleCache } from "../utils/staleCache";
@@ -61,34 +62,54 @@ export async function getOrCreateGroup(
   organizationId?: string,
   strategy: LoadBalanceStrategy = 'round-robin'
 ): Promise<AgentGroup> {
-  const collections = getCollections();
+  const { group, created } = await upsertGroup(getCollections().agentGroups, domain, organizationId, strategy);
+  rememberGroup(domain, group); // so the next request sees the new group
+  if (created) console.log(`✅ Created agent group for domain: ${domain}`);
+  return group;
+}
 
-  // Try to find existing group
-  const existing = await collections.agentGroups.findOne({ domain });
-  if (existing) {
-    return existing as unknown as AgentGroup;
-  }
-
-  // Create new group
-  const group: AgentGroup = {
-    id: generateId(),
-    domain,
+/**
+ * The domain's group, created if missing, in one atomic step. It used to find,
+ * then insert: when a domain's replicas registered together (a new service,
+ * or every replica coming back after an edge restart), all but one insert hit
+ * the unique index on `domain` and those agents were disconnected (288 of 300
+ * on staging). MongoDB retries an upsert that races on a unique index itself;
+ * the duplicate-key catch is for servers that don't.
+ */
+export async function upsertGroup(
+  groups: Collection,
+  domain: string,
+  organizationId?: string,
+  strategy: LoadBalanceStrategy = 'round-robin'
+): Promise<{ group: AgentGroup; created: boolean }> {
+  const id = generateId();
+  const now = Date.now();
+  const fresh: Omit<AgentGroup, 'domain'> = {
+    id,
     organizationId,
     strategy,
     agentIds: [],
     activeAgentCount: 0,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
+    createdAt: now,
+    updatedAt: now,
     currentIndex: 0,
     healthCheckEnabled: true,
     healthCheckInterval: 30000,
   };
 
-  await collections.agentGroups.insertOne(group);
-  rememberGroup(domain, group); // so the next request sees the new group
-  console.log(`✅ Created agent group for domain: ${domain}`);
-
-  return group;
+  let group: AgentGroup | null = null;
+  try {
+    group = await groups.findOneAndUpdate(
+      { domain },
+      { $setOnInsert: fresh },
+      { upsert: true, returnDocument: 'after' }
+    ) as unknown as AgentGroup | null;
+  } catch (error: any) {
+    if (error?.code !== 11000) throw error;
+  }
+  group ??= await groups.findOne({ domain }) as unknown as AgentGroup | null;
+  if (!group) throw new Error(`Could not create the agent group for ${domain}`);
+  return { group, created: group.id === id };
 }
 
 /**

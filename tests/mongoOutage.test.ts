@@ -59,9 +59,13 @@ function fakeCollection(name: string) {
       hit.forEach((d) => applyUpdate(d, update));
       return { acknowledged: true, modifiedCount: hit.length };
     },
-    async findOneAndUpdate(filter: Doc, update: Doc) {
+    async findOneAndUpdate(filter: Doc, update: Doc, opts?: { upsert?: boolean }) {
       use("findOneAndUpdate");
-      const doc = docs.find((d) => matches(d, filter));
+      let doc = docs.find((d) => matches(d, filter));
+      if (!doc && opts?.upsert) {
+        doc = { ...filter, ...(update.$setOnInsert ?? {}) };
+        docs.push(doc);
+      }
       if (doc) applyUpdate(doc, update);
       return doc ?? null;
     },

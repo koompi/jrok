@@ -56,9 +56,13 @@ function fakeCollection(name: string) {
       hit.forEach((d) => applyUpdate(d, update));
       return { acknowledged: true, modifiedCount: hit.length, filter };
     },
-    async findOneAndUpdate(filter: Doc, update: Doc) {
+    async findOneAndUpdate(filter: Doc, update: Doc, opts?: { upsert?: boolean }) {
       log("findOneAndUpdate");
-      const doc = docs.find((d) => matches(d, filter));
+      let doc = docs.find((d) => matches(d, filter));
+      if (!doc && opts?.upsert) {
+        doc = { ...filter, ...(update.$setOnInsert ?? {}) };
+        docs.push(doc);
+      }
       if (doc) applyUpdate(doc, update);
       return doc ?? null;
     },
@@ -188,6 +192,16 @@ describe("one replica on several edges", () => {
     expect(agent.instanceId).toBe(scoped);
     expect(collections.get("agentConnections")!.docs.find((d) => d.domain === "scoped-app")?.instanceId).toBe(scoped);
     expect(collections.get("agentGroupMembers")!.docs.find((d) => d.agentId === agent.id)?.instanceId).toBe(scoped);
+  });
+});
+
+describe("replicas of a new domain registering together", () => {
+  test("share one group and one tunnel record (this stand-in has no unique index to save it)", async () => {
+    await Promise.all(Array.from({ length: 20 }, (_, i) => registerReplica("burst-app", `burst-${i}`)));
+    await new Promise((r) => setTimeout(r, 200)); // tunnel setup runs after registration
+
+    expect(collections.get("tunnels")!.docs.filter((d) => d.domain === "burst-app")).toHaveLength(1);
+    expect(collections.get("agentGroups")!.docs.filter((d) => d.domain === "burst-app")).toHaveLength(1);
   });
 });
 
