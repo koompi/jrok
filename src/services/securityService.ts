@@ -378,6 +378,7 @@ export interface HttpSecurityCheck {
   retryAfter?: number; // seconds
   remaining?: number;  // remaining tokens/requests
   clientId?: string;   // the client identifier used for rate limiting
+  status?: number;     // HTTP status for a refusal: 403 for IP rules and blocks, else 429
 }
 
 /**
@@ -472,7 +473,7 @@ export async function checkHttpRequest(
       status: 'blocked',
       reason: blocked.reason,
     });
-    return { allowed: false, reason: `IP blocked: ${blocked.reason}`, retryAfter: Math.ceil((blocked.expiresAt - now) / 1000) };
+    return { allowed: false, status: 403, reason: `IP blocked: ${blocked.reason}`, retryAfter: Math.ceil((blocked.expiresAt - now) / 1000) };
   }
 
   // Check tunnel IP security (allowlist/blocklist)
@@ -486,7 +487,7 @@ export async function checkHttpRequest(
       status: 'blocked',
       reason: ipSecurityCheck.reason || 'IP security check failed',
     });
-    return { allowed: false, reason: ipSecurityCheck.reason };
+    return { allowed: false, status: 403, reason: ipSecurityCheck.reason };
   }
 
   // Generate layered client identifier
@@ -1004,10 +1005,12 @@ export async function setTunnelIpSecurity(
     }
   }
 
-  // Persist to MongoDB (update tunnel document)
+  // Persist to MongoDB (update tunnel document). ipSecurityChangedAt is
+  // MongoDB's own clock, so every server can ask for "changed since" without
+  // trusting its clock to agree with this one's (securitySync.ts).
   await collections.tunnels.updateOne(
     { $or: [{ id: tunnelId }, { domain: tunnelId }] },
-    { $set: { ipSecurity: security, updatedAt: Date.now() } }
+    { $set: { ipSecurity: security, updatedAt: Date.now() }, $currentDate: { ipSecurityChangedAt: true } }
   );
 
   console.log(`🔐 Updated IP security for tunnel ${tunnelId}: mode=${security.mode}`);
@@ -1109,6 +1112,17 @@ export async function removeIpFromTunnelSecurity(
 }
 
 /**
+ * Apply a tunnel's stored IP rules, under both its id and its domain: requests
+ * are checked by tunnel id when the agent knows it, by domain otherwise.
+ */
+export function applyTunnelIpSecurity(tunnel: { [field: string]: any }): void {
+  if (!tunnel.ipSecurity) return;
+  const security = tunnel.ipSecurity as TunnelIpSecurity;
+  if (tunnel.id) ipSecurityCache.set(tunnel.id, security);
+  if (tunnel.domain) ipSecurityCache.set(tunnel.domain, security);
+}
+
+/**
  * Load IP security settings from MongoDB on startup
  */
 export async function loadIpSecurityFromDb(): Promise<void> {
@@ -1122,10 +1136,7 @@ export async function loadIpSecurityFromDb(): Promise<void> {
     ).toArray();
 
     for (const tunnel of tunnels) {
-      if (tunnel.ipSecurity) {
-        const tunnelKey = tunnel.id || tunnel.domain;
-        ipSecurityCache.set(tunnelKey, tunnel.ipSecurity as TunnelIpSecurity);
-      }
+      applyTunnelIpSecurity(tunnel);
     }
 
     console.log(`📋 Loaded IP security settings for ${ipSecurityCache.size} tunnels from DB`);

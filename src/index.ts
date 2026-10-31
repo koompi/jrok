@@ -15,6 +15,7 @@ import * as statsService from "./services/statsService";
 import * as wsProxyService from "./services/wsProxyService";
 import * as tcpService from "./services/tcpService";
 import * as securityService from "./services/securityService";
+import * as securitySync from "./services/securitySync";
 import * as crossServerService from "./services/crossServerService";
 import * as certSyncService from "./services/certificateSyncService";
 import * as monitoringService from "./services/monitoringService";
@@ -202,6 +203,28 @@ async function handleWebSocketTunnel(
 }
 
 // Forward HTTP request to agent via WebSocket
+/**
+ * Save a security rule for every server (securitySync). If MongoDB can't take
+ * it, the rule holds on this server only, and the caller must hear that.
+ */
+async function saveSharedRule(
+  kind: securitySync.SecurityRuleKind,
+  key: string,
+  active: boolean,
+  options?: { reason?: string; durationSeconds?: number }
+): Promise<Response | null> {
+  try {
+    await securitySync.setRule(kind, key, active, options);
+    return null;
+  } catch (error: any) {
+    console.error(`❌ Could not save ${kind} ${key} for the other servers:`, error?.message || error);
+    return new Response(
+      JSON.stringify({ success: false, message: "Applied on this server only: it could not be saved for the others. Retry." }),
+      { status: 503, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
 async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string, clientIp?: string): Promise<Response> {
   return new Promise(async (resolve) => {
     const requestId = generateId();
@@ -493,6 +516,9 @@ async function startServer() {
     // Load IP security settings from DB
     await securityService.loadIpSecurityFromDb();
     console.log("✅ IP security settings loaded");
+
+    // Keep IP rules, admin IP blocks and suspensions the same on every server
+    await securitySync.startSecuritySync();
 
     // Initialize cross-server routing
     crossServerService.initCrossServerRouting();
@@ -1338,7 +1364,7 @@ async function startServer() {
                 success: false,
                 message: securityCheck.reason || "Rate limit exceeded",
               }),
-              { status: 429, headers }
+              { status: securityCheck.status ?? 429, headers }
             ));
           }
 
@@ -1867,8 +1893,10 @@ async function startServer() {
               { status: 400, headers: { "Content-Type": "application/json" } }
             ));
           }
-          if (body.organizationId) securityService.suspendOrganization(body.organizationId, body.reason);
-          if (body.domain) securityService.suspendDomain(body.domain, body.reason);
+          const saveError =
+            (body.organizationId && await saveSharedRule("suspend-org", body.organizationId, true, { reason: body.reason })) ||
+            (body.domain && await saveSharedRule("suspend-domain", body.domain, true, { reason: body.reason }));
+          if (saveError) return addCors(saveError);
           return addCors(new Response(
             JSON.stringify({ success: true, message: "Suspended" }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -1885,8 +1913,10 @@ async function startServer() {
               { status: 400, headers: { "Content-Type": "application/json" } }
             ));
           }
-          if (body.organizationId) securityService.unsuspendOrganization(body.organizationId);
-          if (body.domain) securityService.unsuspendDomain(body.domain);
+          const saveError =
+            (body.organizationId && await saveSharedRule("suspend-org", body.organizationId, false)) ||
+            (body.domain && await saveSharedRule("suspend-domain", body.domain, false));
+          if (saveError) return addCors(saveError);
           return addCors(new Response(
             JSON.stringify({ success: true, message: "Unsuspended" }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -1929,13 +1959,9 @@ async function startServer() {
 
         // Block an IP (requires admin auth)
         if (path === "/security/block-ip" && method === "POST") {
-          const authContext = await authenticateRequest(req);
-          if (!authContext || authContext.user?.role !== 'super_admin') {
-            return addCors(new Response(
-              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
-              { status: 401, headers: { "Content-Type": "application/json" } }
-            ));
-          }
+          // A super admin, or the server key (X-Admin-Key) as for suspensions.
+          const authError = await requireAdminOrServerKey(req);
+          if (authError) return addCors(authError);
           const body = await req.json() as { ip: string; reason: string; duration?: number };
           if (!body.ip || !body.reason) {
             return addCors(new Response(
@@ -1943,7 +1969,8 @@ async function startServer() {
               { status: 400, headers: { "Content-Type": "application/json" } }
             ));
           }
-          securityService.blockIp(body.ip, body.reason, body.duration || 3600);
+          const saveError = await saveSharedRule("block-ip", body.ip, true, { reason: body.reason, durationSeconds: body.duration || 3600 });
+          if (saveError) return addCors(saveError);
           return addCors(new Response(
             JSON.stringify({ success: true, message: `IP ${body.ip} blocked` }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -1952,13 +1979,9 @@ async function startServer() {
 
         // Unblock an IP (requires admin auth)
         if (path === "/security/unblock-ip" && method === "POST") {
-          const authContext = await authenticateRequest(req);
-          if (!authContext || authContext.user?.role !== 'super_admin') {
-            return addCors(new Response(
-              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
-              { status: 401, headers: { "Content-Type": "application/json" } }
-            ));
-          }
+          // A super admin, or the server key (X-Admin-Key) as for suspensions.
+          const authError = await requireAdminOrServerKey(req);
+          if (authError) return addCors(authError);
           const body = await req.json() as { ip: string };
           if (!body.ip) {
             return addCors(new Response(
@@ -1966,7 +1989,8 @@ async function startServer() {
               { status: 400, headers: { "Content-Type": "application/json" } }
             ));
           }
-          securityService.unblockIp(body.ip);
+          const saveError = await saveSharedRule("block-ip", body.ip, false);
+          if (saveError) return addCors(saveError);
           return addCors(new Response(
             JSON.stringify({ success: true, message: `IP ${body.ip} unblocked` }),
             { status: 200, headers: { "Content-Type": "application/json" } }
@@ -2669,6 +2693,7 @@ async function startServer() {
       // Shutdown services
       await crossServerService.shutdownCrossServerRouting();
       securityService.shutdownSecurityService();
+      securitySync.stopSecuritySync();
       monitoringService.shutdownMonitoringService();
 
       // Cleanup TCP tunnels for this server

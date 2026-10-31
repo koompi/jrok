@@ -31,6 +31,8 @@ export interface Collections {
   // Multi-agent load balancing collections
   agentGroups: Collection; // Agent groups for load balancing
   agentGroupMembers: Collection; // Individual agent memberships in groups
+  // Admin IP blocks and suspensions, shared by every server (services/securitySync.ts)
+  securityRules: Collection;
 }
 
 let collections: Collections;
@@ -99,6 +101,7 @@ export async function connectDatabase(): Promise<void> {
       // Multi-agent load balancing collections
       agentGroups: db.collection("agentGroups"),
       agentGroupMembers: db.collection("agentGroupMembers"),
+      securityRules: db.collection("securityRules"),
     };
 
     // Create indexes
@@ -316,6 +319,12 @@ export async function createDistributedStateIndexes(): Promise<void> {
   await safeCreateIndex(collections.serverHeartbeats, { serverId: 1 }, { unique: true });
   // Auto-expire dead servers after 1 minute
   await safeCreateIndex(collections.serverHeartbeats, { lastHeartbeat: 1 }, { expireAfterSeconds: 60 });
+
+  // Security rules every server reloads every few seconds (services/securitySync.ts):
+  // admin IP blocks and suspensions, and per-tunnel IP rules by when they changed.
+  await safeCreateIndex(collections.securityRules, { kind: 1, key: 1 }, { unique: true });
+  await safeCreateIndex(collections.securityRules, { updatedAt: 1 });
+  await safeCreateIndex(collections.tunnels, { ipSecurityChangedAt: 1 }, { sparse: true });
 
   // Agent groups for multi-agent load balancing
   await safeCreateIndex(collections.agentGroups, { id: 1 }, { unique: true });

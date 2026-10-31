@@ -1,6 +1,6 @@
 # Plan: Many jrok Edges Across Cambodia (Stateless Apps)
 
-**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 1 steps 1.3 and 1.4 done and passed on staging the same day (branch `feat/phase1-multi-edge`). **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
+**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 1 steps 1.1, 1.3 and 1.4 done and passed on staging the same day (branch `feat/phase1-multi-edge`). **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
 **Date:** 2026-10-30
 **Repos:** jrok (server, CLI, Ansible) and kconsole (deploy worker, backend)
 **Scope:** HTTP and WebSocket traffic to stateless apps (Git and image services).
@@ -91,8 +91,8 @@ Two edges built from the Ansible role on DigitalOcean SGP1, each 1 vCPU / 1 GB "
 | P1 | nginx allows 10 requests/s per visitor IP (burst 20) on all `*.public` and `*.tunnel` apps | prod nginx, Ansible role | Normal page loads with many files get 503s. Users sharing a mobile carrier IP share the limit. It refused real traffic on 2026-10-21 (`/api/isiec/...`). | 0 |
 | P2 | jrok gives an app 30 s to start answering; nginx closes connections that are quiet for 60 s | `src/index.ts:82`, nginx | Slow pages and reports get 504s. Chat apps that don't send pings lose their WebSocket after 60 s. | 0 |
 | P3 | nginx opens a new connection to jrok for every request | `$connection_upgrade` map; custom-domain template in `domainService.ts` | Wasted CPU at high load | 0 |
-| P4 | Per-app IP allow/block lists are saved to MongoDB but only loaded at startup | `securityService.ts:1114`, `index.ts:492` | With two edges, a customer's allowlist is enforced on only one of them. **Security issue.** | 1 |
-| P5 | Admin IP blocks and suspensions live only in the memory of the edge that received the call | `securityService.ts:1142`, `index.ts:1840` | They reach only one edge | 1 |
+| P4 | Per-app IP allow/block lists are saved to MongoDB but only loaded at startup | `securityService.ts:1114`, `index.ts:492` | With two edges, a customer's allowlist is enforced on only one of them. **Security issue.** **Fixed in 1.1.** | 1 |
+| P5 | Admin IP blocks and suspensions live only in the memory of the edge that received the call | `securityService.ts:1142`, `index.ts:1840` | They reach only one edge, and a restart loses them. **Fixed in 1.1.** | 1 |
 | P6 | If one replica connects to several edges, its group record is overwritten | `agentGroupService.ts:186` (keyed by group + instance ID) | Wrong group state, members removed while still connected | 1 |
 | P7 | Every edge saves its own copy of the daily stats | `statsService.ts:448` (`insertOne` with a new id) | Daily totals counted once per edge | 1 |
 | P8 | The request path's lookups (is the domain grouped, the group record, where another edge's agent is, that edge's address) are cached for 30–60 s, but a request that finds its entry expired waits on MongoDB itself, and fails when MongoDB does. Nothing falls back to what the edge already knows. | `agentGroupService.ts` (group caches), `crossServerService.ts` (route lookup) | **A MongoDB outage takes every app down once the caches expire, even with the agent connected to the edge** (measured on staging: 10 s wait, then 500). **Fixed in 1.3.** | 1 |
@@ -222,7 +222,7 @@ Each phase can ship on its own and leaves production better than before. Time es
 
 | Step | Work | Fixes |
 |---|---|---|
-| 1.1 | Each edge reloads per-app IP rules from MongoDB every 10 s, picking up only records changed since the last reload (`updatedAt`). Admin blocks and suspensions move to a MongoDB collection and reload the same way. Automatic abuse blocks stay per edge. | P4, P5 |
+| 1.1 | **Done.** Every edge re-reads what changed every 10 s (`src/services/securitySync.ts`): per-app IP rules from `tunnels` (`ipSecurityChangedAt`), and admin IP blocks and suspensions from a new `securityRules` collection, which also survive a restart now. Change times come from MongoDB's clock, so edges' clocks need not agree. An admin call that MongoDB can't save answers 503 ("applied on this server only"). Automatic abuse blocks stay per edge. Also: the IP block endpoints accept the server key (`X-Admin-Key`) like suspensions, and a visitor refused by an IP rule or block now gets 403 instead of 429 "Rate limit exceeded". | P4, P5 |
 | 1.2 | Daily stats: upsert keyed on organization + tunnel + day, so any number of edges can run the job. | P7 |
 | 1.3 | **Done.** MongoDB off the request path. An edge holding a domain's replicas answers from them: whether the domain is grouped (their own `groupMode`) and which replica serves (round-robin over open sockets), with the group record only supplying the strategy and never waited for. Every request-path lookup now goes through `StaleCache` (`src/utils/staleCache.ts`): an expired answer is served while one background reload runs, and kept if MongoDB fails. Routes to other edges are cached for 3 s, and edge addresses for 5 s with health judged at load time. least-connections and weighted still read MongoDB; nothing uses them. | P8, P14 |
 | 1.4 | **Done.** One hop: an edge never forwards a request another edge forwarded to it (`X-Forwarded-From`); it answers 503 with `X-Jrok-Route: miss`. The sender then drops its cached route, looks it up again and retries once (GET and HEAD only, since a body can't be sent twice). An unreachable edge is retried the same way. | P9 |
@@ -253,7 +253,9 @@ Each phase can ship on its own and leaves production better than before. Time es
 | MongoDB blocked for 100 s on the edge holding the agent | 500s from about 25 s in (each request waited 10 s) | 200 throughout |
 | MongoDB blocked for 100 s on **both** edges (an Atlas outage) | Every app down | 88 of 88 requests 200, forwarded ones included |
 | Forwarding through the other edge, 100 connections | 315 requests/s, forwarding jrok at 90% CPU | 558 requests/s, 45% CPU |
-| jrok test suite | 165 pass | 181 pass (`staleCache.test.ts`, `mongoOutage.test.ts`) |
+| Allowlist set through one edge (agent on the other) | Enforced nowhere | Enforced through both edges within 10 s (403); lifting it, the same |
+| Suspension / IP block set through one edge | Only that edge's memory | Enforced through both edges within 10 s |
+| jrok test suite | 165 pass | 188 pass (`staleCache`, `mongoOutage`, `securitySync` tests) |
 
 Still open from that test: when only the agent's edge loses MongoDB, the other edges stop forwarding to it after 30 s, because its heartbeat (written to MongoDB) looks stale. Step 1.7, every replica connected to every edge in its region, removes the need to forward there.
 
