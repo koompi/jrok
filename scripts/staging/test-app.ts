@@ -28,6 +28,8 @@ const CACHE_CASES: Record<string, Record<string, string>> = {
   "/cache/none": {},
 };
 const hits: Record<string, number> = {};
+// Incompressible bytes (like an image), for measuring the tunnel's binary framing.
+const blob = crypto.getRandomValues(new Uint8Array(256 * 1024));
 
 Bun.serve({
   port: Number(process.env.PORT || 18081),
@@ -43,6 +45,23 @@ Bun.serve({
       return new Response(`${LABEL} ${url.pathname} hit ${hits[url.pathname]}\n`, {
         headers: { "content-type": "text/plain", ...CACHE_CASES[url.pathname] },
       });
+    }
+    if (url.pathname === "/stream-text") {
+      // Text of unknown length, produced over time (like streamed SSR): it must
+      // reach the visitor compressed AND as it is produced.
+      const stream = new ReadableStream({
+        async start(controller) {
+          for (let i = 1; i <= 5; i++) {
+            controller.enqueue(new TextEncoder().encode(`line ${i} ${"x".repeat(2000)}\n`));
+            await Bun.sleep(500);
+          }
+          controller.close();
+        },
+      });
+      return new Response(stream, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
+    if (url.pathname === "/blob") {
+      return new Response(blob, { headers: { "content-type": "application/octet-stream" } });
     }
     if (url.pathname === "/hits") {
       return Response.json(hits, { headers: { "cache-control": "no-store" } });

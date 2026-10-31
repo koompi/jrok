@@ -16,6 +16,7 @@ import * as wsProxyService from "./services/wsProxyService";
 import * as tcpService from "./services/tcpService";
 import * as securityService from "./services/securityService";
 import * as securitySync from "./services/securitySync";
+import { decodeFrame, FRAME_RESPONSE_CHUNK } from "./utils/tunnelFrames";
 import * as crossServerService from "./services/crossServerService";
 import * as certSyncService from "./services/certificateSyncService";
 import * as monitoringService from "./services/monitoringService";
@@ -115,6 +116,25 @@ function abortStreamingResponse(requestId: string, entry: { controller: Readable
     // Controller may already be closed/errored
   }
   streamingResponses.delete(requestId);
+}
+
+/**
+ * One chunk of a streamed response body, from an http_response_chunk JSON
+ * message or a binary frame (docs/protocol/tunnel-frames.md).
+ */
+function deliverResponseChunk(agentWs: any, requestId: string, chunk: Uint8Array): void {
+  const entry = streamingResponses.get(requestId);
+  if (!entry) return;
+  entry.bytesOut += chunk.length;
+  try {
+    entry.controller.enqueue(chunk);
+  } catch {
+    // Stream already closed (client gone) — drop state, abort agent side
+    streamingResponses.delete(requestId);
+    try {
+      agentWs.send(JSON.stringify({ type: "http_response_abort", requestId }));
+    } catch { /* ignore */ }
+  }
 }
 
 function finishStreamingBandwidth(entry: { agent: Agent; tunnelId?: string; bytesIn: number; bytesOut: number }) {
@@ -506,7 +526,7 @@ async function startServer() {
     console.log("✅ Distributed state indexes created");
 
     // Clean up stale connections from previous server instance
-    await cleanupStaleConnectionsOnStartup();
+    await cleanupStaleConnectionsOnStartup(crossServerService.currentServerId);
     console.log("✅ Stale connections cleaned up");
 
     // Initialize security service
@@ -657,9 +677,10 @@ async function startServer() {
               domain: finalDomain,
               requestedDomain: wasModified ? domain : undefined,
               domainModified: wasModified,
-              // Server capabilities: the CLI only streams responses when the
-              // server says it can handle them (safe rollout with old servers).
-              features: ["stream", "b64body"],
+              // Server capabilities: the CLI only uses a feature when the
+              // server says it can handle it (safe rollout with old servers).
+              // See docs/protocol/tunnel-frames.md.
+              features: ["stream", "b64body", "binchunk", "gzip"],
             };
 
             // Include group info if in group mode
@@ -754,6 +775,17 @@ async function startServer() {
             return;
           }
 
+          // Binary frames from an agent (docs/protocol/tunnel-frames.md).
+          // Agents send them only when this server advertised "binchunk".
+          if (typeof data !== "string") {
+            const frame = decodeFrame(data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer));
+            if (frame?.kind === FRAME_RESPONSE_CHUNK) {
+              // Copy: the payload is a view into a buffer Bun may reuse.
+              deliverResponseChunk(ws, frame.requestId, frame.payload.slice());
+            }
+            return;
+          }
+
           try {
             const message = JSON.parse(data.toString());
 
@@ -800,7 +832,13 @@ async function startServer() {
                 }
                 // The agent's fetch already decompressed the body and the length
                 // changes as we re-stream it — these headers would now be wrong.
-                responseHeaders.delete('Content-Encoding');
+                // Unless the agent compressed it again itself ("encoding",
+                // feature "gzip"): then the bytes are gzip and must say so.
+                if (message.encoding === 'gzip') {
+                  responseHeaders.set('Content-Encoding', 'gzip');
+                } else {
+                  responseHeaders.delete('Content-Encoding');
+                }
                 responseHeaders.delete('Content-Length');
                 responseHeaders.delete('Transfer-Encoding');
 
@@ -809,8 +847,15 @@ async function startServer() {
                 // until the stream ends; browsers on HTTP/2 aren't affected.
                 // Stream them through unless the app chose otherwise. nginx
                 // strips this header before the response leaves it.
+                //
+                // The same for any response the app produces as it goes (no
+                // Content-Length, which the agent reports as "streamed"):
+                // streamed HTML otherwise reached visitors only once complete,
+                // held in nginx's buffers. Responses of known size stay
+                // buffered, which the edge cache needs.
                 const contentType = (responseHeaders.get('Content-Type') || '').toLowerCase();
-                if (contentType.startsWith('text/event-stream') && !responseHeaders.has('X-Accel-Buffering')) {
+                if ((contentType.startsWith('text/event-stream') || message.streamed === true) &&
+                  !responseHeaders.has('X-Accel-Buffering')) {
                   responseHeaders.set('X-Accel-Buffering', 'no');
                 }
 
@@ -850,19 +895,8 @@ async function startServer() {
                 } catch { /* ignore */ }
               }
             } else if (message.type === "http_response_chunk") {
-              const entry = streamingResponses.get(message.requestId);
-              if (entry && typeof message.data === 'string') {
-                const chunk = Buffer.from(message.data, 'base64');
-                entry.bytesOut += chunk.length;
-                try {
-                  entry.controller.enqueue(new Uint8Array(chunk));
-                } catch {
-                  // Stream already closed (client gone) — drop state, abort agent side
-                  streamingResponses.delete(message.requestId);
-                  try {
-                    ws.send(JSON.stringify({ type: "http_response_abort", requestId: message.requestId }));
-                  } catch { /* ignore */ }
-                }
+              if (typeof message.data === 'string') {
+                deliverResponseChunk(ws, message.requestId, new Uint8Array(Buffer.from(message.data, 'base64')));
               }
             } else if (message.type === "http_response_end") {
               const entry = streamingResponses.get(message.requestId);

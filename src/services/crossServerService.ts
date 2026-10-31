@@ -571,18 +571,18 @@ export function forgetRoute(subdomain: string): void {
 async function lookupRoute(subdomain: string): Promise<RouteResult> {
   const collections = getCollections();
 
-  // First check agentConnections (most reliable for active connections)
+  // First check agentConnections (most reliable for active connections).
+  // Never a record claiming THIS server: had this server the agent, the fast
+  // path in findServerForDomain would have found its socket, so such a record
+  // is stale (e.g. left from before a restart) and other servers' records are
+  // the ones that can actually serve.
   const agentConn = await collections.agentConnections.findOne({
     domain: subdomain,
-    active: true
+    active: true,
+    serverId: { $ne: SERVER_ID },
   });
   
   if (agentConn) {
-    // Check if agent is on this server
-    if (agentConn.serverId === SERVER_ID) {
-      return { isLocal: true };
-    }
-    
     // Get server info for cross-server routing
     const server = await getServer(agentConn.serverId);
     if (server && server.healthy) {

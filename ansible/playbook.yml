@@ -6,6 +6,11 @@
 - name: Setup jrok VPS servers
   hosts: jrok_servers
   become: yes
+  # One edge at a time: each is restarted and passes its health check before
+  # the next is touched, so the others keep serving (and nginx's fallback to a
+  # peer has a live peer). Deploying all at once left an edge with no live
+  # jrok for seconds on staging. jrok_serial=100% (all at once) for a first build.
+  serial: "{{ jrok_serial | default(1) }}"
   vars:
     # Change these to match your setup
     docker_version: "24.0"

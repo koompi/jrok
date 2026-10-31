@@ -164,12 +164,22 @@
         # visitors are served by a peer instead of getting 502 (P15). (Listing
         # every server as a regular member, as this template once did, made
         # two hops for most requests.)
+        # fail_timeout is also how long a restarted local jrok is passed over:
+        # keep it short so traffic returns to it within seconds.
         upstream jrok {
-          server 127.0.0.1:{{ jrok_port | default('3000') }} max_fails=3 fail_timeout=30s;
+          server 127.0.0.1:{{ jrok_port | default('3000') }} max_fails=3 fail_timeout=5s;
           {% for h in groups['jrok_servers'] | default([]) if h != inventory_hostname %}
           server {{ hostvars[h].jrok_peer_address | default(hostvars[h].ansible_host) }}:{{ jrok_port | default('3000') }} backup;
           {% endfor %}
           keepalive 64;
+        }
+
+        # Agents connect to THIS edge only, never a backup. An agent pinned to
+        # this edge (--edge) that reached a peer while the local jrok restarted
+        # would stay there, leaving this edge without it (seen on staging).
+        # Failing instead makes the agent retry until its own edge is back.
+        upstream jrok_agents {
+          server 127.0.0.1:{{ jrok_port | default('3000') }};
         }
 
         # Redirect HTTP to HTTPS
@@ -204,6 +214,21 @@
           
           # Rate limiting: jrok's own hosts only (see $jrok_limit_key)
           limit_req zone=general burst=20 nodelay;
+
+          # The agent endpoint: this edge's jrok only (see upstream jrok_agents).
+          location = /ws/agent {
+            access_log /var/log/nginx/access.log combined_noquery;
+            proxy_pass http://jrok_agents;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+          }
 
           # WebSocket support for agents
           location /ws/ {

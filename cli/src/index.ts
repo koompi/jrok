@@ -13,6 +13,9 @@ import { createInterface } from 'readline';
 import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 import { lookup as dnsLookup } from 'dns';
+import { createGzip, gzip as gzipCallback, constants as zlibConstants } from 'zlib';
+import { promisify } from 'util';
+import { Readable, pipeline } from 'stream';
 
 const VERSION = "2.9.0"; // Request events carry visitor location, user agent and referrer
 const DEFAULT_SERVER = "https://tunnel.koompi.cloud";
@@ -413,6 +416,40 @@ function emitEvent(kind: string, payload: Record<string, unknown>): void {
 // single-message buffered response (safe with old servers).
 const serverFeatures = new Set<string>();
 
+// Tunnel frames and compression (docs/protocol/tunnel-frames.md). Each needs the
+// server to advertise it; these env vars turn them off on this side.
+const BINARY_FRAMES_ENABLED = (process.env.JROK_BINARY_FRAMES || '').toLowerCase() !== 'false';
+const TUNNEL_GZIP_ENABLED = (process.env.JROK_TUNNEL_GZIP || '').toLowerCase() !== 'false';
+const FRAME_RESPONSE_CHUNK = 0x01;
+// Level 1, like nginx's default: on a DigitalOcean vCPU it is about half the
+// CPU of level 6, and text comes out barely larger (16 KB JS: 2,026 vs 2,041).
+const TUNNEL_GZIP_LEVEL = Math.min(9, Math.max(1, Number(process.env.JROK_TUNNEL_GZIP_LEVEL) || 1));
+// A body of known size up to this is compressed in one call (on zlib's thread
+// pool) and sent as one chunk; anything else streams through a compressor.
+const GZIP_WHOLE_BODY_MAX = 1024 * 1024;
+const gzipAsync = promisify(gzipCallback);
+
+/** Binary response chunk frame: kind, request id length, request id, bytes. */
+function responseChunkFrame(requestId: string, chunk: Buffer): Buffer {
+  const id = Buffer.from(requestId, 'utf8');
+  return Buffer.concat([Buffer.from([FRAME_RESPONSE_CHUNK, id.length]), id, chunk]);
+}
+
+// Text worth compressing. Not text/event-stream: events must not wait in a
+// compressor, and they are tiny.
+const COMPRESSIBLE_TYPE = /^(text\/(?!event-stream)|application\/(json|(x-)?javascript|xml|xhtml\+xml|ld\+json|manifest\+json|rss\+xml|atom\+xml|graphql-response\+json|problem\+json)|image\/svg\+xml|font\/(ttf|otf)|application\/vnd\.ms-fontobject)/i;
+
+/** Should the agent gzip this response for the tunnel (feature "gzip")? */
+function shouldGzipResponse(method: string, requestHeaders: any, response: Response): boolean {
+  if (!TUNNEL_GZIP_ENABLED || !serverFeatures.has('gzip')) return false;
+  if (method === 'HEAD' || response.status === 204 || response.status === 304 || !response.body) return false;
+  if (!/\bgzip\b/i.test(headerValue(requestHeaders, 'accept-encoding') || '')) return false;
+  if (!COMPRESSIBLE_TYPE.test(response.headers.get('content-type') || '')) return false;
+  if (/\bno-transform\b/i.test(response.headers.get('cache-control') || '')) return false;
+  const length = Number(response.headers.get('content-length') || NaN);
+  return !(length < 1024);
+}
+
 // In-flight streamed responses, so the server can abort one (client
 // disconnected / request timed out) and we stop reading from the local app.
 const activeHttpStreams = new Map<string, AbortController>();
@@ -508,27 +545,82 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
       // Streaming path: send headers immediately, then relay body chunks as
       // the local app produces them. This is what makes SSE and streaming SSR
       // work through the tunnel, and removes the response-size ceiling.
+      //
+      // Text is gzipped here when the visitor accepts it and the server passes
+      // it through (feature "gzip"): fetch decoded whatever the app sent, and
+      // the tunnel would otherwise carry it uncompressed. Flushed per chunk so
+      // streamed pages still arrive as they are produced.
+      const gzip = shouldGzipResponse(method, headers, localResponse);
+      // No Content-Length: the app is producing the body as it goes (streamed
+      // HTML, chunked APIs). The server then asks nginx not to hold it back.
+      const knownLength = Number(localResponse.headers.get('content-length') ?? NaN);
+      const streamedByApp = !Number.isFinite(knownLength) && !!localResponse.body && method !== 'HEAD';
+      if (gzip) {
+        for (const key of Object.keys(responseHeaders)) {
+          if (key === 'content-length' || key === 'content-encoding') delete responseHeaders[key];
+        }
+        responseHeaders['content-encoding'] = 'gzip';
+        const vary = responseHeaders['vary'];
+        if (!vary) responseHeaders['vary'] = 'Accept-Encoding';
+        else if (!/accept-encoding|\*/i.test(vary)) responseHeaders['vary'] = `${vary}, Accept-Encoding`;
+      }
       ws.send(JSON.stringify({
         type: "http_response_start",
         requestId,
         status: localResponse.status,
         statusText: localResponse.statusText,
         headers: responseHeaders,
+        ...(gzip ? { encoding: 'gzip' } : {}),
+        ...(streamedByApp ? { streamed: true } : {}),
       }));
       responseStarted = true;
 
-      if (localResponse.body) {
-        for await (const chunk of localResponse.body as any) {
-          if (abortController.signal.aborted || ws.readyState !== 1) break;
-          await wsBufferDrained(ws);
-          const chunkBuf = Buffer.from(chunk);
-          bytesOut += chunkBuf.length;
+      const binaryChunks = BINARY_FRAMES_ENABLED && serverFeatures.has('binchunk');
+      const sendChunk = (chunkBuf: Buffer) => {
+        bytesOut += chunkBuf.length;
+        if (binaryChunks) {
+          ws.send(responseChunkFrame(requestId, chunkBuf));
+        } else {
           ws.send(JSON.stringify({
             type: "http_response_chunk",
             requestId,
             data: chunkBuf.toString('base64'),
           }));
         }
+      };
+
+      // Small body of known size: compress it whole and send one chunk. Cheaper
+      // than a flushed stream, and such a response isn't streamed by the app.
+      if (gzip && localResponse.body && knownLength <= GZIP_WHOLE_BODY_MAX) {
+        const compressed = await gzipAsync(Buffer.from(await localResponse.arrayBuffer()), { level: TUNNEL_GZIP_LEVEL });
+        if (!abortController.signal.aborted && ws.readyState === 1) {
+          await wsBufferDrained(ws);
+          sendChunk(compressed);
+        }
+        ws.send(JSON.stringify({ type: "http_response_end", requestId }));
+        emitRequestEvent(localResponse.status, 'streamed');
+        return;
+      }
+
+      const compressor = gzip ? createGzip({ level: TUNNEL_GZIP_LEVEL, flush: zlibConstants.Z_SYNC_FLUSH }) : null;
+      // pipeline, not pipe: an aborted fetch must end the compressor too, or
+      // the loop below would wait on it forever.
+      const body: AsyncIterable<Uint8Array> | null = !localResponse.body
+        ? null
+        : compressor
+          ? pipeline(Readable.fromWeb(localResponse.body as any), compressor, () => {})
+          : (localResponse.body as any);
+
+      try {
+        if (body) {
+          for await (const chunk of body) {
+            if (abortController.signal.aborted || ws.readyState !== 1) break;
+            await wsBufferDrained(ws);
+            sendChunk(Buffer.from(chunk));
+          }
+        }
+      } finally {
+        compressor?.destroy();
       }
 
       ws.send(JSON.stringify({ type: "http_response_end", requestId }));

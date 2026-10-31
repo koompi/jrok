@@ -351,32 +351,52 @@ export async function createDistributedStateIndexes(): Promise<void> {
  * Clean up stale connections from this server on startup
  * This prevents duplicate key errors when the server restarts
  */
-export async function cleanupStaleConnectionsOnStartup(): Promise<void> {
-  const serverId = process.env.SERVER_ID || "default";
-  
+/**
+ * After a restart, this server's agent records are stale: its agents
+ * reconnect and register again. Remove only THIS server's records.
+ *
+ * It used to read SERVER_ID (jrok's identity is VPS_ID, see agentService), so
+ * it cleaned a server called "default" and left this one's records behind: a
+ * restarted edge then believed it still held agents it didn't, and answered
+ * "no agent" instead of forwarding (staging). It also deleted every server's
+ * group members and reset every group, which with several edges wiped the
+ * others' state on any one edge's restart.
+ */
+export async function cleanupStaleConnectionsOnStartup(serverId: string): Promise<void> {
   try {
-    // Remove all agent connections from this server (they're stale after restart)
+    const stale = await collections.agentConnections
+      .find({ serverId }, { projection: { agentId: 1 } })
+      .toArray();
+    const agentIds = stale.map((c) => c.agentId).filter(Boolean);
+
     const connResult = await collections.agentConnections.deleteMany({ serverId });
     if (connResult.deletedCount > 0) {
       console.log(`🧹 Cleaned up ${connResult.deletedCount} stale agent connections from server ${serverId}`);
     }
-    
-    // Clean up stale group members (agents that were on this server)
-    // We find all connections that were on this server and remove their group memberships
-    const membersResult = await collections.agentGroupMembers.deleteMany({});
-    if (membersResult.deletedCount > 0) {
-      console.log(`🧹 Cleaned up ${membersResult.deletedCount} stale group members`);
+
+    if (agentIds.length > 0) {
+      const membersResult = await collections.agentGroupMembers.deleteMany({ agentId: { $in: agentIds } });
+      if (membersResult.deletedCount > 0) {
+        console.log(`🧹 Cleaned up ${membersResult.deletedCount} stale group members from server ${serverId}`);
+      }
+      // Take them out of their groups and recount (other servers' members stay).
+      await collections.agentGroups.updateMany(
+        { agentIds: { $in: agentIds } },
+        [
+          { $set: { agentIds: { $setDifference: ["$agentIds", agentIds] } } },
+          { $set: { activeAgentCount: { $size: "$agentIds" } } },
+        ]
+      );
     }
-    
-    // Clean up empty groups (groups with no active members)
-    const emptyGroups = await collections.agentGroups.deleteMany({ activeAgentCount: { $lte: 0 } });
+
+    // Groups nobody belongs to any more, on any server.
+    const emptyGroups = await collections.agentGroups.deleteMany({
+      activeAgentCount: { $lte: 0 },
+      $or: [{ agentIds: { $size: 0 } }, { agentIds: { $exists: false } }],
+    });
     if (emptyGroups.deletedCount > 0) {
       console.log(`🧹 Cleaned up ${emptyGroups.deletedCount} empty agent groups`);
     }
-    
-    // Reset agent counts on remaining groups
-    await collections.agentGroups.updateMany({}, { $set: { activeAgentCount: 0, agentIds: [] } });
-    
   } catch (error) {
     console.error("⚠️ Error cleaning up stale connections:", error);
   }

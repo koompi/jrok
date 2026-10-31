@@ -16,7 +16,8 @@ const ops: string[] = [];
 let mongoDown = false;
 
 function matches(doc: Doc, filter: Doc): boolean {
-  return Object.entries(filter).every(([key, cond]) => doc[key] === cond);
+  return Object.entries(filter).every(([key, cond]) =>
+    cond && typeof cond === "object" && "$ne" in cond ? doc[key] !== cond.$ne : doc[key] === cond);
 }
 
 function applyUpdate(doc: Doc, update: Doc): void {
@@ -187,6 +188,17 @@ describe("MongoDB unreachable", () => {
     setSystemTime(new Date(Date.now() + 60_000)); // peer's heartbeat would look 60 s old
     const during = await crossServer.findServerForDomain("remote-app");
     expect(during.targetServer?.serverId).toBe("peer-r1");
+  });
+});
+
+describe("route lookup after a restart", () => {
+  test("a stale record claiming this server is ignored: the request goes where the agent really is", async () => {
+    coll("agentConnections").docs.push({ domain: "restarted-app", active: true, serverId: agentService.currentServerId, agentId: "gone" });
+    placeRemoteAgent("restarted-app", "peer-holds-it", 41002);
+
+    const route = await crossServer.findServerForDomain("restarted-app");
+    expect(route.isLocal).toBe(false);
+    expect(route.targetServer?.serverId).toBe("peer-holds-it");
   });
 });
 
