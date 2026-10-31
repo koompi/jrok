@@ -1,6 +1,6 @@
 # Plan: Many jrok Edges Across Cambodia (Stateless Apps)
 
-**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 1 steps 1.1–1.4 and 1.6, the jrok half of 1.7, and Phase 2.6, done and passed on staging the same day (branch `feat/phase1-multi-edge`). **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
+**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 1 (except 1.5) and Phase 2.6 done and passed on staging the same day (branch `feat/phase1-multi-edge`). **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
 **Date:** 2026-10-30
 **Repos:** jrok (server, CLI, Ansible) and kconsole (deploy worker, backend)
 **Scope:** HTTP and WebSocket traffic to stateless apps (Git and image services).
@@ -233,8 +233,8 @@ Each phase can ship on its own and leaves production better than before. Time es
 
 | Step | Work | Fixes |
 |---|---|---|
-| 1.7 | Read a `JROK_EDGES` list and run one agent per home edge for each replica, each with `--edge`. Use one CLI process per edge (no CLI refactor). At about 62 MB each that is fine at today's scale; Phase 5 replaces it when replicas reach the thousands. **jrok half done:** a group agent's instance id is recorded as `<instance>@<edge>`, so a replica on several edges gets one record per edge instead of each edge overwriting the other's (P6); the worker needs no id change. **Worker half (kconsole) not started.** | P6, P12 |
-| 1.8 | Check tunnel health per edge, and restart only the agent for the edge that lost its tunnel. Either call each edge directly, or add a small endpoint that reports whether an edge holds a tunnel for an instance. | P12 |
+| 1.7 | Read a `JROK_EDGES` list and run one agent per home edge for each replica, each with `--edge`. Use one CLI process per edge (no CLI refactor). At about 62 MB each that is fine at today's scale; Phase 5 replaces it when replicas reach the thousands. **jrok half done:** a group agent's instance id is recorded as `<instance>@<edge>`, so a replica on several edges gets one record per edge instead of each edge overwriting the other's (P6); the worker needs no id change. **Worker half done** (kconsole branch `feat/jrok-multi-edge`, `worker/deploy/src/lib/jrokEdges.ts`): with `JROK_EDGES` set, `JrokService.startTunnel` starts one agent per edge, each tracked and restarted on its own; TCP tunnels stay on `JROK_SERVER`. Checked with the worker's real `JrokService` against staging: two agents, the app served through both edges, both stopped together. | P6, P12 |
+| 1.8 | **Covered by 1.7.** Each edge's agent is its own process: the worker restarts one that exits, and the agent reconnects to its edge by itself (with a watchdog for half-open links). The existing health probe only restarts tunnels whose container is gone, which applies per process unchanged. No per-edge probe was needed. | P12 |
 
 **Tests:**
 - Unit tests for each change, in the style of `tests/requestPathNoDb.test.ts` (in-memory stand-in for the collections).
