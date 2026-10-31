@@ -184,7 +184,6 @@ export async function uploadCertificateToMongoDB(
       fullchain: fullchainPem,
       privkey: privkeyPem,
       expiry,
-      uploadedAt: now,
       uploadedBy,
       status: calculateCertStatus(expiry)
     };
@@ -197,7 +196,10 @@ export async function uploadCertificateToMongoDB(
           ...fields,
           updatedAt: now
         },
-        $inc: { version: 1 }
+        $inc: { version: 1 },
+        // MongoDB's clock, so other servers can tell what is new
+        // (syncIfNewCertificates) whatever this server's clock says.
+        $currentDate: { uploadedAt: true }
       },
       { upsert: true, returnDocument: "after" }
     );
@@ -757,6 +759,44 @@ export async function syncAllCertificatesToDisk(): Promise<ReconcileStats> {
   }
 
   return stats;
+}
+
+// One reconcile at a time on this server. A call while one runs starts
+// another after it, so whatever prompted the call is always looked at.
+let reconcileQueue: Promise<unknown> = Promise.resolve();
+
+/** syncAllCertificatesToDisk, serialised. */
+export function reconcileCertificates(): Promise<ReconcileStats> {
+  const run = reconcileQueue.then(() => syncAllCertificatesToDisk());
+  reconcileQueue = run.catch(() => {});
+  return run;
+}
+
+let newestUploadSeen: Date | null = null;
+
+/**
+ * Reconcile now if a certificate was uploaded since the last look (one indexed
+ * query). With several edges, a custom domain's new certificate exists only
+ * on the edge that issued it until the others pull it; the 5-minute reconcile
+ * left visitors DNS sent elsewhere with a certificate error for that long.
+ * The first look only notes where things stand: startup reconciles anyway.
+ */
+export async function syncIfNewCertificates(): Promise<boolean> {
+  const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+  if (!certs) return false;
+  const newest = await certs.find({}, { projection: { uploadedAt: 1 } }).sort({ uploadedAt: -1 }).limit(1).next();
+  const at = newest?.uploadedAt;
+  if (!at) return false;
+  const seen = newestUploadSeen;
+  newestUploadSeen = at;
+  if (seen === null || at <= seen) return false;
+  await reconcileCertificates();
+  return true;
+}
+
+/** Forget what syncIfNewCertificates has seen (tests). */
+export function resetNewCertificateWatch(): void {
+  newestUploadSeen = null;
 }
 
 /**

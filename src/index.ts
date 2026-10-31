@@ -32,6 +32,7 @@ import { PROXY_MODE } from "./config/proxyMode";
 import { allBaseDomains } from "./utils/baseDomains";
 import { getClientIp, setForwardedClientHeaders, trustedProxyHops, trustedProxyIps } from "./utils/clientIp";
 import { stripPeerHeaders } from "./utils/peerLink";
+import * as acmeChallenge from "./services/acmeChallenge";
 import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "./utils/wsFlowControl";
 import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
 import {
@@ -1076,6 +1077,13 @@ async function startServer() {
         // lists, rate limits, logs and the headers sent on to the customer's
         // app. See utils/clientIp.ts.
         const clientIp = getClientIp(req, server.requestIP(req)?.address);
+
+        // A certificate challenge nginx passed on from port 80 (plan step 2.3):
+        // answered from this edge's certbot webroot, or another edge's.
+        if (acmeChallenge.isAcmeChallengeRequest(req, path)) {
+          return acmeChallenge.answerAcmeChallenge(
+            req, path, crossServerService.getHealthyServers, crossServerService.currentServerId);
+        }
 
         // CORS configuration - whitelist allowed origins
         const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:5173").split(",").map(o => o.trim());
@@ -2713,13 +2721,19 @@ async function startServer() {
     // It never throws and never downgrades a certificate that is currently
     // serving traffic, so a failure here degrades to "this server keeps serving
     // what it already had" rather than an outage.
-    void certSyncService.syncAllCertificatesToDisk();
+    void certSyncService.reconcileCertificates();
 
     setInterval(() => {
-      void certSyncService.syncAllCertificatesToDisk();
+      void certSyncService.reconcileCertificates();
     }, 5 * 60 * 1000);
 
-    console.log("✅ Certificate sync enabled (reconcile on startup, then every 5 minutes)");
+    // A certificate another edge just uploaded (a new custom domain, a
+    // renewal) is pulled within seconds, not at the next full reconcile.
+    setInterval(() => {
+      certSyncService.syncIfNewCertificates().catch(() => {});
+    }, 15_000);
+
+    console.log("✅ Certificate sync enabled (reconcile on startup, every 5 minutes, and within 15 s of a new upload)");
 
     // Graceful shutdown
     process.on("SIGINT", async () => {

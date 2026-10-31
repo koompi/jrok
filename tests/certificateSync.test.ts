@@ -105,6 +105,20 @@ test("custom domains get an nginx vhost; our own base domain does not", async ()
   expect(conf).toContain(`ssl_certificate ${CERT_DIR_ROOT}/shop.customer.com/fullchain.pem;`);
 });
 
+test("a certificate another server uploads is pulled at the next check, not the next full reconcile", async () => {
+  if (!mongoAvailable) return;
+  certSync.resetNewCertificateWatch();
+  await certSync.uploadCertificateToMongoDB("old.customer.com", "c", "ch", "fc", "pk", "edge-a");
+  expect(await certSync.syncIfNewCertificates()).toBe(false); // first look: notes where things stand
+
+  await certSync.uploadCertificateToMongoDB("new.customer.com", "c", "ch", "fc", "pk", "edge-a");
+  expect(await certSync.syncIfNewCertificates()).toBe(true);
+  expect(await exists(join(CERT_DIR_ROOT, "new.customer.com/fullchain.pem"))).toBe(true);
+  expect(await readdir(NGINX_DIR)).toContain("new_customer_com.conf");
+
+  expect(await certSync.syncIfNewCertificates()).toBe(false); // nothing new since
+});
+
 test("second run is a no-op (idempotent)", async () => {
   if (!mongoAvailable) return;
   const certs = getClient()!.db("jrok").collection("certificates");

@@ -533,10 +533,12 @@ server {
     listen [::]:80;
     server_name ${domain};
     
-    # Serve ACME challenge files
+    # Challenge answers come from jrok: from this edge's certbot webroot, or
+    # another edge's (services/acmeChallenge.ts).
     location /.well-known/acme-challenge/ {
-        root /var/www/certbot;
-        try_files $uri =404;
+        proxy_pass http://127.0.0.1:${process.env.PORT || "3000"};
+        proxy_set_header Host $host;
+        proxy_set_header X-Jrok-Acme-Challenge 1;
     }
     
     # Return 503 for all other requests until SSL is configured
@@ -651,6 +653,9 @@ async function issueCertificate(
   const safeDomain = sanitizeDomain(domain);
   const safeEmail = sanitizeEmail(email);
   const certPath = `/etc/letsencrypt/live/${safeDomain}`;
+  // CERTBOT_TEST_CERT=true: Let's Encrypt's staging service (untrusted
+  // certificates, generous limits), for test environments.
+  const testCert = process.env.CERTBOT_TEST_CERT === "true" ? ["--test-cert"] : [];
 
   if (cloudflareToken) {
     const safeToken = sanitizeCloudflareToken(cloudflareToken);
@@ -678,6 +683,7 @@ async function issueCertificate(
         "--email", safeEmail,
         "--agree-tos",
         "--non-interactive",
+        ...testCert,
         "-d", safeDomain,
         "-d", `*.${safeDomain}`
       ]);
@@ -719,6 +725,7 @@ async function issueCertificate(
       "--email", safeEmail,
       "--agree-tos",
       "--non-interactive",
+      ...testCert,
       "-d", safeDomain
     ]);
 

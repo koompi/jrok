@@ -126,6 +126,8 @@
       Environment=VPS_ID={{ vps_id | default(ansible_hostname) }}
       Environment=VPS_NAME={{ vps_id | default(ansible_hostname) }}
       Environment=VPS_REGION={{ vps_region | default('default') }}
+      # true: custom-domain certificates from Let's Encrypt's staging service (test environments)
+      Environment=CERTBOT_TEST_CERT={{ certbot_test_cert | default(false) | bool | lower }}
       Environment=NGINX_PATH=/etc/nginx/sites-available
       # Where nginx falls back to while this jrok is down (custom-domain vhosts;
       # nginx.conf lists it itself): nginx's edge-to-edge gateway with

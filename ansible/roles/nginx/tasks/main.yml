@@ -261,13 +261,19 @@
         }
         {% endif %}
 
-        # Redirect HTTP to HTTPS
+        # Redirect HTTP to HTTPS. Also the default for hosts with no server
+        # block of their own, such as a custom domain this edge hasn't synced
+        # yet while another edge's certbot gets its certificate.
         server {
-          listen 80;
+          listen 80 default_server;
           server_name {% for d in jrok_base_domains %}{{ d }} *.{{ d }} {% endfor %};
 
+          # Certificate challenges: jrok answers from this edge's certbot
+          # webroot or another edge's (src/services/acmeChallenge.ts).
           location /.well-known/acme-challenge/ {
-            root /var/www/certbot;
+            proxy_pass http://jrok;
+            proxy_set_header Host $host;
+            proxy_set_header X-Jrok-Acme-Challenge 1;
           }
 
           location / {
@@ -340,6 +346,8 @@
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_set_header X-Forwarded-Host $host;
+            # Only port 80's challenge location may mark a request as a challenge.
+            proxy_set_header X-Jrok-Acme-Challenge "";
 
             # WebSocket support
             proxy_set_header Upgrade $http_upgrade;

@@ -137,6 +137,19 @@
         log "❌ $DOMAIN FAILED to sync - other servers will serve a stale certificate: $RESPONSE"
       fi
     dest: /etc/letsencrypt/renewal-hooks/deploy/mongodb-sync.sh
+    mode: '0700'
+  tags: ["certbot"]
+
+- name: Reload nginx after each renewal
+  # nginx serves the certificate it loaded until it reloads. Without this the
+  # server that renewed a certificate kept serving the old one until some
+  # unrelated reload (a new vhost, a deploy); the other servers reload when
+  # they pull it from MongoDB. Named to run after mongodb-sync.sh.
+  copy:
+    content: |
+      #!/bin/bash
+      nginx -t -q && systemctl reload nginx
+    dest: /etc/letsencrypt/renewal-hooks/deploy/zz-reload-nginx.sh
     mode: '0755'
   tags: ["certbot"]
 

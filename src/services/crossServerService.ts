@@ -100,6 +100,7 @@ export async function getHealthyServers(): Promise<ServerHealth[]> {
     serverId: s.serverId,
     serverHost: s.serverHost,
     serverPort: s.serverPort,
+    forwardUrl: s.forwardUrl || undefined,
     region: s.region,
     lastHeartbeat: s.lastHeartbeat,
     agentCount: s.agentCount || 0,

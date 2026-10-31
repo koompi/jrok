@@ -167,7 +167,7 @@ export function nginxConfigFileName(domain: string): string {
 // its version, edit the new one, bump CUSTOM_DOMAIN_VHOST_VERSION.
 
 /** Version written by generateCustomDomainNginxConfig. */
-export const CUSTOM_DOMAIN_VHOST_VERSION = 3;
+export const CUSTOM_DOMAIN_VHOST_VERSION = 4;
 
 const VHOST_VERSION_MARKER = "# jrok-vhost-template:";
 
@@ -307,9 +307,33 @@ export function edgeCacheAvailable(): boolean {
   }
 }
 
-/** The template version this server writes: 3 with the edge cache, else 2. */
+/** The template version this server writes: 4 with the edge cache (Ansible's nginx.conf), else 2. */
 export function currentVhostVersion(): number {
   return edgeCacheAvailable() ? CUSTOM_DOMAIN_VHOST_VERSION : 2;
+}
+
+/**
+ * Template v4: v3, with certificate challenges on port 80 answered by jrok,
+ * which finds the answer on whichever edge's certbot asked for the certificate
+ * (services/acmeChallenge.ts). The HTTPS block clears the marker header so a
+ * visitor can't use it to reach that path instead of their app.
+ */
+function generateCustomDomainNginxConfigV4(domain: string, certPath: string): string {
+  return generateCustomDomainNginxConfigV3(domain, certPath)
+    .replace(`${VHOST_VERSION_MARKER} 3\n`, `${VHOST_VERSION_MARKER} 4\n`)
+    .replace(`    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+`, `    location /.well-known/acme-challenge/ {
+        proxy_pass http://${JROK_UPSTREAM_NAME};
+        proxy_set_header Host $host;
+        proxy_set_header X-Jrok-Acme-Challenge 1;
+    }
+`)
+    .replace(`        proxy_set_header Connection $jrok_connection_upgrade;
+`, `        proxy_set_header Connection $jrok_connection_upgrade;
+        proxy_set_header X-Jrok-Acme-Challenge "";
+`);
 }
 
 /** Template v3: v2 plus the edge cache (see the Ansible nginx role). */
@@ -458,9 +482,17 @@ server {
 `;
 }
 
+/** A vhost exactly as template `version` wrote it (tests and tooling). */
+export function renderVhostTemplate(version: number, domain: string, certPath: string): string {
+  const render = VHOST_RENDERERS[version];
+  if (!render) throw new Error(`No vhost template version ${version}`);
+  return render(domain, certPath);
+}
+
 /** Every template version jrok has shipped, by the number its files carry. */
 const VHOST_RENDERERS: Record<number, (domain: string, certPath: string) => string> = {
   1: generateCustomDomainNginxConfigV1,
   2: generateCustomDomainNginxConfigV2,
   3: generateCustomDomainNginxConfigV3,
+  4: generateCustomDomainNginxConfigV4,
 };

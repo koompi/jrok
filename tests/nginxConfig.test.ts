@@ -18,6 +18,7 @@ import {
   upstreamFileUpdate,
   vhostNeedsUpgrade,
   vhostTemplateVersion,
+  renderVhostTemplate,
   CUSTOM_DOMAIN_VHOST_VERSION,
   JROK_UPSTREAM_NAME,
 } from "../src/utils/nginxConfig";
@@ -31,7 +32,7 @@ function fixture(name: string, domain = DOMAIN, certDir = CERT_DIR): string {
     .replaceAll("{{DOMAIN}}", domain);
 }
 
-// Template v3 is written only where nginx.conf defines the edge cache.
+// Templates v3 and later are written only where nginx.conf defines the edge cache.
 const WITH_EDGE_CACHE = join(import.meta.dir, "fixtures/nginx/nginx-with-edge-cache.conf");
 function withNginxConf<T>(path: string, fn: () => T): T {
   const saved = process.env.NGINX_CONF_PATH;
@@ -71,6 +72,22 @@ describe("current template", () => {
     expect(vhost).toContain("proxy_no_cache $jrok_not_shareable $http_authorization;");
     expect(vhost).not.toContain("proxy_cache_lock");
   });
+
+  test("certificate challenges on port 80 go to jrok, marked; HTTPS clears the marker", () => {
+    const [http, https] = vhost.split("# HTTPS server");
+    expect(http).toContain("location /.well-known/acme-challenge/ {");
+    expect(http).toContain(`proxy_pass http://${JROK_UPSTREAM_NAME};`);
+    expect(http).toContain("proxy_set_header X-Jrok-Acme-Challenge 1;");
+    expect(http).not.toContain("root /var/www/certbot");
+    expect(https).toContain('proxy_set_header X-Jrok-Acme-Challenge "";');
+  });
+
+  test("unedited v3 vhosts upgrade to it; edited ones don't", () => {
+    const v3 = renderVhostTemplate(3, DOMAIN, CERT_DIR);
+    expect(withNginxConf(WITH_EDGE_CACHE, () => vhostNeedsUpgrade(v3, DOMAIN, CERT_DIR))).toBe(true);
+    const edited = v3.replace("proxy_read_timeout 3600s;", "proxy_read_timeout 7200s;");
+    expect(withNginxConf(WITH_EDGE_CACHE, () => vhostNeedsUpgrade(edited, DOMAIN, CERT_DIR))).toBe(false);
+  });
 });
 
 describe("servers whose nginx.conf has no edge cache", () => {
@@ -82,7 +99,7 @@ describe("servers whose nginx.conf has no edge cache", () => {
     expect(vhost).not.toContain("proxy_cache");
   });
 
-  test("keep their v2 vhosts; once nginx.conf has the cache, unedited ones upgrade to v3", () => {
+  test("keep their v2 vhosts; once nginx.conf has the cache, unedited ones upgrade", () => {
     const v2 = withNginxConf(missing, () => generateCustomDomainNginxConfig(DOMAIN, CERT_DIR));
     expect(withNginxConf(missing, () => vhostNeedsUpgrade(v2, DOMAIN, CERT_DIR))).toBe(false);
     expect(withNginxConf(WITH_EDGE_CACHE, () => vhostNeedsUpgrade(v2, DOMAIN, CERT_DIR))).toBe(true);
