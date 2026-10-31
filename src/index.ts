@@ -1143,6 +1143,12 @@ async function startServer() {
 
           // If agent is on another server, proxy the request
           if (!routeResult.isLocal && routeResult.targetServer) {
+            // One hop only (P9): never forward a request another server
+            // forwarded here; tell it its route was stale instead.
+            if (crossServerService.isForwardedRequest(req)) {
+              return crossServerService.routeMissResponse(subdomain);
+            }
+
             // The same verified address the local path uses, but undefined
             // rather than "unknown" when nothing is known — the forwarder omits
             // the header entirely instead of asserting a bogus address.
@@ -1172,7 +1178,8 @@ async function startServer() {
               return new Response("Failed to upgrade WebSocket connection", { status: 400 });
             }
 
-            return crossServerService.forwardRequest(
+            return crossServerService.forwardToAgentServer(
+              subdomain,
               routeResult.targetServer,
               req,
               url.pathname + url.search,
@@ -1228,8 +1235,9 @@ async function startServer() {
           if (!agentWs || agentWs.readyState !== 1) {  // 1 = WebSocket.OPEN
             // For group mode, try to get another agent if this one is disconnected
             if (isGroupDomain) {
-              // Mark this agent as unhealthy
-              await agentGroupService.updateMemberHealth(agent.id, false);
+              // Mark this agent as unhealthy (in the background: the request
+              // doesn't need the write, and must not wait on MongoDB for it)
+              agentGroupService.updateMemberHealth(agent.id, false).catch(() => {});
               // Try to get another agent
               const fallbackAgent = await agentGroupService.selectAgent(subdomain);
               if (fallbackAgent && fallbackAgent.id !== agent.id) {

@@ -2,6 +2,7 @@ import type { AgentGroup, AgentGroupMember, Agent, LoadBalanceStrategy } from ".
 import { getCollections } from "../utils/mongodb";
 import { generateId } from "../utils/helpers";
 import * as agentService from "./agentService";
+import { StaleCache } from "../utils/staleCache";
 
 // =============================================================================
 // MULTI-AGENT GROUP SERVICE
@@ -12,49 +13,41 @@ import * as agentService from "./agentService";
 
 // Local cache for round-robin counters (per group)
 const roundRobinCounters = new Map<string, number>();
+// Round-robin position among the replicas connected to THIS server, per domain.
+const localRoundRobin = new Map<string, number>();
 
-// Cache for isGroupedDomain checks — eliminates a MongoDB query on every request.
-// Both group creation (createOrJoinGroup) and deletion invalidate the entry for
-// their domain, so the TTL only has to cover changes made outside this process
-// (another node in the cluster); it does not need to be short for correctness.
-// It used to be 5s, which meant one request in every 5-second window per domain
-// still paid a database round trip on the proxy path for no benefit.
-const groupedDomainCache = new Map<string, { result: boolean; expires: number }>();
-const GROUP_DOMAIN_CACHE_TTL = 60_000; // 60 seconds
+function hasMembers(group: AgentGroup | null): boolean {
+  return !!group && (group.agentIds?.length > 0 || group.activeAgentCount > 0);
+}
+
+// Whether a domain is grouped, for domains with no replica connected here
+// (with one, its own record answers: see isGroupedDomain). Changes made in this
+// process store their result directly, so the TTL only bounds how long a change
+// made on another server takes to be seen here. An expired answer is served
+// while it reloads, and kept if MongoDB fails (StaleCache).
+const groupedDomainCache = new StaleCache<string, boolean>(
+  "group lookup",
+  async (domain) => hasMembers(await getGroupByDomain(domain)),
+  60_000,
+);
 
 // The group document itself (id + strategy), read by selectAgent on every
-// request through a grouped domain. Invalidated by every change made in this
-// process; the TTL only bounds how long a change made on another node (e.g. a
-// strategy update) takes to be seen here.
-const groupCache = new Map<string, { group: AgentGroup | null; expires: number }>();
-const GROUP_CACHE_TTL = 30_000; // 30 seconds
+// request through a grouped domain. Same rules as above.
+const groupCache = new StaleCache<string, AgentGroup | null>(
+  "group document",
+  (domain) => getGroupByDomain(domain),
+  30_000,
+);
 
-function invalidateGroupCaches(domain: string): void {
-  groupedDomainCache.delete(domain);
-  groupCache.delete(domain);
+/** Record a group as this process just wrote it, instead of re-reading it. */
+function rememberGroup(domain: string, group: AgentGroup | null): void {
+  groupCache.set(domain, group);
+  groupedDomainCache.set(domain, hasMembers(group));
 }
 
-async function getGroupByDomainCached(domain: string): Promise<AgentGroup | null> {
-  const cached = groupCache.get(domain);
-  if (cached && Date.now() < cached.expires) {
-    return cached.group;
-  }
-  const group = await getGroupByDomain(domain);
-  groupCache.set(domain, { group, expires: Date.now() + GROUP_CACHE_TTL });
-  return group;
+function getGroupByDomainCached(domain: string): Promise<AgentGroup | null> {
+  return groupCache.get(domain);
 }
-
-// Housekeeping: drop expired entries so domains that stopped receiving traffic
-// don't accumulate forever.
-setInterval(() => {
-  const now = Date.now();
-  for (const [domain, entry] of groupCache) {
-    if (now >= entry.expires) groupCache.delete(domain);
-  }
-  for (const [domain, entry] of groupedDomainCache) {
-    if (now >= entry.expires) groupedDomainCache.delete(domain);
-  }
-}, 5 * 60_000).unref?.();
 
 // =============================================================================
 // GROUP MANAGEMENT
@@ -92,7 +85,7 @@ export async function getOrCreateGroup(
   };
 
   await collections.agentGroups.insertOne(group);
-  invalidateGroupCaches(domain); // so the next request sees the new group
+  rememberGroup(domain, group); // so the next request sees the new group
   console.log(`✅ Created agent group for domain: ${domain}`);
 
   return group;
@@ -120,18 +113,12 @@ export async function getGroupById(groupId: string): Promise<AgentGroup | null> 
  * Check if a domain has a multi-agent group
  */
 export async function isGroupedDomain(domain: string): Promise<boolean> {
-  // Check short-lived cache first to avoid MongoDB query on every request
-  const cached = groupedDomainCache.get(domain);
-  if (cached && Date.now() < cached.expires) {
-    return cached.result;
-  }
+  // A replica connected here says so itself (it registered in group mode), so
+  // a domain served by this server never waits on MongoDB for this.
+  const local = agentService.getLocalAgentsForDomain(domain);
+  if (local.length > 0) return local.some((agent) => agent.groupMode === true);
 
-  const collections = getCollections();
-  const group = await collections.agentGroups.findOne({ domain });
-  const result = !!group && (group.agentIds?.length > 0 || group.activeAgentCount > 0);
-
-  groupedDomainCache.set(domain, { result, expires: Date.now() + GROUP_DOMAIN_CACHE_TTL });
-  return result;
+  return groupedDomainCache.get(domain);
 }
 
 /**
@@ -152,7 +139,8 @@ export async function deleteGroup(groupId: string): Promise<void> {
   // Clean up local caches
   roundRobinCounters.delete(groupId);
   if (group?.domain) {
-    invalidateGroupCaches(group.domain);
+    rememberGroup(group.domain, null);
+    localRoundRobin.delete(group.domain);
   }
 
   console.log(`🗑️ Deleted agent group: ${groupId}`);
@@ -192,11 +180,11 @@ export async function addAgentToGroup(
   );
 
   // Update group's agent list and count. findOneAndUpdate (rather than
-  // updateOne) so we get the domain back without a second query — the
-  // isGroupedDomain cache must be invalidated here, not just in
-  // getOrCreateGroup: creating a group leaves it with zero agents, so a request
-  // arriving in between caches "not a group" and would otherwise keep routing
-  // around the load balancer until the entry expired.
+  // updateOne) so we get the group back without a second query — the
+  // isGroupedDomain cache must be updated here, not just in getOrCreateGroup:
+  // creating a group leaves it with zero agents, so a request arriving in
+  // between caches "not a group" and would otherwise keep routing around the
+  // load balancer until the entry expired.
   const updated = await collections.agentGroups.findOneAndUpdate(
     { id: groupId },
     {
@@ -208,7 +196,7 @@ export async function addAgentToGroup(
   );
 
   if (updated?.domain) {
-    invalidateGroupCaches(updated.domain);
+    rememberGroup(updated.domain, updated as unknown as AgentGroup);
   }
 
   console.log(`➕ Agent ${agentId} (instance: ${instanceId}) joined group ${groupId}`);
@@ -243,7 +231,7 @@ export async function removeAgentFromGroup(agentId: string): Promise<void> {
   );
 
   if (updateResult?.domain) {
-    invalidateGroupCaches(updateResult.domain);
+    rememberGroup(updateResult.domain, updateResult as unknown as AgentGroup);
   }
 
   console.log(`➖ Agent ${agentId} left group ${groupId}`);
@@ -371,13 +359,6 @@ export async function decrementMemberConnections(agentId: string): Promise<void>
  * This is the main entry point for load-balanced agent selection
  */
 export async function selectAgent(domain: string): Promise<Agent | null> {
-  const group = await getGroupByDomainCached(domain);
-
-  // If no group exists, fall back to single-agent lookup
-  if (!group) {
-    return agentService.getAgentByDomainAsync(domain);
-  }
-
   // FAST PATH (no MongoDB): pick among the replicas connected to THIS server.
   // This runs on every request to every kconsole HTTP tunnel. It used to read
   // the group, its healthy members and the chosen agent's record — three
@@ -391,18 +372,33 @@ export async function selectAgent(domain: string): Promise<Agent | null> {
   // ever cleared when a member's socket isn't open, and the self-heal branch
   // below already treats an open socket as healthy.
   //
+  // The group document only supplies the strategy, and this never waits on
+  // MongoDB for it: the last known copy is used (reloaded in the background,
+  // kept if MongoDB fails), and until the first copy arrives the default,
+  // round-robin, applies. Every kconsole group is round-robin. On staging, the
+  // request that found this cache expired while MongoDB was unreachable waited
+  // 10 s and got a 500, and so did every request after it.
+  //
   // least-connections and weighted read counters/weights stored per member,
-  // so they keep using the stored members.
-  if (group.strategy !== 'least-connections' && group.strategy !== 'weighted') {
-    const local = agentService.getLocalAgentsForDomain(domain);
-    if (local.length > 0) {
-      if (group.strategy === 'random') {
+  // so they keep using the stored members (and MongoDB). Nothing sets them.
+  const local = agentService.getLocalAgentsForDomain(domain);
+  if (local.length > 0) {
+    const strategy = groupCache.getNow(domain)?.strategy ?? 'round-robin';
+    if (strategy !== 'least-connections' && strategy !== 'weighted') {
+      if (strategy === 'random') {
         return local[Math.floor(Math.random() * local.length)] ?? null;
       }
-      const index = roundRobinCounters.get(group.id) ?? 0;
-      roundRobinCounters.set(group.id, (index + 1) % local.length);
+      const index = localRoundRobin.get(domain) ?? 0;
+      localRoundRobin.set(domain, (index + 1) % local.length);
       return local[index % local.length] ?? null;
     }
+  }
+
+  const group = await getGroupByDomainCached(domain);
+
+  // If no group exists, fall back to single-agent lookup
+  if (!group) {
+    return agentService.getAgentByDomainAsync(domain);
   }
 
   // Get healthy members
@@ -587,7 +583,7 @@ export async function updateGroupStrategy(
     { returnDocument: 'after' }
   );
   if (updated?.domain) {
-    invalidateGroupCaches(updated.domain);
+    rememberGroup(updated.domain, updated as unknown as AgentGroup);
   }
 }
 

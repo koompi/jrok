@@ -11,7 +11,7 @@
 ## 0. Working with the running staging
 
 - **Hosts** are in `ansible/inventory.staging.ini` (not in git). The test droplet runs MongoDB (Docker `mongo`, private network, only the edges allowed by `mongo-firewall.service`), the test app (`stg-app.service`) and a group-mode agent for `app` (`stg-agent.service`, secrets in `/root/staging.env`). All of it comes back after a reboot.
-- **Deploy a branch to the edges:** rsync the repo to each edge's `/root/jrok-staging/` (command in section 4), then run the playbook with `--tags app` (rebuild and restart jrok) or `--tags nginx`. Export the section 3 variables first, with the same values as before, or the playbook rewrites `jrok.service` with empty ones.
+- **Deploy a branch to the edges:** `scripts/staging/deploy-edges.sh [tags]` (default `app`: rebuild and restart jrok; `nginx` for the nginx config). It copies the working tree to each edge and runs the playbook with the secrets from `~/.config/jrok-staging/secrets.env`. Done by hand, export the section 3 variables with the same values as before, or the playbook rewrites `jrok.service` with empty ones.
 - **Update the agent:** rsync the repo to `/root/jrok/` on the test droplet (excluding `cli/dist`), run `npm install` in `/root/jrok/cli` (it builds `dist/index.js`, as workers do), then `systemctl restart stg-agent`.
 - **Logs:** `journalctl -u jrok -f` on an edge; `journalctl -u stg-agent -f` on the test droplet.
 - **Measure:** `scripts/staging/edge-sample.sh SECONDS` on an edge (CPU split into jrok and nginx, plus connection states on port 3000); `box-sample.sh` on the test droplet (agent, app, autocannon); `probe.sh SECONDS URL EDGE_IP…` for availability through each edge during a failure test.

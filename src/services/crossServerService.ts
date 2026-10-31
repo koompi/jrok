@@ -15,6 +15,7 @@ import {
   currentServerPort as SERVER_PORT,
 } from "./agentService";
 import { getCollections } from "../utils/mongodb";
+import { StaleCache } from "../utils/staleCache";
 import { AGENT_WS_BUFFER_LIMIT_BYTES, frameByteLength, isBacklogged } from "../utils/wsFlowControl";
 
 // =============================================================================
@@ -105,10 +106,19 @@ export async function getHealthyServers(): Promise<ServerHealth[]> {
   }));
 }
 
+// Server records, read for every forwarded request (P14). Health is judged when
+// a record is loaded, so a server that loses MongoDB keeps forwarding to the
+// peers it last saw alive instead of watching their heartbeats age out (P8).
+const serverCache = new StaleCache<string, ServerHealth | null>("server lookup", loadServer, 5_000);
+
 /**
  * Get a specific server by ID
  */
-export async function getServer(serverId: string): Promise<ServerHealth | null> {
+export function getServer(serverId: string): Promise<ServerHealth | null> {
+  return serverCache.get(serverId);
+}
+
+async function loadServer(serverId: string): Promise<ServerHealth | null> {
   const collections = getCollections();
   const server = await collections.serverHeartbeats.findOne({ serverId });
   
@@ -241,9 +251,69 @@ export async function forwardRequest(
       message: 'Failed to route request to target server',
     }), {
       status: 502,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', [ROUTE_HEADER]: 'unreachable' },
     });
   }
+}
+
+// =============================================================================
+// ONE HOP (P9)
+// =============================================================================
+// A request another server forwarded here is never forwarded again. When
+// MongoDB's record of where an agent is goes stale, two servers could otherwise
+// pass a request back and forth until it timed out. Instead the receiving
+// server answers "miss" and the sender looks the route up again, once.
+
+const ROUTE_HEADER = 'X-Jrok-Route';
+
+/** True if another jrok server forwarded this request here. */
+export function isForwardedRequest(req: Request): boolean {
+  return req.headers.has('X-Forwarded-From');
+}
+
+/** The answer to a forwarded request for a domain whose agent isn't here. */
+export function routeMissResponse(subdomain: string): Response {
+  return new Response(JSON.stringify({
+    success: false,
+    message: `The agent for ${subdomain} is not on this server.`,
+  }), {
+    status: 503,
+    // "reconnecting", not "down": the deploy worker restarts tunnels on "down".
+    headers: { 'Content-Type': 'application/json', [ROUTE_HEADER]: 'miss', 'X-Jrok-Tunnel': 'reconnecting' },
+  });
+}
+
+/**
+ * Forward to the server holding the agent. If that server no longer has it
+ * ("miss") or can't be reached, drop the cached route and try the server a
+ * fresh lookup names, once. Requests with a body are not retried: the body was
+ * spent on the first attempt, so the visitor gets the error and retries.
+ */
+export async function forwardToAgentServer(
+  subdomain: string,
+  targetServer: { serverId?: string; serverHost: string; serverPort: number },
+  req: Request,
+  path: string,
+  clientIp?: string
+): Promise<Response> {
+  const response = await forwardRequest(targetServer, req, path, clientIp);
+  const route = response.headers.get(ROUTE_HEADER);
+  if (route !== 'miss' && route !== 'unreachable') return response;
+
+  forgetRoute(subdomain);
+  if (req.method !== 'GET' && req.method !== 'HEAD') return response;
+
+  let fresh: RouteResult;
+  try {
+    fresh = await findServerForDomain(subdomain);
+  } catch {
+    return response;
+  }
+  const next = fresh.targetServer;
+  if (!next || next.serverId === targetServer.serverId) return response;
+
+  await response.body?.cancel().catch(() => {});
+  return forwardRequest(next, req, path, clientIp);
 }
 
 /**
@@ -458,8 +528,6 @@ export async function getClusterStats(): Promise<{
  * Find server hosting a specific domain's tunnel
  */
 export async function findServerForDomain(subdomain: string): Promise<RouteResult> {
-  const collections = getCollections();
-
   // FAST PATH: if we already hold a live WebSocket for this domain, the agent is
   // on THIS server by definition — no database round trip can tell us anything
   // we don't already know from the socket in our own hand.
@@ -483,6 +551,25 @@ export async function findServerForDomain(subdomain: string): Promise<RouteResul
       return { isLocal: true };
     }
   }
+
+  return routeCache.get(subdomain);
+}
+
+// Where MongoDB last said a domain's agent is, for agents on other servers.
+// Without it every forwarded request made two queries (P14). Short TTL, since
+// agents move between servers when they reconnect; a route that turns out to
+// be stale is dropped and looked up again (forwardToAgentServer). Kept if
+// MongoDB fails, so forwarding that worked keeps working (P8).
+const ROUTE_CACHE_TTL_MS = 3_000;
+const routeCache = new StaleCache<string, RouteResult>("route lookup", lookupRoute, ROUTE_CACHE_TTL_MS);
+
+/** Drop a domain's cached route, so the next request looks it up again. */
+export function forgetRoute(subdomain: string): void {
+  routeCache.delete(subdomain);
+}
+
+async function lookupRoute(subdomain: string): Promise<RouteResult> {
+  const collections = getCollections();
 
   // First check agentConnections (most reliable for active connections)
   const agentConn = await collections.agentConnections.findOne({
