@@ -402,7 +402,9 @@ export async function selectAgent(domain: string): Promise<Agent | null> {
   //
   // least-connections and weighted read counters/weights stored per member,
   // so they keep using the stored members (and MongoDB). Nothing sets them.
-  const local = agentService.getLocalAgentsForDomain(domain);
+  // Replicas that went quiet (machine likely gone) get no new requests while
+  // another is answering (agentService.getResponsiveLocalAgents).
+  const local = agentService.getResponsiveLocalAgents(domain);
   if (local.length > 0) {
     const strategy = groupCache.getNow(domain)?.strategy ?? 'round-robin';
     if (strategy !== 'least-connections' && strategy !== 'weighted') {

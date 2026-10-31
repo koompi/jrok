@@ -205,6 +205,42 @@ describe("replicas of a new domain registering together", () => {
   });
 });
 
+describe("a replica whose machine died (its socket still looks open)", () => {
+  test("gets no new requests once quiet, while another replica answers", async () => {
+    const alive = await registerReplica("quiet-app", "q-1");
+    const dead = await registerReplica("quiet-app", "q-2");
+    const registered = Date.now();
+    await new Promise((r) => setTimeout(r, 60));
+    // Only the live one keeps talking (its heartbeats).
+    agentService.agentHeardFrom(agentService.getAgentSocket(alive.id)!);
+    // A moment past AGENT_QUIET_MS after registration: the dead one, heard
+    // last then, is quiet; the live one, heard 60 ms later, isn't yet.
+    const now = registered + agentService.AGENT_QUIET_MS + 30;
+    expect(agentService.getResponsiveLocalAgents("quiet-app", now).map((a) => a.id)).toEqual([alive.id]);
+    expect(agentService.getLocalAgentsForDomain("quiet-app").map((a) => a.id).sort()).toEqual([alive.id, dead.id].sort());
+  });
+
+  test("is closed after AGENT_SILENT_MS, and only then", async () => {
+    const terminated: string[] = [];
+    const socket = { readyState: 1, send: () => 1, close: () => {}, terminate: () => terminated.push("x") } as any;
+    const { agent } = await agentService.registerAgent({
+      socket, domain: "silent-app", localPort: 3000, localHost: "127.0.0.1", groupMode: true, instanceId: "s-1",
+    });
+    await settle();
+    expect(agentService.closeSilentAgents(Date.now() + 1_000)).not.toContain(agent.id);
+    expect(agentService.closeSilentAgents(Date.now() + agentService.AGENT_SILENT_MS + 1_000)).toContain(agent.id);
+    expect(terminated).toHaveLength(1);
+  });
+
+  test("when every replica is quiet, all are still tried (a slow answer beats none)", async () => {
+    await registerReplica("all-quiet-app", "aq-1");
+    await registerReplica("all-quiet-app", "aq-2");
+    await settle();
+    const later = Date.now() + agentService.AGENT_QUIET_MS + 1_000;
+    expect(agentService.getResponsiveLocalAgents("all-quiet-app", later)).toHaveLength(2);
+  });
+});
+
 describe("agent heartbeats", () => {
   test("are batched into one write per flush", async () => {
     const a = await registerReplica("hb-app", "hb-1");

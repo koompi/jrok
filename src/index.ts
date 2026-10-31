@@ -249,6 +249,23 @@ async function saveSharedRule(
   }
 }
 
+// Marks a response to a request whose agent went away before answering
+// (internal: the tunnel path retries a GET or HEAD elsewhere and strips it).
+const AGENT_GONE_HEADER = "X-Jrok-Agent-Gone";
+
+/** Answer every request sent to `agentId` that it hasn't answered (it closed, or went silent). */
+function answerAgentsPendingRequests(agentId: string): void {
+  for (const [requestId, entry] of pendingRequests) {
+    if (entry.agent.id !== agentId) continue;
+    clearTimeout(entry.timeout);
+    pendingRequests.delete(requestId);
+    entry.resolve(new Response(
+      JSON.stringify({ success: false, message: "The app's tunnel disconnected before answering. Try again." }),
+      { status: 502, headers: { "Content-Type": "application/json", [AGENT_GONE_HEADER]: "1" } }
+    ));
+  }
+}
+
 async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string, clientIp?: string): Promise<Response> {
   return new Promise(async (resolve) => {
     const requestId = generateId();
@@ -812,6 +829,9 @@ async function startServer() {
             return;
           }
 
+          // Anything from an agent shows it's alive (agentService.agentHeardFrom).
+          agentService.agentHeardFrom(ws);
+
           // Binary frames from an agent (docs/protocol/tunnel-frames.md).
           // Agents send them only when this server advertised "binchunk".
           if (typeof data !== "string") {
@@ -1059,6 +1079,10 @@ async function startServer() {
           // Handle agent WebSocket close
           const agentId = agentService.getAgentIdBySocket(ws);
           const clientIp = ws.data?.clientIp || "unknown";
+
+          // Requests it will never answer: answer them now (a GET or HEAD is
+          // retried on another replica) rather than after the full timeout.
+          if (agentId) answerAgentsPendingRequests(agentId);
 
           // Abort any in-flight streaming responses owned by this agent so
           // clients get a clean error instead of a connection that hangs open.
@@ -1493,7 +1517,22 @@ async function startServer() {
           }
 
           // Forward regular HTTP request to agent via WebSocket (with bandwidth tracking)
-          const response = await forwardRequestToAgent(req, finalAgentWs, agent, tunnelId, clientIp);
+          let response = await forwardRequestToAgent(req, finalAgentWs, agent, tunnelId, clientIp);
+
+          // Its agent went away before answering (closed, or silent: its
+          // machine likely died). A GET or HEAD has no body to lose, so it
+          // goes to another replica once; the visitor never sees the failure.
+          if (response.headers.has(AGENT_GONE_HEADER)) {
+            if (isGroupDomain && (method === "GET" || method === "HEAD")) {
+              const other = await agentGroupService.selectAgent(subdomain);
+              const otherWs = other && other.id !== agent.id ? agentService.getAgentSocket(other.id) : null;
+              if (other && otherWs && otherWs.readyState === 1) {
+                console.log(`↪️  ${subdomain}${path}: its replica went away before answering; retried on another`);
+                response = await forwardRequestToAgent(req, otherWs, other, other.tunnelId || tunnelId, clientIp);
+              }
+            }
+            response.headers.delete(AGENT_GONE_HEADER);
+          }
 
           // Track connection close and bandwidth
           securityService.trackHttpConnection(tunnelId || subdomain, false);
@@ -2691,6 +2730,13 @@ async function startServer() {
         console.error("Bandwidth flush error:", error);
       }
     }, 30_000);
+
+    // Agents silent for AGENT_SILENT_MS (30 s; a live one sends a heartbeat
+    // every 15 s) are closed here, without waiting for MongoDB or the TCP
+    // connection to notice, and their unanswered requests answered.
+    setInterval(() => {
+      for (const agentId of agentService.closeSilentAgents()) answerAgentsPendingRequests(agentId);
+    }, 5000);
 
     // Cleanup stale agents every 30 seconds.
     // AGENT_STALE_MS (default 150s) allows 10 missed 15s heartbeats, which gives

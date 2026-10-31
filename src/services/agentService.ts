@@ -22,6 +22,48 @@ const SERVER_REGION = process.env.VPS_REGION || "default";
 // Local WebSocket references (in-memory, per-server)
 // These MUST be local since WebSocket connections can't be shared
 const localSockets = new Map<string, WebSocket>();
+const socketAgentIds = new WeakMap<WebSocket, string>();
+
+// When each agent here last sent anything. A live agent sends a heartbeat every
+// 15 s. One whose machine lost power or network leaves a socket that still
+// looks open: nothing closes a half-open TCP connection for minutes, and the
+// MongoDB-based stale sweep waits AGENT_STALE_MS (150 s). Meanwhile round-robin
+// kept handing it requests, which hung until TUNNEL_REQUEST_TIMEOUT_MS (staging:
+// a destroyed worker's replica took 2.5 minutes to drop, its requests 504).
+const lastHeard = new Map<string, number>();
+const envMs = (name: string, fallback: number) => {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+/** Quiet this long: no new requests while the domain has a replica that isn't. */
+export const AGENT_QUIET_MS = envMs("AGENT_QUIET_MS", 20_000);
+/** Silent this long (two missed heartbeats): closed, its unanswered requests failed or retried elsewhere. */
+export const AGENT_SILENT_MS = envMs("AGENT_SILENT_MS", 30_000);
+
+/** Record that an agent sent something (any message on its socket). */
+export function agentHeardFrom(socket: WebSocket): void {
+  const id = socketAgentIds.get(socket);
+  if (id) lastHeard.set(id, Date.now());
+}
+
+/**
+ * Close agents here that have been silent for AGENT_SILENT_MS. Returns their
+ * ids, so the caller can answer the requests they will never answer.
+ */
+export function closeSilentAgents(now = Date.now()): string[] {
+  const closed: string[] = [];
+  for (const [id, socket] of localSockets) {
+    const heard = lastHeard.get(id) ?? now;
+    if (now - heard <= AGENT_SILENT_MS) continue;
+    console.warn(`🔇 Agent ${id} (${localAgentDomain.get(id) ?? "?"}) silent for ${Math.round((now - heard) / 1000)} s: closing it`);
+    lastHeard.delete(id);
+    try {
+      (socket as any).terminate?.() ?? socket.close(4008, "Agent silent");
+    } catch { /* already gone */ }
+    closed.push(id);
+  }
+  return closed;
+}
 
 // Domain → Agent cache (in-memory, LOCAL agents only).
 // Eliminates MongoDB query on every tunneled HTTP request.
@@ -374,6 +416,8 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
 
   // Store local WebSocket reference
   localSockets.set(agentId, socket);
+  socketAgentIds.set(socket, agentId);
+  lastHeard.set(agentId, Date.now());
 
   // Create Agent object for return value
   const agent: Agent = {
@@ -648,6 +692,7 @@ export async function unregisterAgent(id: string): Promise<void> {
 
   // Remove local socket reference
   localSockets.delete(id);
+  lastHeard.delete(id);
   pendingHeartbeats.delete(id);
 
   // Remove from the local indexes. Keyed by agentId, so this also works when
@@ -698,6 +743,17 @@ export function getAgentByDomainLocal(domain: string): Agent | null {
  * Every agent for this domain connected to THIS server with an open socket
  * (O(replicas), no MongoDB). Used by the load balancer on the request path.
  */
+/**
+ * The domain's agents here that are fit for a new request: open, and heard from
+ * within AGENT_QUIET_MS. If none was heard from lately, all open ones (better a
+ * slow answer than none).
+ */
+export function getResponsiveLocalAgents(domain: string, now = Date.now()): Agent[] {
+  const live = getLocalAgentsForDomain(domain);
+  const fresh = live.filter((agent) => now - (lastHeard.get(agent.id) ?? now) <= AGENT_QUIET_MS);
+  return fresh.length > 0 ? fresh : live;
+}
+
 export function getLocalAgentsForDomain(domain: string): Agent[] {
   const agents = localAgentsByDomain.get(domain);
   if (!agents) return [];
@@ -910,6 +966,8 @@ export function sendToAgent(id: string, message: AgentMessage): boolean {
  * Get agent ID by socket reference (for local socket handling)
  */
 export function getAgentIdBySocket(socket: WebSocket): string | null {
+  const known = socketAgentIds.get(socket);
+  if (known && localSockets.get(known) === socket) return known;
   for (const [id, sock] of localSockets.entries()) {
     if (sock === socket) {
       return id;
