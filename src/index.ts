@@ -249,6 +249,23 @@ async function saveSharedRule(
   }
 }
 
+/**
+ * The app's response headers as the agent sent them. `headers` is a name ->
+ * value map, so it can hold one Set-Cookie; agents that know better also send
+ * every one in `setCookie`. A login that set a session cookie and a CSRF
+ * cookie used to reach the browser with only the last (staging).
+ */
+function agentResponseHeaders(message: { headers?: Record<string, string>; setCookie?: unknown }): Headers {
+  const headers = new Headers(message.headers || {});
+  if (Array.isArray(message.setCookie) && message.setCookie.length > 0) {
+    headers.delete('Set-Cookie');
+    for (const cookie of message.setCookie) {
+      if (typeof cookie === 'string') headers.append('Set-Cookie', cookie);
+    }
+  }
+  return headers;
+}
+
 // Marks a response to a request whose agent went away before answering
 // (internal: the tunnel path retries a GET or HEAD elsewhere and strips it).
 const AGENT_GONE_HEADER = "X-Jrok-Agent-Gone";
@@ -882,7 +899,7 @@ async function startServer() {
                 clearTimeout(pending.timeout);
                 pendingRequests.delete(message.requestId);
 
-                const responseHeaders = new Headers(message.headers || {});
+                const responseHeaders = agentResponseHeaders(message);
                 responseHeaders.set('X-Jrok-Agent-Id', pending.agent.id);
                 if (pending.agent.instanceId) {
                   responseHeaders.set('X-Jrok-Instance-Id', pending.agent.instanceId);
@@ -1002,7 +1019,7 @@ async function startServer() {
                 }
 
                 // Build response headers
-                const responseHeaders = new Headers(message.headers || {});
+                const responseHeaders = agentResponseHeaders(message);
 
                 // Add debug headers
                 responseHeaders.set('X-Jrok-Agent-Id', pending.agent.id);

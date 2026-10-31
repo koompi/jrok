@@ -546,6 +546,9 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
     localResponse.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
+    // A map holds one Set-Cookie (the last); every one goes in setCookie, which
+    // servers append. Older servers ignore it and keep the map's.
+    const setCookie = localResponse.headers.getSetCookie?.() ?? [];
 
     if (streaming) {
       // Streaming path: send headers immediately, then relay body chunks as
@@ -576,6 +579,7 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
         status: localResponse.status,
         statusText: localResponse.statusText,
         headers: responseHeaders,
+        ...(setCookie.length > 1 ? { setCookie } : {}),
         ...(gzip ? { encoding: 'gzip' } : {}),
         ...(streamedByApp ? { streamed: true } : {}),
       }));
@@ -643,6 +647,7 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
         status: localResponse.status,
         statusText: localResponse.statusText,
         headers: responseHeaders,
+        ...(setCookie.length > 1 ? { setCookie } : {}),
         body: responseBody,
         isBase64: true,
       }));

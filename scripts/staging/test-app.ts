@@ -66,6 +66,13 @@ Bun.serve({
     if (url.pathname === "/blob") {
       return new Response(blob, { headers: { "content-type": "application/octet-stream" } });
     }
+    // Two cookies in one response, as a login commonly sets: both must arrive.
+    if (url.pathname === "/cookies") {
+      const headers = new Headers({ "content-type": "text/plain", "cache-control": "no-store" });
+      headers.append("set-cookie", "session=abc; Path=/; HttpOnly");
+      headers.append("set-cookie", "theme=dark; Path=/; Expires=Wed, 21 Oct 2037 07:28:00 GMT");
+      return new Response("two cookies\n", { headers });
+    }
     // What reached the app: the visitor address it is told, and nothing of jrok's own.
     if (url.pathname === "/headers") {
       return Response.json(Object.fromEntries(req.headers), { headers: { "cache-control": "no-store" } });

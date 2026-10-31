@@ -124,11 +124,19 @@ function websocket(): Promise<void> {
   });
 }
 
+/** Every Set-Cookie the app sends arrives (a login commonly sets two). */
+async function cookies() {
+  const res = await fetch(`${APP}/cookies`, tls as any);
+  const got = res.headers.getSetCookie();
+  record("two Set-Cookie headers both arrive", got.length === 2, got.map((c) => c.split(";")[0]).join(" | ") || "none");
+}
+
 // A check that throws (a broken body, say) is a failure, not the end of the run.
 const guard = (name: string, check: () => Promise<void>) =>
   check().catch((error) => record(name, false, `threw: ${error?.message ?? error}`));
 
 await guard("compression", compression);
+await guard("two Set-Cookie headers both arrive", cookies);
 await guard("60 requests at once", burst);
 await guard("events stream", sse);
 await Promise.all([guard("70 s response", slow), guard("WebSocket", websocket)]);

@@ -114,6 +114,10 @@ Two edges built from the Ansible role on DigitalOcean SGP1, each 1 vCPU / 1 GB "
 | P25 | The heartbeat's agent count was always 0 (`updateLocalMetrics` is never called) | `crossServerService.ts` | Cluster stats showed no agents; nothing could tell whether an edge had its agents back. **Fixed:** counted from the sockets. | 3 |
 | P26 | A rolling deploy moved to the next edge as soon as jrok answered `/health`, while the restarted edge's agents were still reconnecting | Ansible app role | An app whose agent hadn't returned yet would be down while the next edge restarted. **Fixed:** the deploy waits until the edge has 95% of its agents back (up to 3 minutes) and otherwise stops with the counts. | 2 |
 | P27 | A TCP tunnel's port is tied to the edge that gave it, but the worker connected TCP agents through the round-robin name | `JrokService.startTcpTunnel` (`--server` only), `agentService.ts` (reconnect branch), `index.ts` (welcome) | With two edges, 3 of 6 starts announced an address where nothing listened (staging); the edge the agent reached even listened on the other edge's port. A tunnel whose edge died could never move. **Fixed (3.3).** | 3 |
+| P28 | Ansible never set up GeoIP; production's server got its MaxMind databases by hand | Ansible | New edges would record no visitor location (about two thirds of traffic with 3 edges). **Fixed:** `geoip` role. | 2 |
+| P29 | A name with no vhost of its own was answered with whichever customer's vhost sorts first | nginx (no `default_server` on 443) | A stranger asking an edge for any name saw another customer's certificate (and domain). **Fixed:** the base-domain server is the default for 443, as for 80. | 2 |
+| P30 | A replica whose worker machine died abruptly kept getting requests: its socket stays half-open, and agents were dropped only by the MongoDB stale sweep after 150 s | `agentService.ts`, `index.ts` | For 2.5 minutes a share of the app's requests hung 120 s and got 504 (staging, a destroyed worker). Same in production today. **Fixed:** each edge tracks when it last heard from each agent: quiet 20 s, no new requests; silent 30 s, closed; its unanswered GETs retried on another replica. | 1 |
+| P31 | An app's response with several Set-Cookie headers reached the browser with only the last | agent (`headers` is a name -> value map), server | A login that sets a session and a CSRF cookie loses one. **In production.** **Fixed:** agents also send every cookie in `setCookie`, which the server appends; older servers ignore it and behave as before. | 0 |
 | P15 | When jrok stops but nginx keeps running, that edge answers 502, and DNS keeps sending visitors to it | nginx `upstream jrok` lists only the local jrok | With two edges in DNS, about half of visitors fail until jrok is back or the edge leaves DNS (staging). **Fixed in 2.6** for jrok down; a whole machine down still needs health-checked DNS. | 2 |
 
 ---
@@ -366,6 +370,29 @@ Browsers and curl try the next address when one doesn't answer, so a dead edge c
 |---|---|---|
 | Agent through the round-robin name, 6 starts | 3 announced a dead address | never a dead address; reaching the wrong edge it is told the right one and connects there (working in 4 s) |
 | The edge holding the port stopped | tunnel unreachable for as long as that edge is down | moved to the other edge after `TCP_TAKEOVER_MINUTES` (1 for the test): new port, working; the old edge, back, doesn't reopen the old port |
+
+**Edge failure drill with custom domains (staging, 2026-11-01)**, custom-domain agents on both edges as the worker runs them, a visitor requesting the custom domain and an app subdomain once a second through real DNS:
+
+| Step | Result |
+|---|---|
+| jrok stopped on edge1 | 20 of 20 custom-domain requests through edge1 served (nginx's fallback over HTTPS) |
+| edge1, the DNS lease holder, powered off | out of DNS after 35 s; edge2 took the lease |
+| A new custom domain added through edge2 while edge1 was off | certificate issued |
+| edge1 powered on | it served the new domain's certificate 51 s after power-on, was back in DNS after 75 s, and had its agents back |
+| Visitor requests over the whole drill | custom domain 239 of 239, app 228 of 228 succeeded; 7 and 6 took about 5 s (the dead address tried first, before DNS dropped it) |
+
+**A worker machine dying (P30), staging:** a second worker's replica destroyed abruptly under requests through both edges: each edge closed it after 32–34 s and retried the request it held on the other replica; 400 of 400 requests succeeded, the one caught in flight on each edge after about 31 s. Before: 2.5 minutes, requests 504 after 120 s.
+
+**Do edges add capacity? (staging, 2026-11-01)** A 4 vCPU load droplet, the test app replicated on two machines, each replica on both edges; 200 connections per edge to `/api/data`, by IP so each edge gets its share:
+
+| | One edge | Two edges |
+|---|---|---|
+| Run 1 | 701 requests/s (edge at 100% CPU) | 1,150 (edges 88% and 93%; 72 of about 34,500 not 2xx) |
+| Run 2 | 708 | 1,274 (both edges at about 100%, no errors) |
+
+A third run was disturbed by a deploy and is left out. So capacity adds up with edges (1.6–1.8× here; the replicas, on 2 vCPU machines, were close to their own limit). DNS hands out the edges about evenly: of 40 queries, the first address was each edge 16–24 times from 1.1.1.1, 8.8.8.8 and Cloudflare itself.
+
+**Before shipping** (found comparing production with the branch): GeoIP role (P28), production's `MAX_REQUEST_BODY_MB` kept, base certificate by default (P29), and alerts to Telegram when an edge leaves or rejoins DNS, every edge looks down, or a rolling deploy stops (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`; none until they are set).
 
 ### Phase 4: More regions in Cambodia, about 2 weeks, after Phase 2 is stable
 
