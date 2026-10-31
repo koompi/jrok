@@ -110,10 +110,12 @@ function websocket(): Promise<void> {
       }, 75000);
     };
     ws.onmessage = (m) => {
-      got.push(String(m.data));
+      // Text the app sent must arrive as text: a browser hands binary over as
+      // a Blob, and JSON.parse(event.data) fails.
+      got.push(typeof m.data === "string" ? m.data : `(binary) ${Buffer.from(m.data as ArrayBuffer).toString()}`);
       if (got.length === 2) {
         // Record first: close() can fire onclose synchronously.
-        finish(true, got.join(" | "));
+        finish(!got.some((g) => g.startsWith("(binary)")), got.join(" | "));
         ws.close();
       }
     };
@@ -122,10 +124,14 @@ function websocket(): Promise<void> {
   });
 }
 
-await compression();
-await burst();
-await sse();
-await Promise.all([slow(), websocket()]);
+// A check that throws (a broken body, say) is a failure, not the end of the run.
+const guard = (name: string, check: () => Promise<void>) =>
+  check().catch((error) => record(name, false, `threw: ${error?.message ?? error}`));
+
+await guard("compression", compression);
+await guard("60 requests at once", burst);
+await guard("events stream", sse);
+await Promise.all([guard("70 s response", slow), guard("WebSocket", websocket)]);
 
 for (const r of results) console.log(`${r.ok ? "PASS" : "FAIL"}  ${r.check.padEnd(42)} ${r.detail}`);
 process.exit(results.every((r) => r.ok) ? 0 : 1);

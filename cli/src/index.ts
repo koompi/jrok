@@ -727,9 +727,11 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
       pendingWsMessages.delete(wsId);
     });
 
-    localWs.on('message', (data: Buffer | string) => {
+    // ws 8 hands every message over as a Buffer, text included; isBinary says
+    // which it was. Checking Buffer.isBuffer(data) instead sent every text
+    // message on as binary, so a browser got a Blob where it expected a string.
+    localWs.on('message', (data: Buffer, isBinary: boolean) => {
       // Forward message from local service to server
-      const isBinary = Buffer.isBuffer(data);
       serverWs.send(JSON.stringify({
         type: "ws_message_response",
         wsId,

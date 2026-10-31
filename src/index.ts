@@ -31,6 +31,7 @@ import * as planLimitService from "./services/planLimitService";
 import { PROXY_MODE } from "./config/proxyMode";
 import { allBaseDomains } from "./utils/baseDomains";
 import { getClientIp, setForwardedClientHeaders, trustedProxyHops, trustedProxyIps } from "./utils/clientIp";
+import { stripPeerHeaders } from "./utils/peerLink";
 import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "./utils/wsFlowControl";
 import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
 import {
@@ -200,6 +201,7 @@ async function handleWebSocketTunnel(
   // Same rule as plain HTTP: the app sees the address jrok verified, not a
   // forwarded-for chain whose first hop the visitor wrote.
   setForwardedClientHeaders(headers, clientIp);
+  stripPeerHeaders(headers);
 
   console.log(`🔌 WebSocket upgrade request for ${subdomain}${path}`);
 
@@ -278,6 +280,8 @@ async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Ag
     // Passing it on let any visitor choose the IP the customer's app logs,
     // rate-limits and allowlists on.
     setForwardedClientHeaders(headers, clientIp);
+    // The edge-to-edge key and host (utils/peerLink.ts) are ours, not the app's.
+    stripPeerHeaders(headers);
 
     try {
       // Read request body as raw bytes. Agents that advertise the "b64body"

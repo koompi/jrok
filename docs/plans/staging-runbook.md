@@ -15,6 +15,7 @@
 - **Update the agent:** rsync the repo to `/root/jrok/` on the test droplet (excluding `cli/dist`), run `npm install` in `/root/jrok/cli` (it builds `dist/index.js`, as workers do), then `systemctl restart stg-agent`.
 - **Logs:** `journalctl -u jrok -f` on an edge; `journalctl -u stg-agent -f` on the test droplet.
 - **Edge cache:** `scripts/staging/phase05-check.sh EDGE_IP` (needs the second test app, `stg-app2` + `stg-agent2@<edge-ip>`, for the collision check).
+- **Edges reaching each other over HTTPS (plan step 1.5):** `scripts/staging/peer-tls-check.sh` (15 checks, about 1 minute; restores the agent, jrok and the allowlist when done). For the Phase 0 checks with every request crossing edges, stop `stg-agent@<edge1-ip>` and pin the test droplet to edge1 before running `phase0-check.ts`.
 - **Measure:** `scripts/staging/edge-sample.sh SECONDS` on an edge (CPU split into jrok and nginx, plus connection states on port 3000); `box-sample.sh` on the test droplet (agent, app, autocannon); `probe.sh SECONDS URL EDGE_IP…` for availability through each edge during a failure test.
 - **Pinning:** the agent uses real DNS (either edge). To aim a test at one edge, use `curl --resolve`, or `/etc/hosts` on the test droplet, and remove the pin afterwards: the agent reconnects through whatever `/etc/hosts` says.
 
@@ -38,6 +39,7 @@
 |---|---|
 | `jrok-staging.koompi.cloud` | One A record per edge (round robin) |
 | `*.jrok-staging.koompi.cloud` | One A record per edge (round robin) |
+| `stg-edge1.jrok-staging.koompi.cloud`, `stg-edge2.…` | That edge alone: its `forward_host`, where the other edges forward to (plan step 1.5) |
 
 (`staging.koompi.cloud` is already taken by another server. `koompi.cloud` has a `*.koompi.cloud` wildcard; these explicit records take precedence over it for the staging names only.)
 
@@ -55,8 +57,8 @@ Create `ansible/inventory.staging.ini` and keep it out of git (it names your ser
 
 ```ini
 [jrok_servers]
-edge1 ansible_host=<edge1-ip> ansible_user=root vps_id=edge1 vps_region=sgp1 tcp_port_min=10000 tcp_port_max=13333 tcp_public_host=<edge1-ip>
-edge2 ansible_host=<edge2-ip> ansible_user=root vps_id=edge2 vps_region=sgp1 tcp_port_min=13334 tcp_port_max=16666 tcp_public_host=<edge2-ip>
+edge1 ansible_host=<edge1-ip> ansible_user=root vps_id=edge1 vps_region=sgp1 tcp_port_min=10000 tcp_port_max=13333 tcp_public_host=<edge1-ip> forward_host=stg-edge1.jrok-staging.koompi.cloud
+edge2 ansible_host=<edge2-ip> ansible_user=root vps_id=edge2 vps_region=sgp1 tcp_port_min=13334 tcp_port_max=16666 tcp_public_host=<edge2-ip> forward_host=stg-edge2.jrok-staging.koompi.cloud
 
 [jrok_servers:vars]
 domain_name=jrok-staging.koompi.cloud
@@ -72,6 +74,7 @@ export CLOUDFLARE_TOKEN=...                          # DNS edit on the staging z
 export MONGODB_URI='mongodb+srv://…/'                # the STAGING MongoDB
 export CERT_SYNC_API_KEY=$(openssl rand -hex 32)     # same value for every edge
 export JWT_SECRET=$(openssl rand -hex 32)            # at least 32 characters
+export JROK_PEER_KEY=$(openssl rand -hex 32)         # same for every edge; needed once every edge has a forward_host
 # jrok refuses to start in production mode without these; tunnel tests don't log in, so placeholders are fine.
 export KOOMPI_CLIENT_ID=staging KOOMPI_CLIENT_SECRET=staging
 export KOOMPI_REDIRECT_URI=https://jrok-staging.koompi.cloud/auth/callback DASHBOARD_URL=https://jrok-staging.koompi.cloud
@@ -192,4 +195,4 @@ Always undo step 4's firewall rule (`iptables -D` with the same arguments) when 
 
 **Not yet:** staging stays up while the plan's phases are built and tested on it.
 
-When it is no longer needed: destroy the droplets tagged `jrok-staging` (DigitalOcean bills by the hour), delete the four `jrok-staging` DNS records (marked "jrok staging, temporary" in Cloudflare), and revoke the DigitalOcean API token used to build it. The MongoDB goes with the test droplet. The edges hold a copy of production's Cloudflare token (`/etc/letsencrypt/secrets/cloudflare.ini`), which also goes with them.
+When it is no longer needed: destroy the droplets tagged `jrok-staging` (DigitalOcean bills by the hour), delete the six `jrok-staging` DNS records (four marked "jrok staging, temporary" in Cloudflare, two "jrok staging edge (FORWARD_URL)"), and revoke the DigitalOcean API token used to build it. The MongoDB goes with the test droplet. The edges hold a copy of production's Cloudflare token (`/etc/letsencrypt/secrets/cloudflare.ini`), which also goes with them.

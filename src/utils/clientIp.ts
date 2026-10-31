@@ -32,7 +32,11 @@
  * else then has its forwarding headers ignored.
  *
  *   TRUSTED_PROXY_IPS=127.0.0.1,::1,10.0.0.0/8
+ *
+ * A request another edge forwarded here with the peer key (utils/peerLink.ts)
+ * passed one more of our proxies, the sending edge, so it counts one hop more.
  */
+import { isFromPeer } from "./peerLink";
 
 export const DEFAULT_TRUSTED_PROXY_HOPS = 1;
 
@@ -140,7 +144,8 @@ export function getClientIp(
   options: ClientIpOptions = {}
 ): string {
   const headers = req instanceof Headers ? req : req.headers;
-  const hops = options.trustedHops ?? trustedProxyHops();
+  const configuredHops = trustedProxyHops();
+  const hops = options.trustedHops ?? (configuredHops > 0 && isFromPeer(headers) ? configuredHops + 1 : configuredHops);
   const socket = normalizeIp(socketIp);
 
   // Nothing in front of us: every header is the client's own claim.

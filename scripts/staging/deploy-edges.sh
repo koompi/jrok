@@ -6,7 +6,7 @@
 # Copies the repo to each edge's /root/jrok-staging/, then runs the playbook
 # with the given tags against ansible/inventory.staging.ini. Secrets come from
 # $JROK_STAGING_ENV (default ~/.config/jrok-staging/secrets.env): MONGO_PW,
-# CERT_SYNC_API_KEY, JWT_SECRET. The Cloudflare token is read from the
+# CERT_SYNC_API_KEY, JWT_SECRET, JROK_PEER_KEY. The Cloudflare token is read from the
 # production jrok server only when the certbot tag is requested.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -21,7 +21,7 @@ INVENTORY=ansible/inventory.staging.ini
 
 TESTBOX_PRIVATE_IP=${TESTBOX_PRIVATE_IP:-10.130.0.15}
 export MONGODB_URI="mongodb://jrok:${MONGO_PW}@${TESTBOX_PRIVATE_IP}:27017/?authSource=admin"
-export CERT_SYNC_API_KEY JWT_SECRET
+export CERT_SYNC_API_KEY JWT_SECRET JROK_PEER_KEY
 export KOOMPI_CLIENT_ID=staging KOOMPI_CLIENT_SECRET=staging
 export KOOMPI_REDIRECT_URI=https://jrok-staging.koompi.cloud/auth/callback DASHBOARD_URL=https://jrok-staging.koompi.cloud
 export CLOUDFLARE_TOKEN=""

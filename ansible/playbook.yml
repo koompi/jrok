@@ -34,8 +34,31 @@
     # the first base domain).
     jrok_base_domains: "{{ (base_domains | default(domain_name)).split(',') | map('trim') | list }}"
     jrok_ssl_cert_name: "{{ ssl_cert_name | default(jrok_base_domains[0]) }}"
+    # Edges reach each other over HTTPS (P10, src/utils/peerLink.ts) once every
+    # edge has a forward_host: its own name, an A record for that edge alone and
+    # covered by the wildcard certificate (e.g. "edge-a.public.koompi.cloud").
+    # Requests between edges carry JROK_PEER_KEY (`openssl rand -hex 32`, the
+    # same on every edge), and jrok's port is then closed to the other edges.
+    jrok_peer_key: "{{ lookup('env', 'JROK_PEER_KEY') }}"
+    jrok_peer_tls: "{{ groups['jrok_servers'] | length > 1 and groups['jrok_servers'] | map('extract', hostvars) | selectattr('forward_host', 'defined') | list | length == groups['jrok_servers'] | length }}"
+    # The name nginx's fallback presents to every peer (TLS and Host). Every
+    # edge answers to it; it needs no DNS record.
+    jrok_peer_name: "{{ peer_name | default('jrok-peer.' ~ jrok_base_domains[0]) }}"
+    jrok_peer_gateway_port: 3001
+    # Addresses other edges connect from: their ansible_host, plus extras.
+    jrok_peer_sources: "{{ (groups['jrok_servers'] | map('extract', hostvars, 'ansible_host') | list) + (jrok_port_extra_sources | default([])) }}"
 
   pre_tasks:
+    - name: Edges reaching each other over HTTPS need the peer key
+      assert:
+        that:
+          - jrok_peer_key | length >= 32
+          - jrok_peer_key is match('^[A-Za-z0-9_-]+$')
+        fail_msg: "Every edge has a forward_host: set JROK_PEER_KEY (openssl rand -hex 32), the same for every edge"
+        quiet: true
+      when: jrok_peer_tls | bool
+      tags: ["always"]
+
     - name: Update apt cache
       apt:
         update_cache: yes
@@ -82,13 +105,19 @@
     # Add sources (e.g. a peer's public IP when ansible_host is a private one)
     # with jrok_port_extra_sources, or set jrok_port_public=true to keep the old
     # open-to-all rule.
-    - name: Setup firewall (UFW) - jrok port from jrok servers only
+    #
+    # With jrok_peer_tls the edges reach each other through nginx on 443
+    # instead, so these rules are removed. (Switching an existing multi-edge
+    # setup over: an edge not yet redeployed still forwards to port 3000 for
+    # the minute or so until it is.)
+    - name: Setup firewall (UFW) - jrok port from jrok servers only (removed with jrok_peer_tls)
       ufw:
         rule: allow
         port: "3000"
         proto: tcp
         from_ip: "{{ item }}"
-      loop: "{{ (groups['jrok_servers'] | map('extract', hostvars, 'ansible_host') | list) + (jrok_port_extra_sources | default([])) }}"
+        delete: "{{ jrok_peer_tls | bool }}"
+      loop: "{{ jrok_peer_sources }}"
       tags: ["firewall"]
 
     - name: Setup firewall (UFW) - remove the old open-to-all jrok port rule

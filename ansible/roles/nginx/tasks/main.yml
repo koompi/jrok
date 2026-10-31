@@ -31,6 +31,19 @@
     mode: '0700'
   tags: ["nginx"]
 
+- name: Edge-to-edge key for nginx's fallback to other edges (jrok_peer_tls)
+  # Only the master process reads configuration, as root.
+  copy:
+    content: |
+      proxy_set_header X-Jrok-Peer-Key "{{ jrok_peer_key }}";
+    dest: /etc/nginx/jrok-peer-key.conf
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  when: jrok_peer_tls | bool
+  tags: ["nginx"]
+
 - name: Create Nginx configuration
   copy:
     content: |
@@ -168,9 +181,14 @@
         # keep it short so traffic returns to it within seconds.
         upstream jrok {
           server 127.0.0.1:{{ jrok_port | default('3000') }} max_fails=3 fail_timeout=5s;
+          {% if jrok_peer_tls | bool %}
+          # The other edges, over HTTPS (the edge-to-edge gateway below).
+          server 127.0.0.1:{{ jrok_peer_gateway_port }} backup;
+          {% else %}
           {% for h in groups['jrok_servers'] | default([]) if h != inventory_hostname %}
           server {{ hostvars[h].jrok_peer_address | default(hostvars[h].ansible_host) }}:{{ jrok_port | default('3000') }} backup;
           {% endfor %}
+          {% endif %}
           keepalive 64;
         }
 
@@ -181,6 +199,67 @@
         upstream jrok_agents {
           server 127.0.0.1:{{ jrok_port | default('3000') }};
         }
+        {% if jrok_peer_tls | bool %}
+
+        # ============ Edge to edge (P10) ============
+        # Edges forward to each other over HTTPS, into the entry server block
+        # below, and nginx falls back to the other edges the same way. Every
+        # such request carries the shared peer key; jrok checks it before
+        # believing the visitor address the request carries (src/utils/peerLink.ts).
+
+        # This edge's jrok for requests other edges send. Never a backup: a
+        # forwarded request must not bounce on to yet another edge.
+        upstream jrok_this_edge {
+          server 127.0.0.1:{{ jrok_port | default('3000') }};
+          keepalive 32;
+        }
+
+        # The other edges' entry server blocks.
+        upstream jrok_peers {
+          {% for h in groups['jrok_servers'] if h != inventory_hostname %}
+          server {{ hostvars[h].jrok_peer_address | default(hostvars[h].ansible_host) }}:443 max_fails=1 fail_timeout=10s;
+          {% endfor %}
+          keepalive 16;
+        }
+
+        # Fallback gateway: upstream jrok's backup while the local jrok is down.
+        # Only this nginx connects here, so X-Real-IP is the visitor its front
+        # server block saw. TLS to the peer is verified against jrok_peer_name,
+        # which the wildcard certificate covers.
+        server {
+          listen 127.0.0.1:{{ jrok_peer_gateway_port }};
+          # An inner hop: the front server block adds the security headers and
+          # compresses, once. Any add_header here stops the http-level ones
+          # being inherited (they'd repeat); an empty one is never sent.
+          add_header X-Jrok-Inner-Hop "";
+          gzip off;
+
+          location / {
+            proxy_pass https://jrok_peers;
+            proxy_http_version 1.1;
+            proxy_ssl_server_name on;
+            proxy_ssl_name {{ jrok_peer_name }};
+            proxy_ssl_verify on;
+            proxy_ssl_verify_depth 3;
+            proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+            proxy_ssl_session_reuse on;
+
+            proxy_set_header Host {{ jrok_peer_name }};
+            proxy_set_header X-Jrok-Forwarded-Host $host;
+            proxy_set_header X-Real-IP $http_x_real_ip;
+            proxy_set_header X-Forwarded-For $http_x_real_ip;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            include /etc/nginx/jrok-peer-key.conf;
+            # The peer's "don't buffer" (live streams), on to the front server block.
+            proxy_pass_header X-Accel-Buffering;
+
+            proxy_connect_timeout 5s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 3600s;
+          }
+        }
+        {% endif %}
 
         # Redirect HTTP to HTTPS
         server {
@@ -305,6 +384,59 @@
             proxy_set_header Connection "";
           }
         }
+        {% if jrok_peer_tls | bool %}
+
+        # Edge-to-edge entry: requests other edges forward here (jrok) or fall
+        # back to (their nginx gateway). Only other edges may connect. Host
+        # names this edge; the visitor's is in X-Jrok-Forwarded-Host. Always
+        # this edge's jrok, never the edge cache: the sending edge has its own.
+        server {
+          listen 443 ssl http2;
+          server_name {{ forward_host }} {{ jrok_peer_name }};
+
+          ssl_certificate /etc/letsencrypt/live/{{ jrok_ssl_cert_name }}/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/{{ jrok_ssl_cert_name }}/privkey.pem;
+          ssl_protocols TLSv1.2 TLSv1.3;
+          ssl_ciphers HIGH:!aNULL:!MD5;
+          ssl_prefer_server_ciphers on;
+          ssl_session_cache shared:SSL:10m;
+          ssl_session_timeout 10m;
+
+          {% for source in jrok_peer_sources %}
+          allow {{ source }};
+          {% endfor %}
+          deny all;
+
+          # An inner hop: the front server block adds the security headers and
+          # compresses, once. Any add_header here stops the http-level ones
+          # being inherited (they'd repeat); an empty one is never sent.
+          add_header X-Jrok-Inner-Hop "";
+          gzip off;
+
+          location / {
+            if ($http_x_jrok_forwarded_host = "") {
+              return 400;
+            }
+            proxy_pass http://jrok_this_edge;
+            proxy_http_version 1.1;
+            proxy_set_header Host $http_x_jrok_forwarded_host;
+            proxy_set_header X-Forwarded-Host $http_x_jrok_forwarded_host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            # jrok's "don't buffer" for live streams (event streams, streamed
+            # pages) is obeyed here and also passed back: nginx drops it
+            # otherwise, and the sending edge's nginx would hold the stream.
+            proxy_pass_header X-Accel-Buffering;
+
+            proxy_connect_timeout 5s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 3600s;
+          }
+        }
+        {% endif %}
       }
     dest: /etc/nginx/nginx.conf
     backup: yes

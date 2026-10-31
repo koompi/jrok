@@ -1,6 +1,6 @@
 # Plan: Many jrok Edges Across Cambodia (Stateless Apps)
 
-**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 0.5, Phase 1 (except 1.5) and Phase 2.5–2.6 done on staging and passed on staging the same day (branch `feat/phase1-multi-edge`). **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
+**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 0.5, Phase 1 and Phase 2.5–2.6 done and passed on staging, 2026-10-31 to 2026-11-01 (branch `feat/phase1-multi-edge`). D1 decided 2026-11-01: no Cloudflare proxy (Phase 3, Option B). **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
 **Date:** 2026-10-30
 **Repos:** jrok (server, CLI, Ansible) and kconsole (deploy worker, backend)
 **Scope:** HTTP and WebSocket traffic to stateless apps (Git and image services).
@@ -97,7 +97,7 @@ Two edges built from the Ansible role on DigitalOcean SGP1, each 1 vCPU / 1 GB "
 | P7 | Every edge saves its own copy of the daily stats | `statsService.ts:448` (`insertOne` with a new id) | Daily totals counted once per edge. **Fixed in 1.2.** | 1 |
 | P8 | The request path's lookups (is the domain grouped, the group record, where another edge's agent is, that edge's address) are cached for 30–60 s, but a request that finds its entry expired waits on MongoDB itself, and fails when MongoDB does. Nothing falls back to what the edge already knows. | `agentGroupService.ts` (group caches), `crossServerService.ts` (route lookup) | **A MongoDB outage takes every app down once the caches expire, even with the agent connected to the edge** (measured on staging: 10 s wait, then 500). **Fixed in 1.3.** | 1 |
 | P9 | Forwarded requests have no hop limit (`X-Forwarded-From` is set but never read) | `crossServerService.ts:184` | If MongoDB's record of an agent is stale, two edges can pass a request back and forth until it times out | 1 |
-| P10 | Forwarding between edges uses plain `http://` / `ws://` | `crossServerService.ts:180`, `:270` | Customer traffic crosses the network unencrypted | 4 |
+| P10 | Forwarding between edges uses plain `http://` / `ws://` | `crossServerService.ts:180`, `:270` | Customer traffic crosses the network unencrypted. **Fixed in 1.5:** HTTPS with a shared key, port 3000 closed between edges. | 1 |
 | P11 | The CLI builds the printed public URL from the `--server` hostname | `cli/src/index.ts:196` | Per-edge connect addresses would print the wrong URL. **Avoided by `--edge` (1.6).** | 1 |
 | P12 | The worker runs one agent per replica, and its tunnel health check uses the public URL | `JrokService.ts:258`, `:663` | With several edges, DNS picks one at random, so the worker can't tell which edge lost a tunnel | 1 |
 | P13 | The TCP tunnel hostname (`sgp1.private.koompi.cloud`) is the same server that serves HTTP | `ansible/inventory.ini` | Publishes the HTTP edge's real IP, which matters once it sits behind Cloudflare | 3 |
@@ -105,6 +105,8 @@ Two edges built from the Ansible role on DigitalOcean SGP1, each 1 vCPU / 1 GB "
 | P16 | A restarted jrok cleaned the records of a server called "default" (it read `SERVER_ID`; the identity is `VPS_ID`), and deleted every server's group members and reset every group | `utils/mongodb.ts` (`cleanupStaleConnectionsOnStartup`) | A restarted edge believed it still held agents it didn't and answered "no agent" for about a minute instead of forwarding; with several edges, any one restart wiped the others' group state. **Fixed:** only this server's records, groups recounted; route lookups ignore records claiming this server. | 1 |
 | P17 | While an edge's jrok restarted, its nginx sent agents (pinned to it with `--edge`) to the peer through the fallback | nginx `location /ws/` | The edge stayed without its agents until those connections happened to drop. **Fixed:** agents use their own upstream with no fallback. | 2 |
 | P18 | The playbook restarted every edge at once | `ansible/playbook.yml` | No live jrok anywhere for a few seconds (nginx: "no live upstreams"). **Fixed:** `serial: 1`, each edge healthy before the next. | 2 |
+| P19 | The agent sent every WebSocket message from an app to the visitor as binary | `cli/src/index.ts` (`ws` 8 hands text over as a Buffer, with an `isBinary` argument the agent ignored) | A browser gets a Blob where it expects a string, so `JSON.parse(event.data)` fails. **In production** since WebSocket support was added (v2.2.0; still in `v2.6.5`). Found on staging 2026-11-01; `phase0-check.ts` missed it by reading frames with `String()`. **Fixed** in the CLI (reaches workers with the CLI rollout); the check now requires text frames. | 0 |
+| P20 | A forwarded response's body was unzipped by `fetch` while its `Content-Encoding: gzip` went on to the visitor | `crossServerService.ts` (`forwardRequest`) | Every forwarded text response unreadable. Came with Phase 0.5 (the agent compresses in the tunnel); staging only, never shipped. **Fixed:** the body passes through untouched (`decompress: false`, test in `peerLink.test.ts`). | 0.5 |
 | P15 | When jrok stops but nginx keeps running, that edge answers 502, and DNS keeps sending visitors to it | nginx `upstream jrok` lists only the local jrok | With two edges in DNS, about half of visitors fail until jrok is back or the edge leaves DNS (staging). **Fixed in 2.6** for jrok down; a whole machine down still needs health-checked DNS. | 2 |
 
 ---
@@ -243,7 +245,7 @@ Throughput moved within run-to-run variation (±10%) for text, where the edge's 
 | 1.2 | **Done.** The daily roll-up writes one record per org + tunnel + day (a fixed `_id`), with totals recomputed from the shared hourly records, so every edge writes the same values and running it twice changes nothing. The hourly counters were already safe (each edge adds its own counts). Test: `tests/dailyStats.test.ts`, which fails on the old code. | P7 |
 | 1.3 | **Done.** MongoDB off the request path. An edge holding a domain's replicas answers from them: whether the domain is grouped (their own `groupMode`) and which replica serves (round-robin over open sockets), with the group record only supplying the strategy and never waited for. Every request-path lookup now goes through `StaleCache` (`src/utils/staleCache.ts`): an expired answer is served while one background reload runs, and kept if MongoDB fails. Routes to other edges are cached for 3 s, and edge addresses for 5 s with health judged at load time. least-connections and weighted still read MongoDB; nothing uses them. | P8, P14 |
 | 1.4 | **Done.** One hop: an edge never forwards a request another edge forwarded to it (`X-Forwarded-From`); it answers 503 with `X-Jrok-Route: miss`. The sender then drops its cached route, looks it up again and retries once (GET and HEAD only, since a body can't be sent twice). An unreachable edge is retried the same way. | P9 |
-| 1.5 | Edge identity: `EDGE_ID`, `REGION`, `FORWARD_URL` (the HTTPS address other edges use to reach this one) environment variables, recorded in `serverHeartbeats`. Forwarding uses `FORWARD_URL`. | — |
+| 1.5 | **Done (staging, 2026-11-01).** Edges reach each other over HTTPS (`src/utils/peerLink.ts`, nginx role). Each edge has a `forward_host` (its own DNS name, covered by the wildcard certificate) and records `FORWARD_URL=https://<forward_host>` in `serverHeartbeats`; the others forward and relay WebSockets there instead of `http://<ip>:3000`. nginx takes those requests in a server block of their own (only the other edges' addresses; always the local jrok, never a backup or the cache), which restores the visitor's Host from `X-Jrok-Forwarded-Host`. Every request between edges carries the shared `JROK_PEER_KEY`; only with it does jrok count the sending edge as one more trusted proxy, so the visitor's address survives and nobody else can choose it. nginx's fallback while the local jrok is down goes the same way, through a local gateway (`127.0.0.1:3001`, TLS verified against `jrok-peer.<base>`). The key and the forwarded host never reach an app. Port 3000 is then closed between edges. Without a `forward_host` on every edge, nothing changes. Edge identity: `VPS_ID` and `VPS_REGION` already served; no `EDGE_ID` needed. | P10 |
 | 1.6 | **Done, differently:** the agent takes `--edge <host or IP>` (`JROK_EDGE`) and connects there, while TLS and the Host header keep using `--server`'s name. Certificates and the printed public URL stay right without per-edge certificates, and edge names need only plain DNS records (or IPs). | P11 |
 
 **kconsole deploy worker:**
@@ -279,16 +281,29 @@ Throughput moved within run-to-run variation (±10%) for text, where the edge's 
 
 With every replica on every edge, the case left open by the first MongoDB test (other edges stop forwarding to an edge whose heartbeat looks stale) no longer needs forwarding at all.
 
+**Step 1.5 (staging, 2026-11-01)**, with `scripts/staging/peer-tls-check.sh` (15 of 15). The test app's agent ran on edge2 only, so every request through edge1 crossed edges:
+
+| Check | Result |
+|---|---|
+| jrok's port 3000 between edges | Closed: forwarding, WebSocket relay and nginx's fallback all use HTTPS |
+| Visitor address after a forward, and through the fallback while edge1's jrok was stopped | The real one. An allowlist let the allowed visitor through edge1 and refused everyone else (403) |
+| Phase 0 checks with every request crossing edges | 8 of 8 (compression, 60 at once, live event stream, 70 s response, WebSocket idle for 75 s) |
+| A visitor at the edge-to-edge entry; an edge sending a wrong key | 403; the edge's own address, not the one it claimed |
+| Rolling deploy of nginx and jrok on both edges under load | 0 of 404 requests failed; every agent back on its own edge |
+| Forwarding throughput, 100 connections | 392–487 requests/s, against 353–526 over plain HTTP (the test droplet runs the load and the agent, so runs vary) |
+
+Found on the way: P19 (the agent turned WebSocket text into binary, in production), P20 (forwarded gzip responses broken since Phase 0.5, staging only), nginx dropping jrok's "don't buffer" header at the entry, which held event streams back until they ended (it is passed through now), and the security headers repeated on forwarded responses (the inner hops add none now).
+
 ### Phase 2: Second edge in production, about 3–5 days
 
 | Step | Work |
 |---|---|
 | 2.1 | **Staging first:** 2–3 DigitalOcean droplets as edges, with nginx and TLS on a test domain, plus a separate droplet that generates load. They must use **their own MongoDB, never the production Atlas cluster**: jrok always uses the database named `jrok`, so staging edges on the production cluster would join production. DigitalOcean has no Cambodian region, so these droplets test multi-edge behaviour and TLS cost per core; run the load test once more from a machine inside Cambodia for real latency. Spinning them up before Phase 1 is useful too: it records today's multi-server behaviour (P4, P9) as a baseline. **Built 2026-10-31 and kept running**; the baseline is in section 2. |
-| 2.2 | Build edge-2 with Ansible, ideally in Cambodia (decision **D2**). Edges reach each other over HTTPS (`wss://` for WebSockets), authenticated with a shared server key. |
+| 2.2 | Build edge-2 with Ansible, ideally in Cambodia (decision **D2**). Give every edge a `forward_host` (an A record for that edge alone, e.g. `edge-a.public.koompi.cloud`) and set `JROK_PEER_KEY`, so edges reach each other over HTTPS (built in 1.5). |
 | 2.3 | Certificates: install the wildcard `*.public` / `*.tunnel` certificates on both edges. Custom-domain certificates already sync from MongoDB every 5 minutes. HTTP-01 challenges must work on both edges, so either serve them from MongoDB or forward `/.well-known/acme-challenge/` to the edge that requested the certificate. |
 | 2.4 | **Rollout:** set `JROK_EDGES` on one worker, then all workers. Confirm every app has a tunnel on both edges. Then add edge-2's IP to DNS with Cloudflare health checks. |
 | 2.5 | **Failover drill:** stop edge-1 under test load, and measure failed requests and how long DNS keeps sending visitors to it. Then write a rolling deploy script: take an edge out of DNS, deploy, check it, put it back. **Deploys done on staging:** the playbook deploys one edge at a time (`serial`, P18), agents never take the fallback (P17), and a restarted edge cleans only its own records (P16). A rolling deploy of nginx and jrok on both edges dropped **0 of 200 requests through each edge**, and every agent ended on its own edge. Taking an edge out of DNS is still needed for a whole machine going down. |
-| 2.6 | **Done (staging).** When the local jrok is down, nginx sends requests to the other edges' jrok, listed as `backup` servers: in `nginx.conf`'s `jrok` upstream (Ansible) and in jrok's own upstream for custom domains (`JROK_PEERS`, set by Ansible, refreshed on every certificate reconcile run). The peer serves from its own agents and sees the real visitor IP. With one edge, both files are exactly as before. Still plain HTTP between edges (P10, Phase 4). Health-checked DNS (or Cloudflare) covers a whole machine going down. Staging: jrok stopped on edge1 for 41 s, **0 of 71 requests failed through either edge** (before: every request through edge1 got 502); an allowlist still saw the real visitor IP through the fallback. |
+| 2.6 | **Done (staging).** When the local jrok is down, nginx sends requests to the other edges' jrok, listed as `backup` servers: in `nginx.conf`'s `jrok` upstream (Ansible) and in jrok's own upstream for custom domains (`JROK_PEERS`, set by Ansible, refreshed on every certificate reconcile run). The peer serves from its own agents and sees the real visitor IP. With one edge, both files are exactly as before. Over HTTPS since 1.5. Health-checked DNS (or Cloudflare) covers a whole machine going down. Staging: jrok stopped on edge1 for 41 s, **0 of 71 requests failed through either edge** (before: every request through edge1 got 502); an allowlist still saw the real visitor IP through the fallback. |
 
 **Done when:**
 - The drill shows no app downtime beyond requests in flight.
@@ -296,28 +311,25 @@ With every replica on every edge, the case left open by the first MongoDB test (
 
 ### Phase 3: Front door and attack protection, about 3–5 days
 
-This phase depends on decision **D1**.
+**Decided 2026-11-01 (D1): Option B, no Cloudflare proxy.** The proxy only covers names in our own Cloudflare zone. Customers' own domains live in their DNS: a proxied record of ours is unusable for them unless we buy Cloudflare for SaaS (custom hostnames, billed per hostname beyond a free allowance), and every customer domain then depends on Cloudflare as well. One way for every domain is simpler.
 
-- **Option A: Cloudflare proxy** for `*.public` and `*.tunnel`. Cloudflare absorbs floods, adds a WAF and hides the edge IPs. Health-checked failover needs Cloudflare Load Balancing (a paid add-on). Custom domains would need Cloudflare for SaaS, or stay DNS-only.
-- **Option B: DNS-only with health checks.** Simpler, but nothing absorbs a flood.
-
-With either option:
+- **Option A (not chosen): Cloudflare proxy** for `*.public` and `*.tunnel`. Absorbs floods, adds a WAF, hides the edge IPs; custom domains would need Cloudflare for SaaS or stay DNS-only.
+- **Option B (chosen): DNS-only with health checks.** Nothing in front absorbs a large flood: rely on the data centre's DDoS protection and nginx's limits, and keep edges at N+1 so one can be lost.
 
 | Step | Work |
 |---|---|
-| 3.1 | Restore the real visitor IP: nginx `set_real_ip_from` with Cloudflare's IP ranges plus `real_ip_header CF-Connecting-IP`, and set jrok's trusted proxy hops (`src/utils/clientIp.ts`). Do this **before** proxying, or per-IP limits will start blocking Cloudflare itself. |
-| 3.2 | If proxied: firewall ports 80/443 so only Cloudflare's IP ranges can reach them. |
+| 3.1 | Health-checked DNS: a checker takes an edge's addresses out of the round-robin records when its `/health` fails from outside, and puts them back when it passes. A script against Cloudflare's DNS API (records stay DNS-only) is enough, run from at least two places so one bad network path can't remove a healthy edge; Cloudflare's Load Balancing add-on can do the same in DNS-only mode. TTL 60. |
+| 3.2 | Custom domains: customers point a CNAME at a name we control (e.g. `cname.koompi.cloud`), whose records 3.1 keeps healthy, never an A record to one edge's IP. Apex domains, which most DNS hosts can't CNAME: give them every edge's address (browsers try the next one when an address refuses) or a stable address per region. |
 | 3.3 | Move TCP tunnels (databases, SSH) to their own servers so the HTTP edges' IPs aren't published (P13). |
 | 3.4 | Admin and API endpoints (`/security/*`, admin): accept them only from kconsole's and the other edges' IPs. |
 | 3.5 | Agent endpoint: give it its own hostname, and limit agent registrations per API key and per IP. |
-| 3.6 | If proxied: use a Cloudflare Origin certificate on the edges, so they don't need certbot renewals for the wildcard. |
 
 ### Phase 4: More regions in Cambodia, about 2 weeks, after Phase 2 is stable
 
 | Step | Work |
 |---|---|
 | 4.1 | Region config: each worker gets `REGION`, and `JROK_EDGES` lists only its region's edges. |
-| 4.2 | Forwarding between regions: keep a map of domain → edges in memory, refreshed every 10 s and kept if MongoDB errors. Prefer healthy edges. Forward over HTTPS / `wss://` instead of plain `http://` / `ws://`, and have edges authenticate each other with a shared server key or mTLS (P10). |
+| 4.2 | Forwarding between regions: keep a map of domain → edges in memory, refreshed every 10 s and kept if MongoDB errors. Prefer healthy edges. HTTPS / `wss://` between edges with a shared key is already built (1.5). |
 | 4.3 | Location-aware replica placement in kconsole: workers report `region` and `datacenter` in their heartbeat (today the fields exist but are never filled in), and the replicas of one service spread across regions or data centers when possible (the GPT review's #2). |
 | 4.4 | DNS: start with all edges in rotation. Inside Cambodia, latency depends mostly on which ISPs and mobile carriers a data center connects to, so choose data centers well connected to the big carriers. Add GeoDNS later only if measurements show it helps. |
 | 4.5 | **Region drill:** stop every edge in one region. Apps with replicas in another region must keep serving. |
@@ -351,6 +363,7 @@ Measured on staging (section 2), on DigitalOcean "Regular" vCPUs. Faster CPUs do
 - **Plan bandwidth caps limit a replica before jrok does.** Each app container has a `tc` limit: 10 MB/s on Free and Pro, which is about 330 pages of 30 KB per second, and 100 MB/s on Enterprise (`backend/src/config/pricing.ts:521`).
 - **Example:** an app with 2,000 concurrent users usually makes about 400–2,000 requests/s, or 12–60 MB/s at 30 KB per request. On Pro that needs 2–6 replicas because of the bandwidth cap. At 300 requests/s each, it needs 2–7 production-sized edges, or 1–4 edges of 2 vCPU. The edge cache (Phase 0.5) takes static files, most of a page load's requests, off the tunnel and off jrok.
 - **Edges:** at least N+1 per region. Size each edge so the others can carry its load when it fails.
+- **Forwarded requests** (an edge without the app's agent passing it to one with it) cost the receiving edge about 2.0 ms of CPU instead of 1.4 ms since they go over HTTPS through its nginx (1.5): the extra hop's packets and wake-ups, not the encryption (profiled). With every replica on every edge in its region (1.7), forwarding is the exception.
 - **MongoDB:** agent heartbeats are batched into one write per edge every 10 s, however many agents there are, so more edges add very little database load.
 
 ---
@@ -372,7 +385,7 @@ Measured on staging (section 2), on DigitalOcean "Regular" vCPUs. Faster CPUs do
 
 | # | Question | Recommendation |
 |---|---|---|
-| D1 | Put Cloudflare's proxy in front of app traffic? | Yes for `*.public` and `*.tunnel`. Budget for the Load Balancing add-on. |
+| D1 | Put Cloudflare's proxy in front of app traffic? | **Decided 2026-11-01: no** (Phase 3, Option B). Customers' own domains can't use the proxy without Cloudflare for SaaS; DNS-only with health checks covers every domain the same way. |
 | D2 | Where does edge-2 go? | A data center in Cambodia that is well connected to the big ISPs and mobile carriers. |
 | D3 | Per-IP limit on app traffic: remove it, or raise it to what? | Remove it from app traffic. Rely on kconsole plan limits and Phase 3 for flood protection. |
 | D4 | How long may an app take to answer, and how long may a WebSocket stay quiet? | 120 s and 1 hour. |

@@ -127,10 +127,20 @@
       Environment=VPS_NAME={{ vps_id | default(ansible_hostname) }}
       Environment=VPS_REGION={{ vps_region | default('default') }}
       Environment=NGINX_PATH=/etc/nginx/sites-available
-      # The other edges' jrok, which nginx falls back to while this one is down
-      # (custom-domain vhosts; nginx.conf lists them itself). Set
-      # jrok_peer_address per host to use a private address instead.
+      # Where nginx falls back to while this jrok is down (custom-domain vhosts;
+      # nginx.conf lists it itself): nginx's edge-to-edge gateway with
+      # jrok_peer_tls, else the other edges' jrok port. Set jrok_peer_address
+      # per host to use a private address instead.
+      {% if jrok_peer_tls | bool %}
+      Environment=JROK_PEERS=127.0.0.1:{{ jrok_peer_gateway_port }}
+      # Other edges forward here, over HTTPS, proving themselves with the key
+      # (src/utils/peerLink.ts).
+      Environment=FORWARD_URL=https://{{ forward_host }}
+      Environment=JROK_PEER_KEY={{ jrok_peer_key }}
+      {% else %}
       Environment=JROK_PEERS={% for h in groups['jrok_servers'] | default([]) if h != inventory_hostname %}{{ hostvars[h].jrok_peer_address | default(hostvars[h].ansible_host) }}:{{ jrok_port | default('3000') }}{{ '' if loop.last else ',' }}{% endfor %}
+
+      {% endif %}
 
       # TCP port range (unique per server for multi-server setup)
       Environment=TCP_PORT_MIN={{ tcp_port_min | default('10000') }}

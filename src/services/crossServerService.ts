@@ -17,6 +17,7 @@ import {
 import { getCollections } from "../utils/mongodb";
 import { StaleCache } from "../utils/staleCache";
 import { AGENT_WS_BUFFER_LIMIT_BYTES, frameByteLength, isBacklogged } from "../utils/wsFlowControl";
+import { addressPeerRequest, ownForwardUrl, peerOrigin } from "../utils/peerLink";
 
 // =============================================================================
 // SERVER HEALTH TRACKING
@@ -26,6 +27,8 @@ interface ServerHealth {
   serverId: string;
   serverHost: string;
   serverPort: number;
+  /** Where other edges forward to (FORWARD_URL); unset means plain http to serverHost:serverPort. */
+  forwardUrl?: string;
   region?: string;
   lastHeartbeat: number;
   agentCount: number;
@@ -68,6 +71,7 @@ export async function sendServerHeartbeat(): Promise<void> {
         serverId: SERVER_ID,
         serverHost: SERVER_HOST,
         serverPort: SERVER_PORT,
+        forwardUrl: ownForwardUrl(),
         region: process.env.VPS_REGION || 'default',
         lastHeartbeat: now,
         agentCount: localAgentCount,
@@ -130,6 +134,7 @@ async function loadServer(serverId: string): Promise<ServerHealth | null> {
     serverId: server.serverId,
     serverHost: server.serverHost,
     serverPort: server.serverPort,
+    forwardUrl: server.forwardUrl || undefined,
     region: server.region,
     lastHeartbeat: server.lastHeartbeat,
     agentCount: server.agentCount || 0,
@@ -144,13 +149,16 @@ async function loadServer(serverId: string): Promise<ServerHealth | null> {
 // CROSS-SERVER REQUEST ROUTING
 // =============================================================================
 
+export interface PeerTarget {
+  serverId?: string;
+  serverHost: string;
+  serverPort: number;
+  forwardUrl?: string;
+}
+
 export interface RouteResult {
   isLocal: boolean;
-  targetServer?: {
-    serverId: string;
-    serverHost: string;
-    serverPort: number;
-  };
+  targetServer?: PeerTarget & { serverId: string };
   proxyUrl?: string;
 }
 
@@ -174,7 +182,7 @@ export async function getAgentRoute(agentId: string): Promise<RouteResult> {
   return {
     isLocal: false,
     targetServer: serverInfo,
-    proxyUrl: `http://${serverInfo.serverHost}:${serverInfo.serverPort}`,
+    proxyUrl: peerOrigin(serverInfo),
   };
 }
 
@@ -182,22 +190,27 @@ export async function getAgentRoute(agentId: string): Promise<RouteResult> {
  * Forward an HTTP request to another server
  */
 export async function forwardRequest(
-  targetServer: { serverHost: string; serverPort: number },
+  targetServer: PeerTarget,
   originalRequest: Request,
   path: string,
   clientIp?: string
 ): Promise<Response> {
-  const proxyUrl = `http://${targetServer.serverHost}:${targetServer.serverPort}${path}`;
+  // HTTPS to the peer's FORWARD_URL when it has one (P10, utils/peerLink.ts).
+  const proxyUrl = `${peerOrigin(targetServer)}${path}`;
 
   try {
     const headers = new Headers(originalRequest.headers);
     headers.set('X-Forwarded-From', SERVER_ID);
 
-    // The target resolves which tunnel this is from the Host header, so it must
-    // survive the hop verbatim — without it the target sees a request for
+    // The target resolves which tunnel this is from the visitor's Host, so it
+    // must survive the hop verbatim — without it the target sees a request for
     // "10.0.0.2:3000" and has no idea which customer domain was asked for.
-    const originalHost = originalRequest.headers.get('host');
-    if (originalHost) headers.set('host', originalHost);
+    addressPeerRequest(
+      targetServer,
+      originalRequest.headers.get('host'),
+      (name, value) => headers.set(name, value),
+      (name) => headers.delete(name),
+    );
 
     // Preserve the real visitor IP. This is not just for logs: per-tunnel IP
     // allow/block lists are evaluated on the target, and the target sees THIS
@@ -236,6 +249,11 @@ export async function forwardRequest(
       body: hasBody ? originalRequest.body : undefined,
       // Required by fetch whenever body is a stream.
       ...(hasBody ? { duplex: 'half' } : {}),
+      // Pass the body on exactly as the peer sent it. fetch would otherwise
+      // unzip a gzip response (the agent compresses in the tunnel, Phase 0.5)
+      // while its Content-Encoding: gzip header went on to the visitor, who
+      // then failed to unzip plain text.
+      decompress: false,
     } as RequestInit);
 
     // Return the proxied response
@@ -291,7 +309,7 @@ export function routeMissResponse(subdomain: string): Response {
  */
 export async function forwardToAgentServer(
   subdomain: string,
-  targetServer: { serverId?: string; serverHost: string; serverPort: number },
+  targetServer: PeerTarget,
   req: Request,
   path: string,
   clientIp?: string
@@ -332,12 +350,13 @@ export async function forwardToAgentServer(
  * what to say on the way in.
  */
 export function buildCrossServerWsTarget(
-  targetServer: { serverHost: string; serverPort: number },
+  targetServer: PeerTarget,
   originalRequest: Request,
   path: string,
   clientIp?: string
 ): { url: string; headers: Record<string, string> } {
-  const url = `ws://${targetServer.serverHost}:${targetServer.serverPort}${path}`;
+  // wss:// to the peer's FORWARD_URL when it has one (P10, utils/peerLink.ts).
+  const url = `${peerOrigin(targetServer, true)}${path}`;
 
   // Carry the request's headers across, minus the ones that belong to THIS
   // hop's handshake — the outgoing WebSocket generates its own. Host must
@@ -351,8 +370,14 @@ export function buildCrossServerWsTarget(
     headers[key] = value;
   });
 
-  const originalHost = originalRequest.headers.get('host');
-  if (originalHost) headers['host'] = originalHost;
+  addressPeerRequest(
+    targetServer,
+    originalRequest.headers.get('host'),
+    (name, value) => { headers[name] = value; },
+    (name) => {
+      for (const key of Object.keys(headers)) if (key.toLowerCase() === name.toLowerCase()) delete headers[key];
+    },
+  );
 
   headers['X-Forwarded-From'] = SERVER_ID;
   // Same rule as forwardRequest: the verified address, never the incoming chain.
@@ -592,8 +617,9 @@ async function lookupRoute(subdomain: string): Promise<RouteResult> {
           serverId: server.serverId,
           serverHost: server.serverHost,
           serverPort: server.serverPort,
+          forwardUrl: server.forwardUrl,
         },
-        proxyUrl: `http://${server.serverHost}:${server.serverPort}`,
+        proxyUrl: peerOrigin(server),
       };
     }
   }
@@ -623,8 +649,9 @@ async function lookupRoute(subdomain: string): Promise<RouteResult> {
           serverId: server.serverId,
           serverHost: server.serverHost,
           serverPort: server.serverPort,
+          forwardUrl: server.forwardUrl,
         },
-        proxyUrl: `http://${server.serverHost}:${server.serverPort}`,
+        proxyUrl: peerOrigin(server),
       };
     }
   }

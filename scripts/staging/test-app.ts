@@ -49,19 +49,26 @@ Bun.serve({
     if (url.pathname === "/stream-text") {
       // Text of unknown length, produced over time (like streamed SSR): it must
       // reach the visitor compressed AND as it is produced.
+      // Stops when the visitor hangs up: writing on would throw and end the app.
+      let gone = false;
       const stream = new ReadableStream({
         async start(controller) {
-          for (let i = 1; i <= 5; i++) {
+          for (let i = 1; i <= 5 && !gone; i++) {
             controller.enqueue(new TextEncoder().encode(`line ${i} ${"x".repeat(2000)}\n`));
             await Bun.sleep(500);
           }
-          controller.close();
+          if (!gone) controller.close();
         },
+        cancel() { gone = true; },
       });
       return new Response(stream, { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
     if (url.pathname === "/blob") {
       return new Response(blob, { headers: { "content-type": "application/octet-stream" } });
+    }
+    // What reached the app: the visitor address it is told, and nothing of jrok's own.
+    if (url.pathname === "/headers") {
+      return Response.json(Object.fromEntries(req.headers), { headers: { "cache-control": "no-store" } });
     }
     if (url.pathname === "/hits") {
       return Response.json(hits, { headers: { "cache-control": "no-store" } });
@@ -85,9 +92,10 @@ Bun.serve({
     // Six events, half a second apart.
     if (url.pathname === "/sse") {
       let n = 0;
+      let timer: ReturnType<typeof setInterval>;
       const stream = new ReadableStream({
         start(controller) {
-          const timer = setInterval(() => {
+          timer = setInterval(() => {
             controller.enqueue(new TextEncoder().encode(`data: event ${n} at ${Date.now()}\n\n`));
             if (++n === 6) {
               clearInterval(timer);
@@ -95,6 +103,8 @@ Bun.serve({
             }
           }, 500);
         },
+        // The visitor hung up: writing on would throw and end the app.
+        cancel() { clearInterval(timer); },
       });
       return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
     }
