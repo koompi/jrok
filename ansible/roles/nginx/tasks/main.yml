@@ -133,11 +133,16 @@
         limit_req_zone $binary_remote_addr zone=strict:10m rate=5r/s;
 
         # This server's own jrok. Each edge's nginx sends to its local jrok,
-        # which forwards to whichever edge holds an app's tunnel. (Listing
-        # every server here, as this template once did, made two hops and sent
-        # traffic between servers unencrypted.)
+        # which forwards to whichever edge holds an app's tunnel. The other
+        # edges are backups, used only while the local jrok is down, so its
+        # visitors are served by a peer instead of getting 502 (P15). (Listing
+        # every server as a regular member, as this template once did, made
+        # two hops for most requests.)
         upstream jrok {
           server 127.0.0.1:{{ jrok_port | default('3000') }} max_fails=3 fail_timeout=30s;
+          {% for h in groups['jrok_servers'] | default([]) if h != inventory_hostname %}
+          server {{ hostvars[h].jrok_peer_address | default(hostvars[h].ansible_host) }}:{{ jrok_port | default('3000') }} backup;
+          {% endfor %}
           keepalive 64;
         }
 

@@ -1,6 +1,6 @@
 # Plan: Many jrok Edges Across Cambodia (Stateless Apps)
 
-**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 1 steps 1.1–1.4 and 1.6, and the jrok half of 1.7, done and passed on staging the same day (branch `feat/phase1-multi-edge`). **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
+**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 1 steps 1.1–1.4 and 1.6, the jrok half of 1.7, and Phase 2.6, done and passed on staging the same day (branch `feat/phase1-multi-edge`). **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
 **Date:** 2026-10-30
 **Repos:** jrok (server, CLI, Ansible) and kconsole (deploy worker, backend)
 **Scope:** HTTP and WebSocket traffic to stateless apps (Git and image services).
@@ -102,7 +102,7 @@ Two edges built from the Ansible role on DigitalOcean SGP1, each 1 vCPU / 1 GB "
 | P12 | The worker runs one agent per replica, and its tunnel health check uses the public URL | `JrokService.ts:258`, `:663` | With several edges, DNS picks one at random, so the worker can't tell which edge lost a tunnel | 1 |
 | P13 | The TCP tunnel hostname (`sgp1.private.koompi.cloud`) is the same server that serves HTTP | `ansible/inventory.ini` | Publishes the HTTP edge's real IP, which matters once it sits behind Cloudflare | 3 |
 | P14 | Each forwarded request makes two uncached MongoDB lookups (which edge holds the agent, then that edge's address) | `crossServerService.ts` (`findServerForDomain`, `getServer`) | The forwarding edge maxes out at about 315 requests/s, 2.5× the CPU of a local request (staging). **Fixed in 1.3:** 558 requests/s at half the CPU. | 1 |
-| P15 | When jrok stops but nginx keeps running, that edge answers 502, and DNS keeps sending visitors to it | nginx `upstream jrok` lists only the local jrok | With two edges in DNS, about half of visitors fail until jrok is back or the edge leaves DNS (staging) | 2 |
+| P15 | When jrok stops but nginx keeps running, that edge answers 502, and DNS keeps sending visitors to it | nginx `upstream jrok` lists only the local jrok | With two edges in DNS, about half of visitors fail until jrok is back or the edge leaves DNS (staging). **Fixed in 2.6** for jrok down; a whole machine down still needs health-checked DNS. | 2 |
 
 ---
 
@@ -271,7 +271,7 @@ With every replica on every edge, the case left open by the first MongoDB test (
 | 2.3 | Certificates: install the wildcard `*.public` / `*.tunnel` certificates on both edges. Custom-domain certificates already sync from MongoDB every 5 minutes. HTTP-01 challenges must work on both edges, so either serve them from MongoDB or forward `/.well-known/acme-challenge/` to the edge that requested the certificate. |
 | 2.4 | **Rollout:** set `JROK_EDGES` on one worker, then all workers. Confirm every app has a tunnel on both edges. Then add edge-2's IP to DNS with Cloudflare health checks. |
 | 2.5 | **Failover drill:** stop edge-1 under test load, and measure failed requests and how long DNS keeps sending visitors to it. Then write a rolling deploy script: take an edge out of DNS, deploy, check it, put it back. |
-| 2.6 | When the local jrok is down, nginx sends requests to another edge instead of answering 502: list the other edges as `backup` servers in the `jrok` upstream, reached over HTTPS. Health-checked DNS (or Cloudflare) covers a whole machine going down (P15). |
+| 2.6 | **Done (staging).** When the local jrok is down, nginx sends requests to the other edges' jrok, listed as `backup` servers: in `nginx.conf`'s `jrok` upstream (Ansible) and in jrok's own upstream for custom domains (`JROK_PEERS`, set by Ansible, refreshed on every certificate reconcile run). The peer serves from its own agents and sees the real visitor IP. With one edge, both files are exactly as before. Still plain HTTP between edges (P10, Phase 4). Health-checked DNS (or Cloudflare) covers a whole machine going down. Staging: jrok stopped on edge1 for 41 s, **0 of 71 requests failed through either edge** (before: every request through edge1 got 502); an allowlist still saw the real visitor IP through the fallback. |
 
 **Done when:**
 - The drill shows no app downtime beyond requests in flight.

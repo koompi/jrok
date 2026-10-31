@@ -581,8 +581,8 @@ async function ensureCustomDomainVhost(
   changes: ConfigChanges
 ): Promise<"created" | "upgraded" | null> {
   const { readFile, mkdir } = await import("fs/promises");
-  const { nginxSitesPath, nginxConfigFileName, generateCustomDomainNginxConfig, vhostNeedsUpgrade,
-    upstreamFileUpdate, JROK_UPSTREAM_FILE } = await import("../utils/nginxConfig");
+  const { nginxSitesPath, nginxConfigFileName, generateCustomDomainNginxConfig, vhostNeedsUpgrade } =
+    await import("../utils/nginxConfig");
 
   const sitesPath = nginxSitesPath();
   const configPath = `${sitesPath}/${nginxConfigFileName(domain)}`;
@@ -593,17 +593,29 @@ async function ensureCustomDomainVhost(
 
   await mkdir(sitesPath, { recursive: true });
 
-  // Current vhosts proxy to the shared upstream, so make sure it is there too
-  // (written at most once per run).
-  const upstreamPath = `${sitesPath}/${JROK_UPSTREAM_FILE}`;
-  if (!changes.has(upstreamPath)) {
-    const update = upstreamFileUpdate(await readFile(upstreamPath, "utf8").catch(() => null));
-    if (update !== null) await writeConfigFile(changes, upstreamPath, update);
-  }
+  // Current vhosts proxy to the shared upstream, so make sure it is there too.
+  await refreshUpstreamFile(changes, { create: true });
 
   await writeConfigFile(changes, configPath, generateCustomDomainNginxConfig(domain, certDir));
   console.log(`✅ ${action === "created" ? "Created" : "Upgraded"} nginx vhost for custom domain: ${domain}`);
   return action;
+}
+
+/**
+ * Bring the shared upstream file (custom-domain vhosts proxy to it) up to date,
+ * at most once per run. Its peer list (JROK_PEERS) can change with no vhost
+ * changing, so every run checks it.
+ */
+async function refreshUpstreamFile(changes: ConfigChanges, options: { create?: boolean } = {}): Promise<void> {
+  const { readFile } = await import("fs/promises");
+  const { nginxSitesPath, upstreamFileUpdate, JROK_UPSTREAM_FILE } = await import("../utils/nginxConfig");
+  const upstreamPath = `${nginxSitesPath()}/${JROK_UPSTREAM_FILE}`;
+  if (changes.has(upstreamPath)) return;
+  const current = await readFile(upstreamPath, "utf8").catch(() => null);
+  // Missing: written with the first custom-domain vhost (create), not before.
+  if (current === null && !options.create) return;
+  const update = upstreamFileUpdate(current);
+  if (update !== null) await writeConfigFile(changes, upstreamPath, update);
 }
 
 type NginxReloadResult = "reloaded" | "test-failed" | "reload-failed" | "unavailable";
@@ -670,6 +682,7 @@ export async function syncAllCertificatesToDisk(): Promise<ReconcileStats> {
       .toArray();
 
     const configChanges: ConfigChanges = new Map();
+    await refreshUpstreamFile(configChanges);
     const ensureVhost = async (domain: string, certDir: string) => {
       if ((await ensureCustomDomainVhost(domain, certDir, configChanges)) === "upgraded") {
         stats.upgraded.push(domain);

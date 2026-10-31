@@ -10,7 +10,7 @@
 
 ## 0. Working with the running staging
 
-- **Hosts** are in `ansible/inventory.staging.ini` (not in git). The test droplet runs MongoDB (Docker `mongo`, private network, only the edges allowed by `mongo-firewall.service`), the test app (`stg-app.service`) and a group-mode agent for `app` (`stg-agent.service`, secrets in `/root/staging.env`). All of it comes back after a reboot.
+- **Hosts** are in `ansible/inventory.staging.ini` (not in git). The test droplet runs MongoDB (Docker `mongo`, private network, only the edges allowed by `mongo-firewall.service`), the test app (`stg-app.service`) and the same group-mode replica for `app` connected to each edge, as a worker will run it (`stg-agent@<edge-ip>.service`, with `--edge`; secrets in `/root/staging.env`). All of it comes back after a reboot.
 - **Deploy a branch to the edges:** `scripts/staging/deploy-edges.sh [tags]` (default `app`: rebuild and restart jrok; `nginx` for the nginx config). It copies the working tree to each edge and runs the playbook with the secrets from `~/.config/jrok-staging/secrets.env`. Done by hand, export the section 3 variables with the same values as before, or the playbook rewrites `jrok.service` with empty ones.
 - **Update the agent:** rsync the repo to `/root/jrok/` on the test droplet (excluding `cli/dist`), run `npm install` in `/root/jrok/cli` (it builds `dist/index.js`, as workers do), then `systemctl restart stg-agent`.
 - **Logs:** `journalctl -u jrok -f` on an edge; `journalctl -u stg-agent -f` on the test droplet.

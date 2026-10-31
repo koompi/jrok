@@ -13,6 +13,7 @@ import { join } from "path";
 import {
   generateCustomDomainNginxConfig,
   generateJrokUpstreamConfig,
+  jrokPeers,
   isUnmodifiedGeneratedVhost,
   upstreamFileUpdate,
   vhostNeedsUpgrade,
@@ -111,5 +112,44 @@ describe("shared upstream file", () => {
   test("keeps the upstream connection open for ordinary requests", () => {
     expect(wanted).toContain("keepalive");
     expect(wanted).toMatch(/''\s+"";/);
+  });
+});
+
+describe("peer edges as backups (JROK_PEERS)", () => {
+  const withPeers = (value: string | undefined, fn: () => void) => {
+    const saved = process.env.JROK_PEERS;
+    if (value === undefined) delete process.env.JROK_PEERS;
+    else process.env.JROK_PEERS = value;
+    try { fn(); } finally {
+      if (saved === undefined) delete process.env.JROK_PEERS;
+      else process.env.JROK_PEERS = saved;
+    }
+  };
+
+  test("with no peers the upstream file is exactly what a single edge always had", () => {
+    withPeers(undefined, () => {
+      expect(generateJrokUpstreamConfig()).toContain("    server 127.0.0.1:3000;\n    keepalive 64;\n}");
+    });
+  });
+
+  test("each peer is a backup server, used only while the local jrok is down", () => {
+    withPeers("10.130.0.14:3000, 10.130.0.15:3000", () => {
+      expect(generateJrokUpstreamConfig()).toContain(
+        "    server 127.0.0.1:3000;\n    server 10.130.0.14:3000 backup;\n    server 10.130.0.15:3000 backup;\n    keepalive 64;\n}");
+    });
+  });
+
+  test("anything that isn't host:port is dropped: it would be written into nginx config", () => {
+    withPeers("10.0.0.2:3000; include /etc/passwd,edge-b.internal:3000,bad host:1,[fd00::2]:3000", () => {
+      expect(jrokPeers()).toEqual(["edge-b.internal:3000", "[fd00::2]:3000"]);
+    });
+  });
+
+  test("a changed peer list rewrites jrok's upstream file", () => {
+    let current = "";
+    withPeers(undefined, () => { current = generateJrokUpstreamConfig(); });
+    withPeers("10.130.0.14:3000", () => {
+      expect(upstreamFileUpdate(current)).toContain("server 10.130.0.14:3000 backup;");
+    });
   });
 });
