@@ -215,3 +215,62 @@
   debug:
     msg: "{{ service_logs.stdout_lines }}"
   tags: ["app", "verify"]
+
+# Health-checked DNS (plan Phase 3.1, src/dnsHealth/main.ts): one checker per
+# edge. Each probes the other edges from outside; when most see one down, the
+# lease holder takes its address out of dns_health_records (comma-separated
+# names, e.g. "public.koompi.cloud,*.public.koompi.cloud") and puts it back
+# when they see it up. Edges are named by vps_id and reached on dns_address
+# (default ansible_host). Uses certbot's Cloudflare token; records stay DNS
+# only. dns_health_dry_run=true logs what it would change instead.
+- name: Health-checked DNS service (dns_health_records)
+  copy:
+    content: |
+      [Unit]
+      Description=jrok health-checked DNS
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=root
+      WorkingDirectory={{ app_dir }}
+      Environment=MONGODB_URI={{ mongodb_uri }}
+      Environment=DNS_HEALTH_CHECKER_ID={{ vps_id | default(inventory_hostname) }}
+      Environment=DNS_HEALTH_EDGES={% for h in groups['jrok_servers'] %}{{ hostvars[h].vps_id | default(h) }}={{ hostvars[h].dns_address | default(hostvars[h].ansible_host) }}{{ '' if loop.last else ',' }}{% endfor %}
+
+      Environment=DNS_HEALTH_RECORDS={{ dns_health_records }}
+      Environment=DNS_HEALTH_CHECK_HOST={{ jrok_base_domains[0] }}
+      Environment=CLOUDFLARE_API_TOKEN_FILE=/etc/letsencrypt/secrets/cloudflare.ini
+      Environment=DNS_HEALTH_DRY_RUN={{ dns_health_dry_run | default(false) | bool | lower }}
+      ExecStart=/root/.bun/bin/bun run src/dnsHealth/main.ts
+      Restart=always
+      RestartSec=5
+      SyslogIdentifier=jrok-dns-health
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/jrok-dns-health.service
+    owner: root
+    group: root
+    mode: '0644'
+  when: dns_health_records is defined
+  tags: ["app", "dns-health"]
+
+- name: Start health-checked DNS (restarted for new code; another checker holds the lease meanwhile)
+  systemd:
+    name: jrok-dns-health
+    state: restarted
+    enabled: yes
+    daemon_reload: yes
+  when: dns_health_records is defined
+  tags: ["app", "dns-health"]
+
+- name: Health-checked DNS off without dns_health_records
+  systemd:
+    name: jrok-dns-health
+    state: stopped
+    enabled: no
+  when: dns_health_records is not defined
+  failed_when: false
+  tags: ["app", "dns-health"]

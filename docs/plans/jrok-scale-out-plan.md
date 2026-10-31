@@ -1,6 +1,6 @@
 # Plan: Many jrok Edges Across Cambodia (Stateless Apps)
 
-**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 0.5, Phase 1 and Phase 2.5–2.6 done and passed on staging, 2026-10-31 to 2026-11-01 (branch `feat/phase1-multi-edge`). D1 decided 2026-11-01: no Cloudflare proxy (Phase 3, Option B). **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
+**Status:** Approach agreed 2026-10-30. Phase 0 built on 2026-10-31 (branch `feat/phase0-edge-fixes`) and passed on staging the same day: 2 edges, real TLS, kept running for the later phases ([runbook](staging-runbook.md)). Phase 0.5, Phase 1 and Phase 2.5–2.6 done and passed on staging, 2026-10-31 to 2026-11-01 (branch `feat/phase1-multi-edge`). D1 decided 2026-11-01: no Cloudflare proxy (Phase 3, Option B); Phase 3.1 (health-checked DNS) done on staging the same day. **Rollout rule:** nothing ships to production phase by phase; every phase is built and tested on staging, then the whole plan ships together.
 **Date:** 2026-10-30
 **Repos:** jrok (server, CLI, Ansible) and kconsole (deploy worker, backend)
 **Scope:** HTTP and WebSocket traffic to stateless apps (Git and image services).
@@ -318,11 +318,22 @@ Found on the way: P19 (the agent turned WebSocket text into binary, in productio
 
 | Step | Work |
 |---|---|
-| 3.1 | Health-checked DNS: a checker takes an edge's addresses out of the round-robin records when its `/health` fails from outside, and puts them back when it passes. A script against Cloudflare's DNS API (records stay DNS-only) is enough, run from at least two places so one bad network path can't remove a healthy edge; Cloudflare's Load Balancing add-on can do the same in DNS-only mode. TTL 60. |
-| 3.2 | Custom domains: customers point a CNAME at a name we control (e.g. `cname.koompi.cloud`), whose records 3.1 keeps healthy, never an A record to one edge's IP. Apex domains, which most DNS hosts can't CNAME: give them every edge's address (browsers try the next one when an address refuses) or a stable address per region. |
+| 3.1 | **Done (staging, 2026-11-01).** `src/dnsHealth/`: a checker on every edge (`jrok-dns-health.service`, Ansible, when the inventory sets `dns_health_records`) probes the other edges as a visitor would (HTTPS to their address, `/health`, every 10 s) and records its view in MongoDB; down after 3 failures in a row, up after 3 successes. The checker holding a lease in MongoDB changes the records through Cloudflare's DNS API (DNS only): an edge leaves when most checkers see it down and returns when they see it up. A checker never judges its own edge, a record is never emptied, only the edges' own addresses in the listed names are touched, and nothing changes if MongoDB or Cloudflare can't be reached. It uses certbot's Cloudflare token already on the edges. A checker outside the edges' data centres can join with the same program. |
+| 3.2 | Custom domains: customers already get a CNAME (an ALIAS / flattened CNAME at the apex) to their app's name under a base domain, which the wildcard record covers, so they follow 3.1. Before relying on failover in production, run `scripts/custom-domain-dns-audit.ts` (read-only) and ask the owners of any domain reported `pinned` (A records for one edge) to switch. |
 | 3.3 | Move TCP tunnels (databases, SSH) to their own servers so the HTTP edges' IPs aren't published (P13). |
 | 3.4 | Admin and API endpoints (`/security/*`, admin): accept them only from kconsole's and the other edges' IPs. |
 | 3.5 | Agent endpoint: give it its own hostname, and limit agent registrations per API key and per IP. |
+
+**3.1 drill (staging, 2026-11-01):** edge2 hard powered off through the DigitalOcean API while a visitor on the test droplet requested the app once a second through real DNS (`scripts/staging/dns-probe.sh`), then powered on again.
+
+| | Result |
+|---|---|
+| edge2 taken out of both records | 40 s after power-off (3 failed probes) |
+| The test droplet's resolver stops returning edge2 | 48 s after power-off |
+| Visitor requests | 322 of 322 succeeded. 6, all before DNS changed, took about 5 s: the client tried the dead address first, then the other |
+| edge2 back in both records | about 85 s after power-on (boot, then 3 good probes) |
+
+Browsers and curl try the next address when one doesn't answer, so a dead edge costs them a few seconds per new connection until DNS drops it. Clients that don't (some apps and older libraries) fail for up to about 40 s plus the TTL.
 
 ### Phase 4: More regions in Cambodia, about 2 weeks, after Phase 2 is stable
 
@@ -374,8 +385,8 @@ Measured on staging (section 2), on DigitalOcean "Regular" vCPUs. Faster CPUs do
 |---|---|
 | Workers only get CLI changes through `install.sh`, which installs from jrok branch `v2.6.5`. | Merge CLI changes into `v2.6.5` and reinstall on each worker. Keep the server compatible with old CLIs throughout. |
 | Hand-edited production nginx is overwritten by the next Ansible run. | Phase 0.1 comes first. |
-| DNS caching: some clients keep using a dead edge's IP until the TTL expires. | Use a low TTL (60 s), or Cloudflare proxy (Option A), which fails over without waiting for DNS. |
-| A custom domain with an A record pointing at `152.42.241.139` only ever reaches that edge. | Before relying on failover, list every custom domain whose DNS points at that IP and move it to a CNAME or flattened record. |
+| DNS caching: some clients keep using a dead edge's IP until the TTL expires. | TTL 60 s and health-checked DNS (3.1: a dead edge leaves DNS within about 40 s); meanwhile browsers try the other edges' addresses. |
+| A custom domain with an A record pointing at `152.42.241.139` only ever reaches that edge. | Before relying on failover, run `scripts/custom-domain-dns-audit.ts` and move every domain it reports `pinned` to a CNAME or flattened record (3.2). |
 | Two agent processes per replica use more memory on the workers (about 62 MB each). | Fine at today's scale (about 8 GB in total). Phase 5 replaces per-replica agents before it becomes a problem. |
 | Phase 1 changes many things in one release. | Ship each step on its own behind the existing single edge; most steps change nothing until a second edge exists. |
 
