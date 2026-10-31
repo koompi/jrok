@@ -14,6 +14,7 @@
 - **Deploy a branch to the edges:** `scripts/staging/deploy-edges.sh [tags]` (default `app`: rebuild and restart jrok; `nginx` for the nginx config). It copies the working tree to each edge and runs the playbook with the secrets from `~/.config/jrok-staging/secrets.env`. Done by hand, export the section 3 variables with the same values as before, or the playbook rewrites `jrok.service` with empty ones.
 - **Update the agent:** rsync the repo to `/root/jrok/` on the test droplet (excluding `cli/dist`), run `npm install` in `/root/jrok/cli` (it builds `dist/index.js`, as workers do), then `systemctl restart stg-agent`.
 - **Logs:** `journalctl -u jrok -f` on an edge; `journalctl -u stg-agent -f` on the test droplet.
+- **Edge cache:** `scripts/staging/phase05-check.sh EDGE_IP` (needs the second test app, `stg-app2` + `stg-agent2@<edge-ip>`, for the collision check).
 - **Measure:** `scripts/staging/edge-sample.sh SECONDS` on an edge (CPU split into jrok and nginx, plus connection states on port 3000); `box-sample.sh` on the test droplet (agent, app, autocannon); `probe.sh SECONDS URL EDGE_IP…` for availability through each edge during a failure test.
 - **Pinning:** the agent uses real DNS (either edge). To aim a test at one edge, use `curl --resolve`, or `/etc/hosts` on the test droplet, and remove the pin afterwards: the agent reconnects through whatever `/etc/hosts` says.
 

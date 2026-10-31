@@ -22,6 +22,15 @@
     - /etc/nginx/conf.d
   tags: ["nginx"]
 
+- name: Create the edge cache directory (proxy_cache_path in nginx.conf)
+  file:
+    path: /var/cache/nginx/jrok
+    state: directory
+    owner: www-data
+    group: root
+    mode: '0700'
+  tags: ["nginx"]
+
 - name: Create Nginx configuration
   copy:
     content: |
@@ -104,11 +113,28 @@
                    application/xml application/xml+rss application/rss+xml application/atom+xml
                    image/svg+xml image/x-icon application/vnd.ms-fontobject font/ttf font/otf;
 
+        # Edge cache (plan Phase 0.5.1): a response the app marks as shareable
+        # (Cache-Control: public or s-maxage, e.g. Next.js _next/static) is
+        # served from here and never crosses the tunnel. Keyed by host, so two
+        # apps' /app.js never meet. nginx itself never caches responses with
+        # Set-Cookie or marked private / no-store / no-cache; requests with an
+        # Authorization header are neither cached nor answered from cache.
+        proxy_cache_path /var/cache/nginx/jrok levels=1:2 keys_zone=jrok_cache:20m
+                         max_size={{ jrok_cache_max_size | default('1g') }} inactive=7d use_temp_path=off;
+        map $upstream_http_cache_control $jrok_not_shareable {
+            "~*(^|[ ,])(public|s-maxage=)" 0;
+            default 1;
+        }
+
         # Security headers
         add_header X-Frame-Options "SAMEORIGIN" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-XSS-Protection "1; mode=block" always;
         add_header Referrer-Policy "no-referrer-when-downgrade" always;
+        # HIT / MISS / STALE … for proxied responses; absent elsewhere (an empty
+        # value adds no header). Here rather than in a location: a location's
+        # own add_header would drop the security headers above.
+        add_header X-Cache-Status $upstream_cache_status always;
         
         # WebSocket upgrades. Ordinary requests get an empty Connection header,
         # which lets nginx reuse its connections to jrok (upstream keepalive);
@@ -214,6 +240,18 @@
             # WebSocket support
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection $connection_upgrade;
+
+            # Edge cache (see proxy_cache_path). While the app or its tunnel is
+            # down, cached files are still served (use_stale).
+            proxy_cache jrok_cache;
+            proxy_cache_key $scheme$host$request_uri;
+            proxy_no_cache $jrok_not_shareable $http_authorization;
+            proxy_cache_bypass $http_authorization;
+            # No proxy_cache_lock: it makes concurrent requests for one URL wait
+            # (up to 5 s) to learn whether the first answer is cacheable, which
+            # stalled busy uncacheable URLs on staging (p99 5.4 s).
+            proxy_cache_use_stale error timeout updating http_502 http_503 http_504;
+            proxy_cache_background_update on;
 
             # Timeouts. The read timeout is the longest quiet gap nginx allows,
             # so a visitor's idle WebSocket survives an hour. Plain HTTP is cut
