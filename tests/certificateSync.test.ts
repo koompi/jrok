@@ -6,6 +6,16 @@ import { join } from "path";
 const CERT_DIR_ROOT = await mkdtemp(join(tmpdir(), "jrok-certs-"));
 const NGINX_DIR = await mkdtemp(join(tmpdir(), "jrok-nginx-"));
 
+// Stand-ins for the nginx binary, so the outcome doesn't depend on whether the
+// machine running the tests has nginx installed. Reconcile calls
+// `$NGINX_BIN -t` and `$NGINX_BIN -s reload` when NGINX_BIN is set.
+const BIN_DIR = await mkdtemp(join(tmpdir(), "jrok-bin-"));
+const NGINX_OK = join(BIN_DIR, "nginx-ok");
+const NGINX_REJECTS_CONFIG = join(BIN_DIR, "nginx-rejects-config");
+await writeFile(NGINX_OK, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+await writeFile(NGINX_REJECTS_CONFIG, '#!/bin/sh\n[ "$1" = "-t" ] && { echo "nginx: [emerg] test failure" >&2; exit 1; }\nexit 0\n', { mode: 0o755 });
+process.env.NGINX_BIN = NGINX_OK;
+
 // These tests need a real MongoDB: the bugs covered here (driver v6 result
 // shapes, a $set/$inc path conflict) only reproduce against the server, never
 // against a mock. Point MONGODB_TEST_URI at a throwaway instance; the suite
@@ -164,6 +174,65 @@ test("an existing nginx vhost is never clobbered", async () => {
   await certSync.syncAllCertificatesToDisk();
 
   expect(await readFile(confPath, "utf8")).toBe("# hand-tuned by an operator\n");
+});
+
+/** A production-shaped v1 vhost (tests/fixtures/nginx) for `domain`, as reconcile would find it. */
+async function writeV1Vhost(domain: string, fixture = "v1-vhost.conf"): Promise<string> {
+  const text = (await readFile(join(import.meta.dir, "fixtures/nginx", fixture), "utf8"))
+    .replaceAll("{{CERT_DIR}}", join(CERT_DIR_ROOT, domain))
+    .replaceAll("{{DOMAIN}}", domain);
+  await writeFile(join(NGINX_DIR, `${domain.replace(/\./g, "_")}.conf`), text);
+  return text;
+}
+
+test("an unedited vhost from an older template is upgraded, with the shared upstream", async () => {
+  if (!mongoAvailable) return;
+  await writeV1Vhost("shop.customer.com");
+  const certs = getClient()!.db("jrok").collection("certificates");
+  await certs.insertOne(certDoc("shop.customer.com", 1) as any);
+
+  const stats = await certSync.syncAllCertificatesToDisk();
+
+  expect(stats.upgraded).toEqual(["shop.customer.com"]);
+  const vhost = await readFile(join(NGINX_DIR, "shop_customer_com.conf"), "utf8");
+  expect(vhost).toContain("# jrok-vhost-template: 2");
+  expect(vhost).toContain("proxy_pass http://jrok_local;");
+  expect(await readFile(join(NGINX_DIR, "00-jrok-upstream.conf"), "utf8")).toContain("upstream jrok_local");
+
+  // Nothing left to do on the next run.
+  expect((await certSync.syncAllCertificatesToDisk()).upgraded).toEqual([]);
+});
+
+test("a vhost an operator pointed elsewhere is never upgraded", async () => {
+  if (!mongoAvailable) return;
+  const original = await writeV1Vhost("own.customer.com", "v1-vhost-hand-edited.conf");
+  const certs = getClient()!.db("jrok").collection("certificates");
+  await certs.insertOne(certDoc("own.customer.com", 1) as any);
+
+  const stats = await certSync.syncAllCertificatesToDisk();
+
+  expect(stats.upgraded).toEqual([]);
+  expect(await readFile(join(NGINX_DIR, "own_customer_com.conf"), "utf8")).toBe(original);
+});
+
+test("when nginx -t rejects the result, every config file the run wrote is put back", async () => {
+  if (!mongoAvailable) return;
+  const original = await writeV1Vhost("shop.customer.com");
+  const certs = getClient()!.db("jrok").collection("certificates");
+  await certs.insertOne(certDoc("shop.customer.com", 1) as any);
+  await certs.insertOne(certDoc("new.customer.com", 1) as any); // no vhost yet: one gets created
+
+  process.env.NGINX_BIN = NGINX_REJECTS_CONFIG;
+  try {
+    const stats = await certSync.syncAllCertificatesToDisk();
+    expect(stats.upgraded).toEqual([]);
+  } finally {
+    process.env.NGINX_BIN = NGINX_OK;
+  }
+
+  expect(await readFile(join(NGINX_DIR, "shop_customer_com.conf"), "utf8")).toBe(original); // upgrade undone
+  expect(await exists(join(NGINX_DIR, "new_customer_com.conf"))).toBe(false);               // creation undone
+  expect(await exists(join(NGINX_DIR, "00-jrok-upstream.conf"))).toBe(false);
 });
 
 test("a vhost is created even when the certificate is already current", async () => {

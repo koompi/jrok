@@ -28,7 +28,7 @@
 
 - name: Check if certificate already exists
   stat:
-    path: "/etc/letsencrypt/live/{{ domain_name }}/fullchain.pem"
+    path: "/etc/letsencrypt/live/{{ jrok_ssl_cert_name }}/fullchain.pem"
   register: cert_exists
   tags: ["certbot"]
 
@@ -37,11 +37,11 @@
     certbot certonly \
       --dns-cloudflare \
       --dns-cloudflare-credentials /etc/letsencrypt/secrets/cloudflare.ini \
-      --email {{ certbot_email }} \
+      {% if certbot_email %}--email "{{ certbot_email }}"{% else %}--register-unsafely-without-email{% endif %} \
       --agree-tos \
       --non-interactive \
-      -d "{{ domain_name }}" \
-      -d "*.{{ domain_name }}"
+      --cert-name "{{ jrok_ssl_cert_name }}" \
+      {% for d in jrok_base_domains %}-d "{{ d }}" -d "*.{{ d }}" {% endfor %}
   when: not cert_exists.stat.exists
   tags: ["certbot"]
   register: certbot_result

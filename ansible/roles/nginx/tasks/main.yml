@@ -27,6 +27,7 @@
     content: |
       user www-data;
       worker_processes auto;
+      worker_rlimit_nofile 8192;
       pid /run/nginx.pid;
       error_log /var/log/nginx/error.log warn;
       
@@ -87,70 +88,82 @@
         tcp_nodelay on;
         keepalive_timeout 65;
         types_hash_max_size 2048;
-        client_max_body_size 20M;
-        
-        # Gzip compression
+        client_max_body_size {{ client_max_body_size | default('10M') }};
+
+        # Gzip compression. jrok's agent decompresses whatever the app sent
+        # before it crosses the tunnel, so this is the only compression a
+        # visitor gets: every text type a web app serves must be listed here.
+        # (text/html is always compressed; listing it only draws a warning.)
         gzip on;
         gzip_vary on;
+        gzip_proxied any;
         gzip_min_length 1000;
-        gzip_types text/plain text/css text/xml text/javascript
-                   application/x-javascript application/xml+rss;
-        
+        gzip_types text/plain text/css text/xml text/javascript text/csv
+                   application/javascript application/x-javascript
+                   application/json application/ld+json application/manifest+json
+                   application/xml application/xml+rss application/rss+xml application/atom+xml
+                   image/svg+xml image/x-icon application/vnd.ms-fontobject font/ttf font/otf;
+
         # Security headers
         add_header X-Frame-Options "SAMEORIGIN" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-XSS-Protection "1; mode=block" always;
         add_header Referrer-Policy "no-referrer-when-downgrade" always;
         
-        # Map for WebSocket upgrades
+        # WebSocket upgrades. Ordinary requests get an empty Connection header,
+        # which lets nginx reuse its connections to jrok (upstream keepalive);
+        # "close" here used to force a new connection for every request.
         map $http_upgrade $connection_upgrade {
             default upgrade;
-            ''      close;
+            ''      "";
         }
 
-        # Rate limiting
-        limit_req_zone $binary_remote_addr zone=general:10m rate=10r/s;
+        # Per-IP request limit (zone "general") for jrok's own hosts: its API
+        # and the agent endpoint. App traffic (a single-label subdomain of a
+        # base domain) gets an empty key, which nginx never counts: one page
+        # load makes dozens of requests, and many mobile users share one IP.
+        # Custom domains have their own server blocks, which set no limit.
+        map $host $jrok_limit_key {
+        {% for d in jrok_base_domains %}
+            ~^[^.]+\.{{ d | regex_escape }}$ "";
+        {% endfor %}
+            default $binary_remote_addr;
+        }
+        limit_req_zone $jrok_limit_key zone=general:10m rate=10r/s;
         limit_req_zone $binary_remote_addr zone=strict:10m rate=5r/s;
-        
-        # Extract subdomain for consistent hashing (session affinity)
-        map $host $subdomain {
-            ~^(?<sub>[^.]+)\.{{ domain_name | regex_escape }}$ $sub;
-            default "main";
-        }
-        
-        # Upstream - load balancing across all app servers
-        # Using consistent hash on subdomain ensures same agent always routes to same server
+
+        # This server's own jrok. Each edge's nginx sends to its local jrok,
+        # which forwards to whichever edge holds an app's tunnel. (Listing
+        # every server here, as this template once did, made two hops and sent
+        # traffic between servers unencrypted.)
         upstream jrok {
-          hash $subdomain consistent;
-          {% for host in groups['jrok_servers'] %}
-          server {{ hostvars[host]['ansible_host'] }}:3000 max_fails=3 fail_timeout=30s;
-          {% endfor %}
-          keepalive 32;
+          server 127.0.0.1:{{ jrok_port | default('3000') }} max_fails=3 fail_timeout=30s;
+          keepalive 64;
         }
-        
+
         # Redirect HTTP to HTTPS
         server {
           listen 80;
-          server_name {{ domain_name }} *.{{ domain_name }};
-          
+          server_name {% for d in jrok_base_domains %}{{ d }} *.{{ d }} {% endfor %};
+
           location /.well-known/acme-challenge/ {
             root /var/www/certbot;
           }
-          
+
           location / {
-            return 301 https://$server_name$request_uri;
+            return 301 https://$host$request_uri;
           }
         }
-        
+
         # HTTPS server
         server {
           listen 443 ssl http2;
-          server_name {{ domain_name }} *.{{ domain_name }};
-          
-          # SSL certificates
-          ssl_certificate /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem;
-          ssl_certificate_key /etc/letsencrypt/live/{{ domain_name }}/privkey.pem;
-          
+          server_name {% for d in jrok_base_domains %}{{ d }} *.{{ d }} {% endfor %};
+
+          # One wildcard certificate covers every base domain.
+          ssl_certificate /etc/letsencrypt/live/{{ jrok_ssl_cert_name }}/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/{{ jrok_ssl_cert_name }}/privkey.pem;
+
           # SSL configuration
           ssl_protocols TLSv1.2 TLSv1.3;
           ssl_ciphers HIGH:!aNULL:!MD5;
@@ -158,9 +171,9 @@
           ssl_session_cache shared:SSL:10m;
           ssl_session_timeout 10m;
           
-          # Rate limiting
+          # Rate limiting: jrok's own hosts only (see $jrok_limit_key)
           limit_req zone=general burst=20 nodelay;
-          
+
           # WebSocket support for agents
           location /ws/ {
             # No query strings in this log: old agents put their API key there.
@@ -191,16 +204,18 @@
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_set_header X-Forwarded-Host $server_name;
-            
+            proxy_set_header X-Forwarded-Host $host;
+
             # WebSocket support
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection $connection_upgrade;
-            
-            # Timeouts
+
+            # Timeouts. The read timeout is the longest quiet gap nginx allows,
+            # so a visitor's idle WebSocket survives an hour. Plain HTTP is cut
+            # off sooner by jrok itself (TUNNEL_REQUEST_TIMEOUT_MS to first byte).
             proxy_connect_timeout 60s;
             proxy_send_timeout 60s;
-            proxy_read_timeout 60s;
+            proxy_read_timeout 3600s;
           }
           
           # Health check endpoint
@@ -225,6 +240,9 @@
       }
     dest: /etc/nginx/nginx.conf
     backup: yes
+    # Never install a config nginx would reject (every include path is absolute).
+    validate: nginx -t -c %s
+  register: nginx_conf
   tags: ["nginx"]
 
 - name: Test Nginx configuration
@@ -243,6 +261,15 @@
     state: started
     enabled: yes
     daemon_reload: yes
+  tags: ["nginx"]
+
+- name: Reload Nginx so a changed configuration takes effect
+  # "started" leaves a running nginx alone, including the one apt started with
+  # its default config, so without this the file above never went live.
+  systemd:
+    name: nginx
+    state: reloaded
+  when: nginx_conf.changed
   tags: ["nginx"]
 
 - name: Verify Nginx is running

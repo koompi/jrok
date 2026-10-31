@@ -43,3 +43,5 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 public-binary
 
 cli/bin
+# Staging inventory names real servers (docs/plans/staging-runbook.md)
+ansible/inventory.staging.ini

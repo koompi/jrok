@@ -107,7 +107,8 @@
       Environment=PORT=3000
       Environment=MONGODB_URI={{ mongodb_uri }}
       Environment=API_KEY={{ cert_sync_api_key }}
-      Environment=BASE_DOMAIN={{ domain_name }}
+      Environment=BASE_DOMAIN={{ jrok_base_domains[0] }}
+      Environment=LEGACY_BASE_DOMAINS={{ jrok_base_domains[1:] | join(',') }}
       Environment=JWT_SECRET={{ jwt_secret }}
       Environment=KOOMPI_CLIENT_ID={{ koompi_client_id }}
       Environment=KOOMPI_CLIENT_SECRET={{ koompi_client_secret }}

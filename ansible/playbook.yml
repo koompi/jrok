@@ -9,14 +9,26 @@
   vars:
     # Change these to match your setup
     docker_version: "24.0"
-    certbot_email: "your-email@example.com"
+    # Let's Encrypt sends expiry notices here. Leave CERTBOT_EMAIL unset to
+    # register without one, as production did (it refuses example.com).
+    certbot_email: "{{ lookup('env', 'CERTBOT_EMAIL') }}"
     cloudflare_token: "{{ lookup('env', 'CLOUDFLARE_TOKEN') }}"
     mongodb_uri: "{{ lookup('env', 'MONGODB_URI') }}"
     cert_sync_api_key: "{{ lookup('env', 'CERT_SYNC_API_KEY') }}"
+    # jrok refuses to start in production with a JWT_SECRET shorter than 32 characters.
+    jwt_secret: "{{ lookup('env', 'JWT_SECRET') }}"
     koompi_client_id: "{{ lookup('env', 'KOOMPI_CLIENT_ID') }}"
     koompi_client_secret: "{{ lookup('env', 'KOOMPI_CLIENT_SECRET') }}"
     koompi_redirect_uri: "{{ lookup('env', 'KOOMPI_REDIRECT_URI') }}"
     dashboard_url: "{{ lookup('env', 'DASHBOARD_URL') }}"
+    # Base domains this server answers for, primary first. Set base_domains in
+    # the inventory as a comma-separated string
+    # ("public.koompi.cloud,tunnel.koompi.cloud"); it defaults to domain_name.
+    # The first is jrok's BASE_DOMAIN, the rest LEGACY_BASE_DOMAINS. One
+    # wildcard certificate covers them all; ssl_cert_name names it (defaults to
+    # the first base domain).
+    jrok_base_domains: "{{ (base_domains | default(domain_name)).split(',') | map('trim') | list }}"
+    jrok_ssl_cert_name: "{{ ssl_cert_name | default(jrok_base_domains[0]) }}"
 
   pre_tasks:
     - name: Update apt cache

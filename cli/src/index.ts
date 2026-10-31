@@ -475,7 +475,7 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
     // The timeout only covers time-to-response-headers. Once the local app
     // starts responding we stream for as long as it does (SSE, slow SSR) —
     // matching the server, which also clears its timeout on response start.
-    const localFetchTimeout = parseInt(process.env.TUNNEL_REQUEST_TIMEOUT_MS || '30000') - 2000;
+    const localFetchTimeout = parseInt(process.env.TUNNEL_REQUEST_TIMEOUT_MS || '120000') - 2000;
     const abortController = new AbortController();
     const localFetchTimer = setTimeout(() => abortController.abort(), localFetchTimeout);
     activeHttpStreams.set(requestId, abortController);
@@ -580,6 +580,23 @@ async function handleHttpRequest(message: any, ws: WebSocket, config: ClientConf
 // Store active WebSocket connections to local services
 const localWsConnections = new Map<string, WebSocket>();
 
+// Messages a visitor sent before our connection to the local service finished
+// opening. The visitor's socket is open as soon as the server accepts it, so
+// apps that send on open (login, subscribe) race this connection; dropping
+// those messages lost them. Bounded so a stuck connect can't grow it forever.
+const pendingWsMessages = new Map<string, Array<Buffer | string>>();
+const MAX_PENDING_WS_MESSAGES = 1000;
+
+/**
+ * A close code we may send. 1005, 1006 and 1015 are reserved for reporting
+ * (a peer that vanished arrives as 1006), and `ws` throws on them — which left
+ * the local connection open forever.
+ */
+function sendableCloseCode(code: unknown): number {
+  const c = Number(code);
+  return (c >= 1000 && c <= 1003) || (c >= 1007 && c <= 1014) || (c >= 3000 && c <= 4999) ? c : 1000;
+}
+
 // Handle WebSocket connection request from server
 async function handleWsConnect(message: any, serverWs: WebSocket, config: ClientConfig): Promise<void> {
   const { wsId, path, headers } = message;
@@ -594,10 +611,17 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
     const localWs = new WebSocket(wsUrl, {
       headers: headers || {},
     });
+    // Registered while still connecting, so messages and a close that arrive
+    // before it opens are queued or honoured rather than lost.
+    localWsConnections.set(wsId, localWs);
+    pendingWsMessages.set(wsId, []);
 
     localWs.on('open', () => {
       console.log(`✅ WS Connected: ${path} [${wsId}]`);
-      localWsConnections.set(wsId, localWs);
+      for (const payload of pendingWsMessages.get(wsId) ?? []) {
+        localWs.send(payload);
+      }
+      pendingWsMessages.delete(wsId);
     });
 
     localWs.on('message', (data: Buffer | string) => {
@@ -614,6 +638,7 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
     localWs.on('close', (code: number, reason: Buffer) => {
       console.log(`🔌 WS Closed: ${path} [${wsId}] (${code})`);
       localWsConnections.delete(wsId);
+      pendingWsMessages.delete(wsId);
 
       // Notify server about close
       serverWs.send(JSON.stringify({
@@ -627,6 +652,7 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
     localWs.on('error', (error: Error) => {
       console.error(`❌ WS Error: ${path} [${wsId}]:`, error.message);
       localWsConnections.delete(wsId);
+      pendingWsMessages.delete(wsId);
 
       // Notify server about error
       serverWs.send(JSON.stringify({
@@ -651,6 +677,17 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
 function handleWsMessage(message: any): void {
   const { wsId, data, isBinary } = message;
   const localWs = localWsConnections.get(wsId);
+  const payload = isBinary ? Buffer.from(data, 'base64') : data;
+
+  if (localWs?.readyState === WebSocket.CONNECTING) {
+    const pending = pendingWsMessages.get(wsId);
+    if (pending && pending.length < MAX_PENDING_WS_MESSAGES) {
+      pending.push(payload);
+    } else {
+      console.warn(`⚠️ Too many messages before [${wsId}] connected; dropping one`);
+    }
+    return;
+  }
 
   if (!localWs || localWs.readyState !== WebSocket.OPEN) {
     console.warn(`⚠️ No active WebSocket for [${wsId}]`);
@@ -658,8 +695,7 @@ function handleWsMessage(message: any): void {
   }
 
   try {
-    // Decode and forward message to local service
-    const payload = isBinary ? Buffer.from(data, 'base64') : data;
+    // Forward message to local service
     localWs.send(payload);
   } catch (error) {
     console.error(`❌ Error forwarding WS message [${wsId}]:`, error);
@@ -673,8 +709,15 @@ function handleWsClose(message: any): void {
 
   if (localWs) {
     console.log(`🔌 WS Close request: [${wsId}]`);
-    localWs.close(code || 1000, reason || '');
+    try {
+      localWs.close(sendableCloseCode(code), reason || '');
+    } catch (error) {
+      // close() can still throw (e.g. an over-long reason); never leave it open.
+      console.warn(`⚠️ WS close failed for [${wsId}], terminating:`, error);
+      localWs.terminate();
+    }
     localWsConnections.delete(wsId);
+    pendingWsMessages.delete(wsId);
   }
 }
 

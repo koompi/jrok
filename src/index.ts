@@ -76,10 +76,12 @@ process.on("uncaughtException", (err: any) => {
 // Module-level constants — created once, never re-allocated per request
 const WS_SKIP_HEADERS = new Set(['upgrade', 'connection', 'sec-websocket-key', 'sec-websocket-version', 'sec-websocket-extensions']);
 
-// HTTP tunnel timeout: how long the server waits for the agent (CLI) to respond.
-// 10s is too short for real backends (DB queries, file uploads, report generation).
-// Default 30s; set TUNNEL_REQUEST_TIMEOUT_MS in env for heavier workloads (e.g. 60000).
-const TUNNEL_REQUEST_TIMEOUT_MS = parseInt(process.env.TUNNEL_REQUEST_TIMEOUT_MS || '30000');
+// HTTP tunnel timeout: how long the server waits for the agent (CLI) to start
+// responding (streaming agents) or to respond (legacy agents). Default 120s:
+// slow reports, cold SSR and AI calls routinely take longer than the old 30s.
+// The CLI has a matching default; whichever side is shorter decides, so an
+// older CLI or server simply keeps its 30s.
+const TUNNEL_REQUEST_TIMEOUT_MS = parseInt(process.env.TUNNEL_REQUEST_TIMEOUT_MS || '120000');
 
 // Store pending requests waiting for agent responses
 const pendingRequests = new Map<string, {
@@ -775,6 +777,16 @@ async function startServer() {
                 responseHeaders.delete('Content-Encoding');
                 responseHeaders.delete('Content-Length');
                 responseHeaders.delete('Transfer-Encoding');
+
+                // nginx buffers proxied responses, which holds Server-Sent
+                // Events back from HTTP/1.1 clients (server-side fetch, SDKs)
+                // until the stream ends; browsers on HTTP/2 aren't affected.
+                // Stream them through unless the app chose otherwise. nginx
+                // strips this header before the response leaves it.
+                const contentType = (responseHeaders.get('Content-Type') || '').toLowerCase();
+                if (contentType.startsWith('text/event-stream') && !responseHeaders.has('X-Accel-Buffering')) {
+                  responseHeaders.set('X-Accel-Buffering', 'no');
+                }
 
                 const requestId = message.requestId;
                 const stream = new ReadableStream<Uint8Array>({

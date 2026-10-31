@@ -9,7 +9,7 @@ import { generateId, sanitizeDomainToSubdomain, generateShortSuffix } from "../u
 import { getTunnelByDomain } from "../utils/database";
 import dns from "dns/promises";
 import { writeFile, mkdir } from "fs/promises";
-import { nginxSitesPath, nginxConfigFileName, generateCustomDomainNginxConfig } from "../utils/nginxConfig";
+import { nginxSitesPath, nginxConfigFileName, generateCustomDomainNginxConfig, ensureJrokUpstreamFile } from "../utils/nginxConfig";
 
 // Get base domain from environment
 // New CNAME targets use the primary base domain; verification accepts any
@@ -558,6 +558,9 @@ async function setupCustomDomainNginx(domain: string, certPath: string): Promise
   try {
     // Ensure directory exists
     await mkdir(nginxSitesPath(), { recursive: true });
+
+    // The vhost proxies to the shared upstream, which must exist first.
+    await ensureJrokUpstreamFile(nginxSitesPath());
 
     // Generate and write nginx config
     const nginxConfig = generateCustomDomainNginxConfig(safeDomain, certPath);

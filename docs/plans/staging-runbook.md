@@ -1,0 +1,194 @@
+# Staging Runbook: Phase 0 and Multi-Edge Tests
+
+**For:** [jrok scale-out plan](jrok-scale-out-plan.md), Phase 0 and Phase 2.1
+**Branch:** `feat/phase0-edge-fixes` (jrok repo)
+**Goal:** prove the Phase 0 changes on real servers with real TLS before production, and record how today's code behaves with several edges (the baseline Phase 1 must improve on).
+
+**Status:** built 2026-10-31 and **kept running** for the later phases (2 edges + 1 test droplet, DigitalOcean tag `jrok-staging`). Results are in the plan, section 2. Section 0 covers day-to-day use; sections 1–7 cover building it from scratch.
+
+---
+
+## 0. Working with the running staging
+
+- **Hosts** are in `ansible/inventory.staging.ini` (not in git). The test droplet runs MongoDB (Docker `mongo`, private network, only the edges allowed by `mongo-firewall.service`), the test app (`stg-app.service`) and a group-mode agent for `app` (`stg-agent.service`, secrets in `/root/staging.env`). All of it comes back after a reboot.
+- **Deploy a branch to the edges:** rsync the repo to each edge's `/root/jrok-staging/` (command in section 4), then run the playbook with `--tags app` (rebuild and restart jrok) or `--tags nginx`. Export the section 3 variables first, with the same values as before, or the playbook rewrites `jrok.service` with empty ones.
+- **Update the agent:** rsync the repo to `/root/jrok/` on the test droplet (excluding `cli/dist`), run `npm install` in `/root/jrok/cli` (it builds `dist/index.js`, as workers do), then `systemctl restart stg-agent`.
+- **Logs:** `journalctl -u jrok -f` on an edge; `journalctl -u stg-agent -f` on the test droplet.
+- **Measure:** `scripts/staging/edge-sample.sh SECONDS` on an edge (CPU split into jrok and nginx, plus connection states on port 3000); `box-sample.sh` on the test droplet (agent, app, autocannon); `probe.sh SECONDS URL EDGE_IP…` for availability through each edge during a failure test.
+- **Pinning:** the agent uses real DNS (either edge). To aim a test at one edge, use `curl --resolve`, or `/etc/hosts` on the test droplet, and remove the pin afterwards: the agent reconnects through whatever `/etc/hosts` says.
+
+---
+
+## 1. What you need
+
+| Item | Notes |
+|---|---|
+| 2–3 edge droplets | Ubuntu 22.04 (same as production), 2 vCPU / 2–4 GB, region SGP1. |
+| 1 test droplet | Runs the test app, the jrok agent and the load tests. Ubuntu, 2 vCPU. |
+| **A MongoDB of its own** | A separate Atlas cluster (the free tier is enough) or `mongo:7` in Docker on the test droplet. **Never the production cluster:** jrok always uses the database named `jrok` whatever the URI says, so staging edges on the production cluster would join production. |
+| A test domain on Cloudflare | Examples below use `jrok-staging.koompi.cloud`, so apps live at `<name>.jrok-staging.koompi.cloud`. The certbot role needs a Cloudflare API token that can edit that zone's DNS. A token for `koompi.cloud` can also change production records, so prefer a separate zone for staging, or limit the token to *Zone → DNS → Edit* on that one zone and delete it afterwards. |
+| Ansible | Nothing to install: `uvx --from ansible ansible-playbook …` works. |
+
+---
+
+## 2. DNS (Cloudflare, DNS only, TTL 60)
+
+| Name | Points to |
+|---|---|
+| `jrok-staging.koompi.cloud` | One A record per edge (round robin) |
+| `*.jrok-staging.koompi.cloud` | One A record per edge (round robin) |
+
+(`staging.koompi.cloud` is already taken by another server. `koompi.cloud` has a `*.koompi.cloud` wildcard; these explicit records take precedence over it for the staging names only.)
+
+To aim a test at one edge, pin the names on the test droplet in `/etc/hosts`:
+
+```
+<edge1-ip>  jrok-staging.koompi.cloud app.jrok-staging.koompi.cloud
+```
+
+---
+
+## 3. Inventory and secrets
+
+Create `ansible/inventory.staging.ini` and keep it out of git (it names your servers):
+
+```ini
+[jrok_servers]
+edge1 ansible_host=<edge1-ip> ansible_user=root vps_id=edge1 vps_region=sgp1 tcp_port_min=10000 tcp_port_max=13333 tcp_public_host=<edge1-ip>
+edge2 ansible_host=<edge2-ip> ansible_user=root vps_id=edge2 vps_region=sgp1 tcp_port_min=13334 tcp_port_max=16666 tcp_public_host=<edge2-ip>
+
+[jrok_servers:vars]
+domain_name=jrok-staging.koompi.cloud
+app_dir=/opt/jrok
+ansible_become=yes
+```
+
+The playbook reads its secrets from the environment:
+
+```bash
+export CERTBOT_EMAIL=you@koompi.com                  # optional: unset registers without one, like production
+export CLOUDFLARE_TOKEN=...                          # DNS edit on the staging zone
+export MONGODB_URI='mongodb+srv://…/'                # the STAGING MongoDB
+export CERT_SYNC_API_KEY=$(openssl rand -hex 32)     # same value for every edge
+export JWT_SECRET=$(openssl rand -hex 32)            # at least 32 characters
+# jrok refuses to start in production mode without these; tunnel tests don't log in, so placeholders are fine.
+export KOOMPI_CLIENT_ID=staging KOOMPI_CLIENT_SECRET=staging
+export KOOMPI_REDIRECT_URI=https://jrok-staging.koompi.cloud/auth/callback DASHBOARD_URL=https://jrok-staging.koompi.cloud
+```
+
+Write down `CERT_SYNC_API_KEY`. It is also the server's admin key, and section 7 uses it.
+
+---
+
+## 4. Deploy the edges
+
+```bash
+# From the jrok repo on feat/phase0-edge-fixes: copy the code to each edge.
+for ip in <edge1-ip> <edge2-ip>; do
+  rsync -az --delete --exclude node_modules --exclude .git --exclude .env ./ root@$ip:/root/jrok-staging/
+done
+
+cd ansible
+uvx --from ansible ansible-playbook -i inventory.staging.ini playbook.yml
+```
+
+Check every edge answers. Expect `{"success":true,…}`:
+
+```bash
+for ip in <edge1-ip> <edge2-ip>; do curl -s --resolve jrok-staging.koompi.cloud:443:$ip https://jrok-staging.koompi.cloud/health; echo; done
+```
+
+---
+
+## 5. Test app and agent (on the test droplet)
+
+1. Install Bun and Node 18+, then copy the jrok repo over.
+2. Create an API key in the **staging** MongoDB (normally made through the dashboard, which needs a login):
+
+   ```bash
+   RAW=jrok_$(openssl rand -hex 24)
+   HASH=$(printf %s "$RAW" | sha256sum | cut -d' ' -f1)
+   mongosh "$MONGODB_URI" --eval "db.getSiblingDB('jrok').apiKeys.insertOne({id:'staging-key', key:'$HASH', name:'staging', organizationId:'staging-org', permissions:['*'], isActive:true, createdAt:Date.now()})"
+   echo "$RAW"   # the agent's key
+   ```
+
+3. Start the test app and an agent built from this branch, the way the deploy workers run it:
+
+   ```bash
+   bun scripts/staging/test-app.ts &
+   bun build cli/src/index.ts --target node --outfile /opt/jrok-cli.js
+   JROK_AUTH=$RAW node /opt/jrok-cli.js --server https://jrok-staging.koompi.cloud \
+     --port 18081 --domain app --group --instance-id staging-a
+   ```
+
+   The agent connects to whichever edge DNS gives it. The edge's log (`journalctl -u jrok`) shows the connection.
+
+---
+
+## 6. Phase 0 checks
+
+Run once per edge, pinning that edge in `/etc/hosts` (section 2). Every line must say PASS:
+
+```bash
+bun scripts/staging/phase0-check.ts --app https://app.jrok-staging.koompi.cloud --api https://jrok-staging.koompi.cloud
+```
+
+| Check | Today's production | Expected now |
+|---|---|---|
+| JSON, JavaScript and app-gzipped JavaScript arrive compressed | Uncompressed, even when the app compresses (the agent unpacks it) | `encoding gzip` |
+| 60 requests at once from one IP to an app | 21 succeed, 39 get 503 | All 60 succeed |
+| jrok's own host is still rate limited | Limited | Some 503s (protection kept) |
+| Event stream to an HTTP/1.1 client | Arrives all at once when it ends | Live, 0.5 s apart |
+| 70-second response | 504 (jrok gives up at 30 s, nginx at 60 s) | 200 |
+| WebSocket: message sent on open, then 75 s idle | First message can be lost; idle socket closed at 60 s | Both echoed |
+
+**Connection reuse (on an edge, during a load run):**
+
+```bash
+# on the test droplet
+autocannon -c 50 -d 30 https://app.jrok-staging.koompi.cloud/
+# on the edge, while it runs
+ss -tan '( sport = :3000 or dport = :3000 )' | awk 'NR>1{print $1}' | sort | uniq -c
+```
+
+Expect a few hundred `ESTAB` and almost no `TIME-WAIT`. Production today opens and closes one connection per request.
+
+**Capacity with TLS:** run `autocannon -c 100 -d 60` against `/app.js` and `/api/data`, and record requests/s alongside the edge's CPU (`top`: nginx and bun). Compare with the local numbers in the plan, which had no TLS.
+
+---
+
+## 7. Multi-edge baseline (today's code)
+
+These record how the current code behaves with several edges. Expect some to fail: that is the evidence for Phase 1. Note the results in the plan.
+
+Run `probe.sh` on the test droplet during tests 3 and 4: `bash probe.sh 150 https://app.jrok-staging.koompi.cloud/api/data <edge1-ip> <edge2-ip>`.
+
+| # | Do | Result on 2026-10-31 (today's code) |
+|---|---|---|
+| 1 | Request the app through the edge **without** the agent (`curl --resolve`), and run `phase0-check.ts` through it | Works, forwarded over plain HTTP; 8 of 8 checks pass |
+| 2 | Set an allowlist through the edge without the agent. The API takes the tunnel's **id**, not its name: get it with `docker exec mongo mongosh … --eval "db.getSiblingDB('jrok').tunnels.findOne({domain:'app',active:true}).id"`, then `curl -X POST https://jrok-staging.koompi.cloud/security/ip/<id> -H "Authorization: Bearer $CERT_SYNC_API_KEY" -H 'Content-Type: application/json' -d '{"mode":"allowlist","allowedIps":["203.0.113.1"]}'`. Request the app through both edges, then set `{"mode":"allow-all"}` through both. | Served through both edges: the rule reached only the edge that took the call, and that edge forwards without checking it (P4) |
+| 3 | `systemctl stop jrok` on the edge holding the agent | Agent on the other edge in 0.6 s; through it, down under 1 s. Through the stopped edge, 502 until jrok is back (P15). Start it again afterwards. |
+| 4 | On the edge holding the agent, block MongoDB: `iptables -I OUTPUT -p tcp -d <testbox-private-ip> --dport 27017 -j DROP` | App down through **both** edges within about 5 s, for as long as the block lasts; back as soon as it is removed (P8) |
+
+Always undo step 4's firewall rule (`iptables -D` with the same arguments) when you're done.
+
+---
+
+## 8. Promoting to production (after staging passes)
+
+1. **Back up first,** on the production edge: `tar czf /root/nginx-before-phase0.tgz /etc/nginx` and keep the current `dist/index.js` (see the jrok deploy notes).
+2. **Deploy the jrok server** the usual way. On startup it upgrades the custom-domain vhosts that are still exactly what jrok generated (66 of today's 73) and reloads nginx. If `nginx -t` rejects the result, it puts every file back and doesn't reload. It only visits domains whose certificate is in MongoDB, so a domain whose certificate isn't there keeps its old vhost.
+3. **Check the upgrade.** `grep -L 'jrok-vhost-template: 2' /etc/nginx/sites-enabled/*.conf` lists the vhosts not upgraded. Expect the 7 hand-edited ISI vhosts (`isiec`, `isigroup`, `isiland`, `isibds`, with and without `www`), plus any domain whose certificate isn't in MongoDB.
+4. **Apply `nginx.conf`** with the nginx role and production's values (`base_domains=public.koompi.cloud,tunnel.koompi.cloud`, `ssl_cert_name=tunnel.koompi.cloud`), e.g. `--tags nginx --limit <prod host>`. The role validates the file before installing it and reloads nginx only when it changed.
+5. **Update the CLI on workers.** Merge into `v2.6.5`, rebuild `cli/dist`, and reinstall on each worker. Until a worker is updated, its agents keep the old 30 s limit and the old WebSocket bugs. Nothing breaks: the shorter timeout wins.
+6. **Run `phase0-check.ts`** against a test app deployed on production.
+
+**Rollback:** restore `/root/nginx-before-phase0.tgz`, put back the previous `dist/index.js`, run `systemctl restart jrok`, then `nginx -t && systemctl reload nginx`.
+
+---
+
+## 9. Clean up
+
+**Not yet:** staging stays up while the plan's phases are built and tested on it.
+
+When it is no longer needed: destroy the droplets tagged `jrok-staging` (DigitalOcean bills by the hour), delete the four `jrok-staging` DNS records (marked "jrok staging, temporary" in Cloudflare), and revoke the DigitalOcean API token used to build it. The MongoDB goes with the test droplet. The edges hold a copy of production's Cloudflare token (`/etc/letsencrypt/secrets/cloudflare.ini`), which also goes with them.

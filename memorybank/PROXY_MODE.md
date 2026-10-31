@@ -66,7 +66,7 @@ deployments that have no kconsole in front of them.
 
 ## Known remaining limits (not plan policy)
 
-- `TUNNEL_REQUEST_TIMEOUT_MS` — 30s per request, env-tunable.
+- `TUNNEL_REQUEST_TIMEOUT_MS` — 120s to the first byte (30s before 2026-10-31), env-tunable; the CLI has the same default.
 - `MAX_PENDING_REQUESTS` — 10000 in-flight requests, memory safety.
 - Request bodies are fully buffered and base64-encoded over the agent
   WebSocket (~33% expansion, no streaming upload, no size cap). This is the

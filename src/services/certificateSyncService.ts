@@ -385,9 +385,13 @@ function calculateCertStatus(expiry: Date): "valid" | "expired" | "expiring" {
 // domain offline:
 //   1. Never downgrade. A local certificate is replaced only when the copy in
 //      MongoDB is provably newer. When that can't be proven, skip and log.
-//   2. Never clobber an existing vhost. A missing vhost is written; an existing
-//      one is left exactly as it is (it may have been hand-tuned).
-//   3. Never reload nginx on a config that fails `nginx -t`.
+//   2. Never clobber a hand-edited vhost. A missing vhost is written; an
+//      existing one is replaced only when it is still exactly what an older
+//      jrok template produced (utils/nginxConfig.ts, vhostNeedsUpgrade).
+//      Anything else is left exactly as it is.
+//   3. Never reload nginx on a config that fails `nginx -t`, and put back every
+//      config file this run wrote, so a bad template can't linger on disk and
+//      break the next reload.
 //   4. Never throw. Certificate sync failing must not take the process down —
 //      it fronts every tunnel on this server.
 
@@ -403,6 +407,38 @@ interface ReconcileStats {
   synced: string[];
   skipped: number;
   failed: string[];
+  /** Custom domains whose vhost was replaced with the current template. */
+  upgraded: string[];
+}
+
+/**
+ * Config files one reconcile run wrote, each mapped to what was there before
+ * (null when the file didn't exist), so the run can be undone if `nginx -t`
+ * rejects the result.
+ */
+type ConfigChanges = Map<string, string | null>;
+
+async function writeConfigFile(changes: ConfigChanges, path: string, content: string): Promise<void> {
+  const { readFile, writeFile } = await import("fs/promises");
+  if (!changes.has(path)) {
+    changes.set(path, await readFile(path, "utf8").catch(() => null));
+  }
+  await writeFile(path, content);
+}
+
+async function rollBackConfigChanges(changes: ConfigChanges): Promise<void> {
+  const { writeFile, rm } = await import("fs/promises");
+  for (const [path, previous] of changes) {
+    try {
+      if (previous === null) {
+        await rm(path, { force: true });
+      } else {
+        await writeFile(path, previous);
+      }
+    } catch (error) {
+      console.error(`❌ Could not roll back ${path}:`, error);
+    }
+  }
 }
 
 /**
@@ -529,63 +565,87 @@ async function writeCertificateFiles(certDir: string, cert: CertificateRecord): 
 }
 
 /**
- * Ensure a custom domain has an nginx vhost on this server.
+ * Ensure a custom domain has a current nginx vhost on this server.
  *
- * Returns true if a config was created. An existing file is never modified —
- * on the server that originally issued the domain, domainService already wrote
- * one, and it may since have been edited by hand.
+ * A missing vhost is created. An existing one is replaced only when it is
+ * still exactly what an older jrok template produced; on the server that
+ * originally issued the domain, domainService wrote it, and an operator may
+ * since have edited it (production has vhosts proxying straight to a
+ * customer's own server) — those are never touched.
+ *
+ * Returns what it did, recording every file it wrote in `changes`.
  */
-async function ensureCustomDomainVhost(domain: string, certDir: string): Promise<boolean> {
-  const { writeFile, mkdir, access } = await import("fs/promises");
-  const { nginxSitesPath, nginxConfigFileName, generateCustomDomainNginxConfig } =
-    await import("../utils/nginxConfig");
+async function ensureCustomDomainVhost(
+  domain: string,
+  certDir: string,
+  changes: ConfigChanges
+): Promise<"created" | "upgraded" | null> {
+  const { readFile, mkdir } = await import("fs/promises");
+  const { nginxSitesPath, nginxConfigFileName, generateCustomDomainNginxConfig, vhostNeedsUpgrade,
+    upstreamFileUpdate, JROK_UPSTREAM_FILE } = await import("../utils/nginxConfig");
 
   const sitesPath = nginxSitesPath();
   const configPath = `${sitesPath}/${nginxConfigFileName(domain)}`;
-  try {
-    await access(configPath);
-    return false; // Already present — leave it alone.
-  } catch {
-    // Not present; fall through and create it.
-  }
+  const current = await readFile(configPath, "utf8").catch(() => null);
+
+  const action = current === null ? "created" : vhostNeedsUpgrade(current, domain, certDir) ? "upgraded" : null;
+  if (!action) return null;
 
   await mkdir(sitesPath, { recursive: true });
-  await writeFile(configPath, generateCustomDomainNginxConfig(domain, certDir));
-  console.log(`✅ Created nginx vhost for custom domain: ${domain}`);
-  return true;
+
+  // Current vhosts proxy to the shared upstream, so make sure it is there too
+  // (written at most once per run).
+  const upstreamPath = `${sitesPath}/${JROK_UPSTREAM_FILE}`;
+  if (!changes.has(upstreamPath)) {
+    const update = upstreamFileUpdate(await readFile(upstreamPath, "utf8").catch(() => null));
+    if (update !== null) await writeConfigFile(changes, upstreamPath, update);
+  }
+
+  await writeConfigFile(changes, configPath, generateCustomDomainNginxConfig(domain, certDir));
+  console.log(`✅ ${action === "created" ? "Created" : "Upgraded"} nginx vhost for custom domain: ${domain}`);
+  return action;
 }
 
+type NginxReloadResult = "reloaded" | "test-failed" | "reload-failed" | "unavailable";
+
 /**
- * Validate and reload nginx. Returns false (without reloading) if the config
- * does not pass `nginx -t`, so a bad config leaves the running server alone.
+ * Validate and reload nginx. Does not reload when the config fails `nginx -t`,
+ * so a bad config leaves the running server alone.
+ *
+ * NGINX_BIN, when set, replaces both `nginx -t` and the reload (as
+ * `$NGINX_BIN -s reload`, skipping systemctl) — tests point it at a stand-in.
  */
-async function testAndReloadNginx(): Promise<boolean> {
+async function testAndReloadNginx(): Promise<NginxReloadResult> {
+  const nginxBin = process.env.NGINX_BIN;
+
   try {
-    const test = Bun.spawn(["nginx", "-t"], { stdout: "pipe", stderr: "pipe" });
+    const test = Bun.spawn([nginxBin || "nginx", "-t"], { stdout: "pipe", stderr: "pipe" });
     if ((await test.exited) !== 0) {
       const stderr = await new Response(test.stderr).text();
       console.error(`❌ nginx config test failed — NOT reloading. nginx is still serving the previous config:\n${stderr}`);
-      return false;
+      return "test-failed";
     }
 
-    const reload = Bun.spawn(["systemctl", "reload", "nginx"], { stdout: "ignore", stderr: "ignore" });
-    if ((await reload.exited) === 0) {
-      console.log("✅ nginx reloaded");
-      return true;
+    if (!nginxBin) {
+      const reload = Bun.spawn(["systemctl", "reload", "nginx"], { stdout: "ignore", stderr: "ignore" });
+      if ((await reload.exited) === 0) {
+        console.log("✅ nginx reloaded");
+        return "reloaded";
+      }
     }
 
-    const fallback = Bun.spawn(["nginx", "-s", "reload"], { stdout: "ignore", stderr: "ignore" });
+    const fallback = Bun.spawn([nginxBin || "nginx", "-s", "reload"], { stdout: "ignore", stderr: "ignore" });
     if ((await fallback.exited) === 0) {
       console.log("✅ nginx reloaded (fallback)");
-      return true;
+      return "reloaded";
     }
 
     console.error("❌ nginx reload failed — new certificates are on disk but not yet live");
-    return false;
+    return "reload-failed";
   } catch (error) {
     // nginx absent (dev machine, container without it) — not an error worth noise.
     console.log(`ℹ️  Skipping nginx reload: ${error instanceof Error ? error.message : String(error)}`);
-    return false;
+    return "unavailable";
   }
 }
 
@@ -596,7 +656,7 @@ async function testAndReloadNginx(): Promise<boolean> {
  * throws.
  */
 export async function syncAllCertificatesToDisk(): Promise<ReconcileStats> {
-  const stats: ReconcileStats = { synced: [], skipped: 0, failed: [] };
+  const stats: ReconcileStats = { synced: [], skipped: 0, failed: [], upgraded: [] };
 
   try {
     const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
@@ -609,7 +669,12 @@ export async function syncAllCertificatesToDisk(): Promise<ReconcileStats> {
       .find({}, { projection: { domain: 1, version: 1 } })
       .toArray();
 
-    let vhostCreated = false;
+    const configChanges: ConfigChanges = new Map();
+    const ensureVhost = async (domain: string, certDir: string) => {
+      if ((await ensureCustomDomainVhost(domain, certDir, configChanges)) === "upgraded") {
+        stats.upgraded.push(domain);
+      }
+    };
 
     for (const summary of summaries) {
       const domain = safeDomainOrNull(summary.domain ?? summary._id);
@@ -626,10 +691,11 @@ export async function syncAllCertificatesToDisk(): Promise<ReconcileStats> {
         const marker = await readSyncMarker(certDir);
         if (marker !== null && typeof summary.version === "number" && marker >= summary.version) {
           stats.skipped++;
-          // Still make sure the vhost exists — a cert can be in sync while the
-          // nginx config is missing (exactly the state a new server starts in).
+          // Still make sure the vhost exists and is current — a cert can be in
+          // sync while the nginx config is missing (exactly the state a new
+          // server starts in) or from an older template.
           if (isCustomDomain(domain)) {
-            vhostCreated = (await ensureCustomDomainVhost(domain, certDir)) || vhostCreated;
+            await ensureVhost(domain, certDir);
           }
           continue;
         }
@@ -650,7 +716,7 @@ export async function syncAllCertificatesToDisk(): Promise<ReconcileStats> {
         }
 
         if (isCustomDomain(domain)) {
-          vhostCreated = (await ensureCustomDomainVhost(domain, certDir)) || vhostCreated;
+          await ensureVhost(domain, certDir);
         }
       } catch (error) {
         stats.failed.push(domain);
@@ -659,13 +725,18 @@ export async function syncAllCertificatesToDisk(): Promise<ReconcileStats> {
     }
 
     // One reload for the whole batch, and only when something actually changed.
-    if (stats.synced.length > 0 || vhostCreated) {
-      await testAndReloadNginx();
+    if (stats.synced.length > 0 || configChanges.size > 0) {
+      if ((await testAndReloadNginx()) === "test-failed" && configChanges.size > 0) {
+        await rollBackConfigChanges(configChanges);
+        stats.upgraded = [];
+        console.error(`↩️  Put back the ${configChanges.size} nginx config file(s) this run wrote; nginx was not reloaded`);
+      }
     }
 
-    if (stats.synced.length > 0 || stats.failed.length > 0) {
+    if (stats.synced.length > 0 || stats.failed.length > 0 || stats.upgraded.length > 0) {
       console.log(
-        `🔐 Certificate reconcile: ${stats.synced.length} synced, ${stats.skipped} already current, ${stats.failed.length} failed`
+        `🔐 Certificate reconcile: ${stats.synced.length} synced, ${stats.skipped} already current, ` +
+        `${stats.failed.length} failed, ${stats.upgraded.length} vhost(s) upgraded`
       );
     }
   } catch (error) {
