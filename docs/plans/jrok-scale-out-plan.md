@@ -404,7 +404,7 @@ A third run was disturbed by a deploy and is left out. So capacity adds up with 
 | 4.4 | DNS: start with all edges in rotation. Inside Cambodia, latency depends mostly on which ISPs and mobile carriers a data center connects to, so choose data centers well connected to the big carriers. Add GeoDNS later only if measurements show it helps. |
 | 4.5 | **Region drill:** stop every edge in one region. Apps with replicas in another region must keep serving. |
 
-### Phase 5: One connector per worker, when replicas reach the thousands, about 3–4 weeks (rough)
+### Phase 5: One connector per worker, built and proven on staging 2026-11-01
 
 Today every replica runs its own Node agent, about 62 MB each even when idle (measured). With 2 home edges, that is 2 agents per replica:
 - **Today:** 66 agents, or 132 with 2 edges, is about 8 GB across all workers. That's fine.
@@ -414,12 +414,27 @@ Cloudflare's `cloudflared` solves the same problem with one process per machine.
 
 | Step | Work |
 |---|---|
-| 5.1 | A connector per worker: one process carries every app on the worker, with 2 connections to each home edge. The server treats each app on it as its own agent, so routing, groups and health checks work as they do now. Processes go from replicas × edges to workers × edges. |
-| 5.2 | Write it in Go or Rust. One process now carries a whole worker's traffic, and the Node agent tops out at about 2,700 pages of 30 KB per second per core. This is the one part of jrok where a rewrite pays off; the jrok server is not the bottleneck. |
-| 5.3 | Use the binary frames and tunnel compression from Phase 0.5, following the same spec. |
-| 5.4 | Roll out one worker at a time behind a flag, keeping per-replica agents as a fallback. **Drill:** kill the connector. Replicas on other workers keep serving, and the connector restarts (systemd) and reconnects every app within seconds. |
+| 5.1 | **Done** (`connector/`): one `jrok-connector` process per worker carries every tunnel on it. Each tunnel keeps its own connection to each edge and speaks the same agent protocol as the CLI, so routing, groups, health checks and the jrok servers are unchanged. Old and new agents can run side by side. |
+| 5.2 | **Done in Rust:** tokio, rustls and reqwest. The CLI's behaviour is matched: heartbeat 15 s, ping 30 s, a 75 s watchdog, equal-jitter backoff from 1 s to 30 s, streaming with backpressure, WebSocket, TCP, the `tcp_port_elsewhere` hint (3.3), `setCookie` (P31) and `@jrok:req` / `@jrok:tcp` events. |
+| 5.3 | **Done:** binary frames and tunnel compression follow the Phase 0.5 spec (`docs/protocol/tunnel-frames.md`). |
+| 5.4 | **Done:** the deploy worker (`worker/deploy/src/lib/jrokConnector.ts`) starts tunnels in the connector when it finds the binary. `JROK_CONNECTOR=false` goes back to a `jrok` process per tunnel, which needs only a worker restart. `install.sh` builds the binary next to the CLI. |
 
-**Trade-off:** if a connector dies, every app on that worker loses its tunnels until it restarts. This is the same as losing the worker, which replicas on other workers already cover.
+**Results (staging, 2026-11-01)** with `app` served through the connector (`stg-conn@<edge>`):
+- **Protocol:** Phase 0 checks 9/9 through each edge, edge cache 8/8, `peer-tls-check.sh` 15/15.
+- **Byte-exact transfers:**
+  - binary download and upload;
+  - a 3 MB stream, which became 89 KB gzipped.
+- **Responses:** HEAD, 302 and 204 are passed through unchanged.
+- **TCP:** 4 MB echoed exactly in 163 ms (Node agent: 325 ms).
+- **Scale:** 300 tunnels in one process connected in 4 s and use 24 MB in total (the Node agents would use about 18 GB). Idle CPU is 0.6% of a core. Requests are spread over all 6 replicas tried.
+- **CPU per request:** `/api/data`, gzip, 50 connections. The connector uses 0.9–1.2 ms of agent CPU per request; the Node agent uses 1.8–2.6 ms. The connector also served 10–20% more requests per second on the same 2-vCPU box (`cpu-per-request.sh`).
+- **Rolling deploy of both edges with the 300 tunnels connected:** each edge had its 153 agents back before the deploy moved on (P26), and nothing failed.
+- **Drill:** the connector was killed (SIGKILL) under the worker's real `JrokService`:
+  - every tunnel it carried (an HTTP tunnel on both edges and a TCP tunnel) was back on a new connector in 9.7 s, through `JrokService`'s own restart backoff;
+  - all 80 requests made after recovery succeeded.
+- **The connector never outlives the worker:** it exits 0.2 s after the worker's stdin closes, even while a tunnel is still connecting. A panic in one tunnel is reported to the worker as an exit, so the worker reopens that tunnel.
+
+**Trade-off:** if a connector dies, every app on that worker loses its tunnels until the worker opens them again, about 10 s. Replicas on other workers keep serving, as they do when a worker is lost.
 
 ---
 
@@ -446,7 +461,7 @@ Measured on staging (section 2), on DigitalOcean "Regular" vCPUs. Faster CPUs do
 | Hand-edited production nginx is overwritten by the next Ansible run. | Phase 0.1 comes first. |
 | DNS caching: some clients keep using a dead edge's IP until the TTL expires. | TTL 60 s and health-checked DNS (3.1: a dead edge leaves DNS within about 40 s); meanwhile browsers try the other edges' addresses. |
 | A custom domain with an A record pointing at `152.42.241.139` only ever reaches that edge. | Before relying on failover, run `scripts/custom-domain-dns-audit.ts` and move every domain it reports `pinned` to a CNAME or flattened record (3.2). |
-| Two agent processes per replica use more memory on the workers (about 62 MB each). | Fine at today's scale (about 8 GB in total). Phase 5 replaces per-replica agents before it becomes a problem. |
+| Two agent processes per replica use more memory on the workers (about 62 MB each). | The connector (Phase 5) carries every tunnel on a worker in one process: 300 tunnels took 24 MB. A worker without the binary keeps running one `jrok` process per tunnel. |
 | Phase 1 changes many things in one release. | Ship each step on its own behind the existing single edge; most steps change nothing until a second edge exists. |
 
 ---

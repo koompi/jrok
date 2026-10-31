@@ -51,6 +51,33 @@ PKG_FILE=$(npm pack --silent)
 
 echo -e "${YELLOW}→${NC} Installing globally..."
 npm install -g "$PKG_FILE" --silent
+
+# jrok-connector (connector/): one process carrying every tunnel on a KConsole
+# deploy-worker host, which uses it instead of a `jrok` process per tunnel when
+# it is on PATH. Built here, with cargo or else in Docker (every deploy worker
+# has it). JROK_CONNECTOR=skip leaves it out.
+if [ "${JROK_CONNECTOR:-}" != "skip" ]; then
+    cd "$TEMP_DIR/jrok/connector"
+    BUILT=""
+    if command -v cargo &> /dev/null; then
+        echo -e "${YELLOW}→${NC} Building jrok-connector (cargo)..."
+        cargo build --release --locked --quiet && BUILT=target/release/jrok-connector
+    elif command -v docker &> /dev/null; then
+        echo -e "${YELLOW}→${NC} Building jrok-connector (Docker, a few minutes the first time)..."
+        # Bullseye: glibc 2.31, so the binary runs on Ubuntu 20.04 and later.
+        docker run --rm -v "$PWD":/src -w /src rust:1.93-slim-bullseye \
+            sh -c 'cargo build --release --locked --quiet && chown -R '"$(id -u):$(id -g)"' target' \
+            && BUILT=target/release/jrok-connector
+        docker rmi rust:1.93-slim-bullseye > /dev/null 2>&1 || true
+    fi
+    if [ -n "$BUILT" ]; then
+        BIN_DIR="$(npm prefix -g)/bin"
+        if [ -w "$BIN_DIR" ]; then install -m 755 "$BUILT" "$BIN_DIR/jrok-connector"; else sudo install -m 755 "$BUILT" "$BIN_DIR/jrok-connector"; fi
+        echo -e "${GREEN}✓${NC} $("$BIN_DIR/jrok-connector" --version) in $BIN_DIR"
+    else
+        echo -e "${YELLOW}!${NC} jrok-connector not built (no cargo or Docker); deploy workers fall back to a jrok process per tunnel"
+    fi
+fi
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                   Installation Complete! 🎉                          ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════════════╝${NC}"

@@ -14,6 +14,8 @@ set -uo pipefail
 # shellcheck disable=SC1090
 . "${JROK_STAGING_ENV:-$HOME/.config/jrok-staging/secrets.env}"
 E1=159.223.71.81 E2=188.166.181.1 BOX=174.138.17.236
+# The test app's agent unit on the test droplet: stg-agent (Node CLI) or stg-conn (Rust connector).
+AGENT_UNIT=${AGENT_UNIT:-stg-agent}
 BASE=jrok-staging.koompi.cloud
 APP=app.$BASE
 pass=0 fail=0
@@ -43,12 +45,12 @@ allowlist() { # allowlist JSON-ARRAY (empty: allow all)
 cleanup() {
   allowlist ""
   on $E1 'systemctl start jrok'
-  on $BOX "sed -i '/$APP/d' /etc/hosts; systemctl start stg-agent@$E1"
+  on $BOX "sed -i '/$APP/d' /etc/hosts; systemctl start $AGENT_UNIT@$E1"
 }
 trap cleanup EXIT
 
 ME=$(curl -s -4 --max-time 10 ifconfig.me)
-on $BOX "systemctl stop stg-agent@$E1"
+on $BOX "systemctl stop $AGENT_UNIT@$E1"
 sleep 5
 
 # --- Forwarding (jrok to jrok) ---

@@ -1,0 +1,27 @@
+[package]
+name = "jrok-connector"
+version = "0.1.0"
+edition = "2021"
+description = "One process per worker carrying every jrok tunnel on it (plan Phase 5)"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+# TLS to the edges; ring as the one crypto provider (installed in main).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+futures-util = "0.3"
+serde_json = "1"
+base64 = "0.22"
+flate2 = "1"
+reqwest = { version = "0.12", default-features = false, features = ["stream", "gzip", "brotli", "deflate"] }
+rand = "0.8"
+url = "2"
+socket2 = "0.5"
+bytes = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

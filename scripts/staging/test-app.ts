@@ -66,6 +66,26 @@ Bun.serve({
     if (url.pathname === "/blob") {
       return new Response(blob, { headers: { "content-type": "application/octet-stream" } });
     }
+    // The request body back, byte for byte (upload integrity).
+    if (url.pathname === "/echo") {
+      return req.arrayBuffer().then((body) => new Response(body, { headers: { "content-type": "application/octet-stream", "cache-control": "no-store" } }));
+    }
+    if (url.pathname === "/redirect") {
+      return new Response(null, { status: 302, headers: { location: "/elsewhere" } });
+    }
+    if (url.pathname === "/no-content") return new Response(null, { status: 204 });
+    // 3 MB of text produced in pieces, no Content-Length (a big streamed export).
+    if (url.pathname === "/big-stream") {
+      const line = "row,".repeat(250) + "\n";
+      let n = 0;
+      const stream = new ReadableStream({
+        pull(controller) {
+          if (n++ >= 3000) return controller.close();
+          controller.enqueue(new TextEncoder().encode(line));
+        },
+      });
+      return new Response(stream, { headers: { "content-type": "text/csv" } });
+    }
     // Two cookies in one response, as a login commonly sets: both must arrive.
     if (url.pathname === "/cookies") {
       const headers = new Headers({ "content-type": "text/plain", "cache-control": "no-store" });
