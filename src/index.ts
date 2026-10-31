@@ -36,6 +36,7 @@ import * as acmeChallenge from "./services/acmeChallenge";
 import { serverKeyAllowedFrom } from "./utils/serverKeySources";
 import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "./utils/wsFlowControl";
 import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
+import { firstSubprotocol } from "./utils/wsSubprotocol";
 import {
   normalizeHostname,
   classifyHost,
@@ -204,6 +205,11 @@ async function handleWebSocketTunnel(
   // forwarded-for chain whose first hop the visitor wrote.
   setForwardedClientHeaders(headers, clientIp);
   stripPeerHeaders(headers);
+  // The visitor's first subprotocol, which Bun answers the visitor with: the
+  // agent offers the app exactly that one (utils/wsSubprotocol.ts).
+  const subprotocol = firstSubprotocol(req.headers.get("sec-websocket-protocol"));
+  delete headers["sec-websocket-protocol"];
+  if (subprotocol) headers["sec-websocket-protocol"] = subprotocol;
 
   console.log(`🔌 WebSocket upgrade request for ${subdomain}${path}`);
 
@@ -705,18 +711,24 @@ async function startServer() {
               `✅ Agent connected: ${finalDomain} (${localHost}:${localPort}) [${agent.id}] protocol: ${protocol}${wasModified ? ` (requested: ${domain})` : ''}${isCustomDomain ? ' [CUSTOM DOMAIN]' : ''}${groupInfo}`
             );
 
-            // Apply IP security settings if provided from CLI
+            // Apply IP security settings if provided from CLI (P33). In force
+            // at once under the domain, then saved against the tunnel once its
+            // record exists, which also files them under the tunnel id and
+            // reaches the other edges. Saved straight away, a new tunnel's
+            // rules missed its record (still being created): they stayed under
+            // the domain only, unsaved, and requests and TCP connections, which
+            // check the tunnel id, never saw them until the agent reconnected.
             if (ipSecurity && ipSecurity.mode) {
-              try {
-                await securityService.setTunnelIpSecurity(agent.tunnelId || finalDomain, {
-                  mode: ipSecurity.mode,
-                  allowedIps: ipSecurity.allowedIps || [],
-                  blockedIps: ipSecurity.blockedIps || [],
-                });
-                console.log(`🔐 IP Security applied for ${finalDomain}: mode=${ipSecurity.mode}`);
-              } catch (err) {
-                console.error(`⚠️ Failed to apply IP security for ${finalDomain}:`, err);
-              }
+              const rules = {
+                mode: ipSecurity.mode,
+                allowedIps: ipSecurity.allowedIps || [],
+                blockedIps: ipSecurity.blockedIps || [],
+              };
+              securityService.holdTunnelIpSecurity(finalDomain, rules);
+              void agentService.tunnelSetupDone(finalDomain)
+                .then(() => securityService.setTunnelIpSecurity(agent.tunnelId || finalDomain, rules))
+                .then(() => console.log(`🔐 IP Security applied for ${finalDomain}: mode=${ipSecurity.mode}`))
+                .catch((err) => console.error(`⚠️ Failed to save IP security for ${finalDomain} (in force on this server):`, err));
             }
 
             // Register agent for TCP forwarding if it's a TCP tunnel
@@ -1316,6 +1328,7 @@ async function startServer() {
                   type: 'cross-server',
                   targetUrl: target.url,
                   targetHeaders: target.headers,
+                  subprotocol: target.subprotocol,
                   subdomain,
                 },
               });
@@ -1469,6 +1482,7 @@ async function startServer() {
             {
               userAgent,
               apiKeyId: agent.apiKeyId,
+              domain: subdomain,
             }
           );
 

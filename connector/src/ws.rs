@@ -10,6 +10,9 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::error::{Error as TungsteniteError, ProtocolError, SubProtocolError, UrlError};
+use tokio_tungstenite::tungstenite::handshake::client::Request;
+use tokio_tungstenite::tungstenite::http::HeaderName;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
@@ -41,31 +44,55 @@ pub fn connect(conn: Arc<Conn>, message: &Value) {
     tokio::spawn(relay(conn, ws_id, path, headers, rx));
 }
 
-async fn relay(conn: Arc<Conn>, ws_id: String, path: String, headers: Value, mut rx: mpsc::Receiver<ToLocal>) {
-    let url = format!("ws://{}:{}{}", conn.cfg.local_host, conn.cfg.local_port, path);
-    let request = url.as_str().into_client_request().map(|mut req| {
-        if let Some(map) = headers.as_object() {
-            for (name, value) in map {
-                let lower = name.to_ascii_lowercase();
-                if lower == "host" || lower == "upgrade" || lower == "connection" || lower == "content-length" || lower.starts_with("sec-websocket-") {
-                    continue;
-                }
-                if let (Some(v), Ok(n)) = (value.as_str(), tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(lower.as_bytes())) {
-                    if let Ok(v) = v.parse() {
-                        req.headers_mut().insert(n, v);
-                    }
+/// The handshake to the app: the visitor's headers, and the subprotocol the
+/// server already told the visitor (its first choice, P32) when `offer`.
+fn local_request(url: &str, headers: &Value, offer: Option<&str>) -> Result<Request, String> {
+    let mut req = url.into_client_request().map_err(|e| e.to_string())?;
+    if let Some(map) = headers.as_object() {
+        for (name, value) in map {
+            let lower = name.to_ascii_lowercase();
+            if lower == "host" || lower == "upgrade" || lower == "connection" || lower == "content-length" || lower.starts_with("sec-websocket-") {
+                continue;
+            }
+            if let (Some(v), Ok(n)) = (value.as_str(), HeaderName::from_bytes(lower.as_bytes())) {
+                if let Ok(v) = v.parse() {
+                    req.headers_mut().insert(n, v);
                 }
             }
         }
-        req
-    });
-    let local = match request {
-        Ok(req) => tokio_tungstenite::connect_async(req).await.map(|(ws, _)| ws).map_err(|e| e.to_string()),
-        Err(e) => Err(e.to_string()),
+    }
+    if let Some(protocol) = offer {
+        let value = protocol.parse().map_err(|_| format!("invalid subprotocol {protocol}"))?;
+        req.headers_mut().insert("sec-websocket-protocol", value);
+    }
+    Ok(req)
+}
+
+async fn relay(conn: Arc<Conn>, ws_id: String, path: String, headers: Value, mut rx: mpsc::Receiver<ToLocal>) {
+    let url = format!("ws://{}:{}{}", conn.cfg.local_host, conn.cfg.local_port, path);
+    let offered = headers["sec-websocket-protocol"]
+        .as_str()
+        .and_then(|h| h.split(',').next())
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(String::from);
+    let mut local = match local_request(&url, &headers, offered.as_deref()) {
+        Ok(req) => tokio_tungstenite::connect_async(req).await.map(|(ws, _)| ws),
+        Err(e) => Err(TungsteniteError::Url(UrlError::UnableToConnect(e))),
     };
+    // An app that ignores subprotocols answers with none, which the handshake
+    // refuses: connect again without offering one.
+    if offered.is_some() && matches!(local, Err(TungsteniteError::Protocol(ProtocolError::SecWebSocketSubProtocolError(SubProtocolError::NoSubProtocol)))) {
+        conn.out.out(format!("🔁 WS {path} [{ws_id}]: the app ignores subprotocols; connecting again without one"));
+        local = match local_request(&url, &headers, None) {
+            Ok(req) => tokio_tungstenite::connect_async(req).await.map(|(ws, _)| ws),
+            Err(e) => Err(TungsteniteError::Url(UrlError::UnableToConnect(e))),
+        };
+    }
     let local = match local {
         Ok(ws) => ws,
         Err(error) => {
+            let error = error.to_string();
             conn.out.err(format!("❌ WS Error: {path} [{ws_id}]: {error}"));
             conn.ws_conns.lock().unwrap().remove(&ws_id);
             conn.send_json(json!({ "type": "ws_error", "wsId": ws_id, "error": error })).await;
@@ -146,5 +173,22 @@ mod tests {
         assert_eq!(super::sendable(1006), 1000);
         assert_eq!(super::sendable(4010), 4010);
         assert_eq!(super::sendable(1015), 1000);
+    }
+}
+
+#[cfg(test)]
+mod subprotocol_tests {
+    use serde_json::json;
+
+    #[test]
+    fn offers_the_app_only_the_protocol_the_visitor_was_given() {
+        let headers = json!({ "sec-websocket-protocol": "graphql-transport-ws", "cookie": "session=abc", "host": "app.example" });
+        let req = super::local_request("ws://127.0.0.1:1/", &headers, Some("graphql-transport-ws")).unwrap();
+        assert_eq!(req.headers()["sec-websocket-protocol"], "graphql-transport-ws");
+        assert_eq!(req.headers()["cookie"], "session=abc");
+        assert_eq!(req.headers()["host"], "127.0.0.1:1");
+
+        let again = super::local_request("ws://127.0.0.1:1/", &headers, None).unwrap();
+        assert!(again.headers().get("sec-websocket-protocol").is_none());
     }
 }

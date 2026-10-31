@@ -19,6 +19,7 @@ import { getCollections } from "../utils/mongodb";
 import { StaleCache } from "../utils/staleCache";
 import { AGENT_WS_BUFFER_LIMIT_BYTES, frameByteLength, isBacklogged } from "../utils/wsFlowControl";
 import { addressPeerRequest, ownForwardUrl, peerOrigin } from "../utils/peerLink";
+import { firstSubprotocol } from "../utils/wsSubprotocol";
 
 // =============================================================================
 // SERVER HEALTH TRACKING
@@ -356,13 +357,14 @@ export function buildCrossServerWsTarget(
   originalRequest: Request,
   path: string,
   clientIp?: string
-): { url: string; headers: Record<string, string> } {
+): { url: string; headers: Record<string, string>; subprotocol?: string } {
   // wss:// to the peer's FORWARD_URL when it has one (P10, utils/peerLink.ts).
   const url = `${peerOrigin(targetServer, true)}${path}`;
 
   // Carry the request's headers across, minus the ones that belong to THIS
-  // hop's handshake — the outgoing WebSocket generates its own. Host must
-  // survive, or the target cannot tell which tunnel the visitor asked for.
+  // hop's handshake — the outgoing WebSocket generates its own (it asks the
+  // peer for the visitor's first subprotocol). Host must survive, or the target
+  // cannot tell which tunnel the visitor asked for.
   const headers: Record<string, string> = {};
   originalRequest.headers.forEach((value, key) => {
     const k = key.toLowerCase();
@@ -388,7 +390,7 @@ export function buildCrossServerWsTarget(
     headers['X-Real-IP'] = clientIp;
   }
 
-  return { url, headers };
+  return { url, headers, subprotocol: firstSubprotocol(originalRequest.headers.get('sec-websocket-protocol')) };
 }
 
 
@@ -423,13 +425,13 @@ function safeCloseCode(code?: number): number {
  * that first frame is often the subscribe or auth message the session depends on.
  */
 export function openCrossServerRelay(ws: RelaySocket): void {
-  const { targetUrl, targetHeaders, subdomain } = ws.data;
+  const { targetUrl, targetHeaders, subprotocol, subdomain } = ws.data;
   ws.data.pending = [];
   ws.data.peerReady = false;
 
   let peer: WebSocket;
   try {
-    peer = new WebSocket(targetUrl, { headers: targetHeaders } as any);
+    peer = new WebSocket(targetUrl, { headers: targetHeaders, ...(subprotocol ? { protocols: [subprotocol] } : {}) } as any);
   } catch (error) {
     console.error(`❌ Cross-server WS dial failed for ${subdomain}:`, error);
     ws.close(1011, "Cross-server routing failed");

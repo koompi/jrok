@@ -480,6 +480,11 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
 // domain, which leaves at most one extra record per edge.
 const tunnelSetups = new Map<string, Promise<void>>();
 
+/** Resolves once this server's queued tunnel setups for the domain are done (or failed). */
+export function tunnelSetupDone(domain: string): Promise<void> {
+  return (tunnelSetups.get(domain) ?? Promise.resolve()).catch(() => {});
+}
+
 function createTunnelForAgent(agent: Agent, agentId: string, organizationId?: string): Promise<void> {
   const key = agent.domain;
   const run = (tunnelSetups.get(key) ?? Promise.resolve()).then(() => setUpTunnelForAgent(agent, agentId, organizationId));

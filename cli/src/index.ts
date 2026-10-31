@@ -720,15 +720,27 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
 
   console.log(`🔌 WS Connect: ${path} → ${wsUrl} [${wsId}]`);
 
-  try {
+  // The subprotocol the server already told the visitor (its first choice,
+  // P32). Offered to the app properly: `ws` refuses an app that picks one it
+  // wasn't offered, which a header passed as is amounts to (graphql-ws and the
+  // like got no connection). An app that ignores subprotocols answers with
+  // none, which `ws` refuses too; that app gets the header passed as is.
+  const offered = typeof headers?.['sec-websocket-protocol'] === 'string'
+    ? (headers['sec-websocket-protocol'].split(',')[0] ?? '').trim()
+    : '';
+  pendingWsMessages.set(wsId, []);
+
+  const open = (negotiate: boolean) => {
+    const localHeaders: Record<string, string> = { ...(headers || {}) };
+    if (negotiate) delete localHeaders['sec-websocket-protocol'];
     // Create WebSocket connection to local service
-    const localWs = new WebSocket(wsUrl, {
-      headers: headers || {},
+    const localWs = new WebSocket(wsUrl, negotiate ? [offered] : [], {
+      headers: localHeaders,
     });
     // Registered while still connecting, so messages and a close that arrive
     // before it opens are queued or honoured rather than lost.
     localWsConnections.set(wsId, localWs);
-    pendingWsMessages.set(wsId, []);
+    let reopened = false;
 
     localWs.on('open', () => {
       console.log(`✅ WS Connected: ${path} [${wsId}]`);
@@ -752,6 +764,7 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
     });
 
     localWs.on('close', (code: number, reason: Buffer) => {
+      if (reopened) return;
       console.log(`🔌 WS Closed: ${path} [${wsId}] (${code})`);
       localWsConnections.delete(wsId);
       pendingWsMessages.delete(wsId);
@@ -766,6 +779,14 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
     });
 
     localWs.on('error', (error: Error) => {
+      // Still wanted (the visitor hasn't closed meanwhile): open it again
+      // without negotiating.
+      if (negotiate && error.message === 'Server sent no subprotocol' && localWsConnections.get(wsId) === localWs) {
+        reopened = true;
+        console.log(`🔁 WS ${path} [${wsId}]: the app ignores subprotocols; connecting again without negotiating`);
+        open(false);
+        return;
+      }
       console.error(`❌ WS Error: ${path} [${wsId}]:`, error.message);
       localWsConnections.delete(wsId);
       pendingWsMessages.delete(wsId);
@@ -777,8 +798,14 @@ async function handleWsConnect(message: any, serverWs: WebSocket, config: Client
         error: error.message,
       }));
     });
+  };
+
+  try {
+    open(Boolean(offered));
   } catch (error) {
     console.error(`❌ Failed to connect WebSocket [${wsId}]:`, error);
+    localWsConnections.delete(wsId);
+    pendingWsMessages.delete(wsId);
 
     // Notify server about error
     serverWs.send(JSON.stringify({

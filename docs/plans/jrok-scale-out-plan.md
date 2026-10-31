@@ -118,6 +118,8 @@ Two edges built from the Ansible role on DigitalOcean SGP1, each 1 vCPU / 1 GB "
 | P29 | A name with no vhost of its own was answered with whichever customer's vhost sorts first | nginx (no `default_server` on 443) | A stranger asking an edge for any name saw another customer's certificate (and domain). **Fixed:** the base-domain server is the default for 443, as for 80. | 2 |
 | P30 | A replica whose worker machine died abruptly kept getting requests: its socket stays half-open, and agents were dropped only by the MongoDB stale sweep after 150 s | `agentService.ts`, `index.ts` | For 2.5 minutes a share of the app's requests hung 120 s and got 504 (staging, a destroyed worker). Same in production today. **Fixed:** each edge tracks when it last heard from each agent: quiet 20 s, no new requests; silent 30 s, closed; its unanswered GETs retried on another replica. | 1 |
 | P31 | An app's response with several Set-Cookie headers reached the browser with only the last | agent (`headers` is a name -> value map), server | A login that sets a session and a CSRF cookie loses one. **In production.** **Fixed:** agents also send every cookie in `setCookie`, which the server appends; older servers ignore it and behave as before. | 0 |
+| P32 | WebSocket apps that need a subprotocol (graphql-ws / Apollo / Hasura subscriptions, STOMP, MQTT) got no connection | agent (`ws_connect`): the CLI passed the visitor's `Sec-WebSocket-Protocol` as a plain header, so `ws` refused the app's answer ("Server sent a subprotocol but none was requested"); the edge-to-edge relay dropped it | Subscriptions fail. **In production.** **Fixed:** Bun answers the visitor with its first protocol; jrok passes only that one to the agent and across edges; the CLI and the connector offer it to the app, and connect again without it for an app that ignores subprotocols. Staging: 24 cases (both agents, both edges, an app that requires one and one that ignores them, one/two/no protocols offered) all as a direct connection would behave (`ws-protocol-app.cjs`, `ws-protocol-client.cjs`). | 0 |
+| P33 | An agent's IP rules (`--allow-ip`, `--block-ip`) on a new tunnel were often not enforced | `index.ts` (applied while the tunnel record was still being created), `securityService.setTunnelIpSecurity` | The rules stayed under the domain only, unsaved, while requests and TCP connections check the tunnel id: a new service's allowlist let everyone in until its agent reconnected. **In production** (the worker passes customers' allowlists this way). Found testing the connector, which connects fast enough to lose the race every time. **Fixed:** in force at once under the domain (requests fall back to it), saved against the tunnel once its record exists. Staging: new and existing tunnels, connector and CLI, HTTP and TCP, refused from outside the list. | 1 |
 | P15 | When jrok stops but nginx keeps running, that edge answers 502, and DNS keeps sending visitors to it | nginx `upstream jrok` lists only the local jrok | With two edges in DNS, about half of visitors fail until jrok is back or the edge leaves DNS (staging). **Fixed in 2.6** for jrok down; a whole machine down still needs health-checked DNS. | 2 |
 
 ---
@@ -433,6 +435,15 @@ Cloudflare's `cloudflared` solves the same problem with one process per machine.
   - every tunnel it carried (an HTTP tunnel on both edges and a TCP tunnel) was back on a new connector in 9.7 s, through `JrokService`'s own restart backoff;
   - all 80 requests made after recovery succeeded.
 - **The connector never outlives the worker:** it exits 0.2 s after the worker's stdin closes, even while a tunnel is still connecting. A panic in one tunnel is reported to the worker as an exit, so the worker reopens that tunnel.
+- **Compared with the CLI, line by line:**
+  - every agent message type the server sends is handled;
+  - reconnects are the same: the CLI also never exits on a server error;
+  - the `@jrok:req` fields the worker reads are the same (`ms` from the request's start, `bytes` as sent);
+  - the app sees its own address as `Host`, as with Node's `fetch` (checked on Node 20 and 24);
+  - a customer's own domain is served through the connector alone on both edges with its certificate;
+  - IP allow and block lists hold for HTTP and TCP.
+- **Two production bugs found doing this comparison:** WebSocket subprotocols (P32) and IP rules of a new tunnel (P33). Both are fixed in the server, the CLI and the connector.
+- **One difference left:** an app that ignores subprotocols gets the visitor's protocol header from the CLI but not from the connector. The Rust WebSocket library can't send the header without negotiating it.
 
 **Trade-off:** if a connector dies, every app on that worker loses its tunnels until the worker opens them again, about 10 s. Replicas on other workers keep serving, as they do when a worker is lost.
 

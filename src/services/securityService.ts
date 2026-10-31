@@ -313,8 +313,10 @@ function ipMatchesList(ip: string, ipList: string[]): boolean {
  * Returns { allowed: true } if IP should be allowed
  * Returns { allowed: false, reason: string } if IP should be blocked
  */
-export function checkIpSecurity(tunnelId: string, remoteIp: string): { allowed: boolean; reason?: string } {
-  const security = ipSecurityCache.get(tunnelId);
+export function checkIpSecurity(tunnelId: string, remoteIp: string, domain?: string): { allowed: boolean; reason?: string } {
+  // Rules an agent brought are filed under its domain at once and under the
+  // tunnel id once the tunnel record exists (P33), so the domain's count until then.
+  const security = ipSecurityCache.get(tunnelId) ?? (domain ? ipSecurityCache.get(domain) : undefined);
 
   // Default: allow-all mode
   if (!security || security.mode === 'allow-all') {
@@ -388,6 +390,8 @@ export interface HttpSecurityOptions {
   userAgent?: string;
   sessionToken?: string;
   apiKeyId?: string;
+  /** The tunnel's domain: its IP rules count while the tunnel id has none (P33). */
+  domain?: string;
 }
 
 /**
@@ -477,7 +481,7 @@ export async function checkHttpRequest(
   }
 
   // Check tunnel IP security (allowlist/blocklist)
-  const ipSecurityCheck = checkIpSecurity(tunnelId, remoteIp);
+  const ipSecurityCheck = checkIpSecurity(tunnelId, remoteIp, options?.domain);
   if (!ipSecurityCheck.allowed) {
     logConnection({
       tunnelId,
@@ -971,6 +975,14 @@ export function removeIpFromAllowlist(tunnelId: string, ip: string): void {
  */
 export function getTunnelIpSecurity(tunnelId: string): TunnelIpSecurity {
   return ipSecurityCache.get(tunnelId) || { mode: 'allow-all' };
+}
+
+/**
+ * In force at once on this server, under that key only, saved nowhere: for
+ * rules an agent brought, until its tunnel record exists (P33).
+ */
+export function holdTunnelIpSecurity(key: string, security: TunnelIpSecurity): void {
+  ipSecurityCache.set(key, { ...security, updatedAt: Date.now() });
 }
 
 /**

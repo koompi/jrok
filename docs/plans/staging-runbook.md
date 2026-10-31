@@ -28,7 +28,9 @@
     - `connector-scale.ts COUNT HOLD` (many tunnels in one process; delete the `cscale` records afterwards);
     - `connector-crash.ts` (kills the connector under the worker's real `JrokService`; needs the worker source in `/root/kconsole-deploy` and the TCP echo `stg-tcp-echo`);
     - `cpu-per-request.sh` (connector against Node agents).
-  - **Start test processes with `systemd-run`:** anything started in the background over SSH dies when the session closes.
+  - **WebSocket subprotocols (P32):** start `ws-protocol-app.cjs`; give it an agent each (connector and Node CLI) for 18083 (requires a protocol) and 18084 (ignores them); run `ws-protocol-client.cjs DOMAIN EDGE PROTOCOLS` through each edge with `graphql-transport-ws`, `graphql-transport-ws,graphql-ws` and `-`.
+  - **IP rules (P33):** use a new domain each time, so the tunnel record doesn't exist yet. Pass `--allow-ip <test droplet>` and check from elsewhere: 403, or a reset for `--tcp`.
+  - **Start test processes with `systemd-run`:** anything started in the background over SSH dies when the session closes. Transient units disappear when stopped, so `stg-cd-<edge>` (the custom-domain agents) must be started again with `systemd-run` and the same command line.
 - **Server key (plan 3.4):** staging accepts it only from the edges and the operator's address in `server_key_sources` (inventory); from anywhere else jrok answers 401 and logs it. Update the address if yours changes.
 - **GeoIP and alerts:** `deploy-edges.sh geoip` reads production's MaxMind account (`/etc/GeoIP.conf` there) for the `geoip` role. Alerts go to Telegram once `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are in the staging env file; until then they only log.
 - **Measure:** `scripts/staging/edge-sample.sh SECONDS` on an edge (CPU split into jrok and nginx, plus connection states on port 3000); `box-sample.sh` on the test droplet (agent, app, autocannon); `probe.sh SECONDS URL EDGE_IP…` for availability through each edge during a failure test.
