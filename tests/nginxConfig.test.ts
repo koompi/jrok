@@ -31,8 +31,19 @@ function fixture(name: string, domain = DOMAIN, certDir = CERT_DIR): string {
     .replaceAll("{{DOMAIN}}", domain);
 }
 
+// Template v3 is written only where nginx.conf defines the edge cache.
+const WITH_EDGE_CACHE = join(import.meta.dir, "fixtures/nginx/nginx-with-edge-cache.conf");
+function withNginxConf<T>(path: string, fn: () => T): T {
+  const saved = process.env.NGINX_CONF_PATH;
+  process.env.NGINX_CONF_PATH = path;
+  try { return fn(); } finally {
+    if (saved === undefined) delete process.env.NGINX_CONF_PATH;
+    else process.env.NGINX_CONF_PATH = saved;
+  }
+}
+
 describe("current template", () => {
-  const vhost = generateCustomDomainNginxConfig(DOMAIN, CERT_DIR);
+  const vhost = withNginxConf(WITH_EDGE_CACHE, () => generateCustomDomainNginxConfig(DOMAIN, CERT_DIR));
 
   test("is versioned", () => {
     expect(vhostTemplateVersion(vhost)).toBe(CUSTOM_DOMAIN_VHOST_VERSION);
@@ -51,7 +62,33 @@ describe("current template", () => {
   test("is recognised as unedited despite a different timestamp, and needs no upgrade", () => {
     const later = vhost.replace(/^# Generated: .*$/m, "# Generated: 2030-01-01T00:00:00.000Z");
     expect(isUnmodifiedGeneratedVhost(later, DOMAIN, CERT_DIR)).toBe(true);
-    expect(vhostNeedsUpgrade(later, DOMAIN, CERT_DIR)).toBe(false);
+    withNginxConf(WITH_EDGE_CACHE, () => expect(vhostNeedsUpgrade(later, DOMAIN, CERT_DIR)).toBe(false));
+  });
+
+  test("uses the edge cache, keyed by host, never for Authorization", () => {
+    expect(vhost).toContain("proxy_cache jrok_cache;");
+    expect(vhost).toContain("proxy_cache_key $scheme$host$request_uri;");
+    expect(vhost).toContain("proxy_no_cache $jrok_not_shareable $http_authorization;");
+    expect(vhost).not.toContain("proxy_cache_lock");
+  });
+});
+
+describe("servers whose nginx.conf has no edge cache", () => {
+  const missing = join(import.meta.dir, "fixtures/nginx/no-such-nginx.conf");
+
+  test("get template v2, which needs no cache zone", () => {
+    const vhost = withNginxConf(missing, () => generateCustomDomainNginxConfig(DOMAIN, CERT_DIR));
+    expect(vhostTemplateVersion(vhost)).toBe(2);
+    expect(vhost).not.toContain("proxy_cache");
+  });
+
+  test("keep their v2 vhosts; once nginx.conf has the cache, unedited ones upgrade to v3", () => {
+    const v2 = withNginxConf(missing, () => generateCustomDomainNginxConfig(DOMAIN, CERT_DIR));
+    expect(withNginxConf(missing, () => vhostNeedsUpgrade(v2, DOMAIN, CERT_DIR))).toBe(false);
+    expect(withNginxConf(WITH_EDGE_CACHE, () => vhostNeedsUpgrade(v2, DOMAIN, CERT_DIR))).toBe(true);
+
+    const edited = v2.replace("proxy_read_timeout 3600s;", "proxy_read_timeout 7200s;");
+    expect(withNginxConf(WITH_EDGE_CACHE, () => vhostNeedsUpgrade(edited, DOMAIN, CERT_DIR))).toBe(false);
   });
 });
 

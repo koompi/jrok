@@ -37,6 +37,7 @@ check "public, with Authorization: not"    not-HIT /cache/public "Authorization:
 path="/cache/public?v=collide$(date +%s%N)"
 req "$APP" "$path" >/dev/null; req "$APP" "$path" >/dev/null; a=$(cat /tmp/phase05.body)
 req "$APP2" "$path" >/dev/null; b=$(cat /tmp/phase05.body)
-if [[ "$a" == app\ * && "$b" == app2\ * ]]; then r=PASS; else r=FAIL; fail=1; fi
+# Each app's answer starts with its own LABEL: the two must differ.
+if [ -n "$a" ] && [ -n "$b" ] && [ "${a%% *}" != "${b%% *}" ]; then r=PASS; else r=FAIL; fail=1; fi
 printf '%s  %-46s %s | %s\n' "$r" "same path, two apps: no collision" "$(echo "$a" | tr -d '\n')" "$(echo "$b" | tr -d '\n')"
 exit $fail
