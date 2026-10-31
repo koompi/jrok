@@ -365,6 +365,12 @@ const HOP_BY_HOP_HEADERS = new Set([
 // exactly the outage it was trying to recover from.
 let reconnectAttempts = 0;
 
+// A TCP tunnel's port lives on one edge. When the server says it's on another
+// (tcp_port_elsewhere), the next connection goes there. If that edge can't be
+// reached the hint is dropped, so a dead edge can't strand the tunnel: the
+// server moves it once its edge has been silent long enough.
+let tcpEdgeHint: string | null = null;
+
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
@@ -1009,8 +1015,9 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   if (config.groupMode) {
     console.log(`⚖️  Mode: Load-balanced Group${config.instanceId ? ` (instance: ${config.instanceId})` : ''}`);
   }
-  if (config.edge) {
-    console.log(`🛰️  Edge: ${config.edge}`);
+  const edge = tcpEdgeHint || config.edge;
+  if (edge) {
+    console.log(`🛰️  Edge: ${edge}${tcpEdgeHint ? " (where this TCP tunnel's port is)" : ""}`);
   }
   console.log(`\n${config.serverUrl}\n`);
 
@@ -1018,8 +1025,9 @@ async function connectAgent(config: ClientConfig): Promise<void> {
     headers: { Authorization: `Bearer ${config.authToken}` },
     // --edge: resolve the edge instead of the server's name; the URL (and so
     // TLS SNI and Host) is unchanged.
-    ...(config.edge ? { lookup: edgeLookup(config.edge) } : {}),
+    ...(edge ? { lookup: edgeLookup(edge) } : {}),
   });
+  let opened = false;
   let heartbeatInterval: NodeJS.Timeout;
   let pingInterval: NodeJS.Timeout;
   let watchdogInterval: NodeJS.Timeout;
@@ -1038,6 +1046,7 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   let tcpPort: number | null = null;
 
   ws.onopen = () => {
+    opened = true;
     reconnectAttempts = 0;
     lastPongAt = Date.now();
     console.log("✅ Connected to server!");
@@ -1194,6 +1203,9 @@ async function connectAgent(config: ClientConfig): Promise<void> {
         handleTcpClose(message);
       } else if (message.type === "status") {
         console.log(`📊 Status: ${message.message}`);
+      } else if (message.type === "error" && message.code === "tcp_port_elsewhere" && typeof message.edge === "string") {
+        tcpEdgeHint = message.edge;
+        console.log(`🛰️  ${message.message}`);
       } else {
         console.log(`📨 Server message:`, message);
       }
@@ -1209,6 +1221,8 @@ async function connectAgent(config: ClientConfig): Promise<void> {
   };
 
   ws.onclose = () => {
+    // The hinted edge couldn't be reached: back to --edge / --server.
+    if (!opened && tcpEdgeHint && edge === tcpEdgeHint) tcpEdgeHint = null;
     clearInterval(heartbeatInterval);
     clearInterval(pingInterval);
     clearInterval(watchdogInterval);

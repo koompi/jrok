@@ -132,6 +132,10 @@
       # addresses, comma-separated) plus every edge.
       Environment=SERVER_KEY_SOURCES={{ ((server_key_sources | string).split(',') | map('trim') | select | list + (groups['jrok_servers'] | map('extract', hostvars, 'ansible_host') | list)) | unique | join(',') }}
       {% endif %}
+      {% if tcp_takeover_minutes is defined %}
+      # How long an edge must be silent before its TCP tunnels move to another (default 10)
+      Environment=TCP_TAKEOVER_MINUTES={{ tcp_takeover_minutes }}
+      {% endif %}
       # true: custom-domain certificates from Let's Encrypt's staging service (test environments)
       Environment=CERTBOT_TEST_CERT={{ certbot_test_cert | default(false) | bool | lower }}
       Environment=NGINX_PATH=/etc/nginx/sites-available

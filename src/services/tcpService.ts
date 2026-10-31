@@ -226,9 +226,17 @@ export async function allocatePort(
         active: true,
       } as TcpPortAllocation;
     }
-    // If on another server, we need to deallocate there first or return error
-    console.warn(`⚠️ Tunnel ${tunnelId} already has port ${existingAllocation.port} on server ${existingAllocation.serverId}`);
-    return null;
+    // A tunnel's port lives on one edge; customers dial that edge's address.
+    // An agent that reached another edge gets no port here (the caller tells it
+    // which edge holds it), unless that edge has been silent long enough to be
+    // gone: then the tunnel moves here, with a new port and address, rather
+    // than staying unreachable forever.
+    if (!(await serverGoneFor(existingAllocation.serverId, tcpTakeoverMs()))) {
+      console.warn(`⚠️ Tunnel ${tunnelId} already has port ${existingAllocation.port} on server ${existingAllocation.serverId}`);
+      return null;
+    }
+    console.warn(`⚠️ Server ${existingAllocation.serverId} silent for over ${tcpTakeoverMs() / 60_000} min: moving tunnel ${tunnelId} here (its port ${existingAllocation.port} there is released)`);
+    await collections.tcpPortAllocations.deleteOne({ tunnelId, serverId: existingAllocation.serverId });
   }
 
   // Find and validate available port
@@ -349,6 +357,19 @@ export async function deallocatePortByAgentId(agentId: string): Promise<void> {
 /**
  * Get port allocation by tunnel ID
  */
+/** How long an edge must be silent before its TCP tunnels may move (TCP_TAKEOVER_MINUTES, default 10). */
+export function tcpTakeoverMs(): number {
+  const minutes = Number(process.env.TCP_TAKEOVER_MINUTES);
+  return (Number.isFinite(minutes) && minutes > 0 ? minutes : 10) * 60_000;
+}
+
+/** True if `serverId` has sent no heartbeat for `ms` (or never did). */
+async function serverGoneFor(serverId: string, ms: number): Promise<boolean> {
+  const server = await getCollections().serverHeartbeats.findOne({ serverId });
+  const last = Number(server?.lastHeartbeat ?? 0);
+  return Date.now() - last > ms;
+}
+
 export async function getPortAllocation(tunnelId: string): Promise<TcpPortAllocation | null> {
   const collections = getCollections();
   const allocation = await collections.tcpPortAllocations.findOne({

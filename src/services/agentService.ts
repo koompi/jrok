@@ -478,7 +478,19 @@ async function setUpTunnelForAgent(agent: Agent, agentId: string, organizationId
         } else {
           // Port already allocated - restart TCP server for reconnection with new agentId
           const existingAllocation = await tcpService.getPortAllocation(existingTunnel.id);
-          if (existingAllocation) {
+          const elsewhere = existingAllocation && (existingAllocation as any).serverId !== tcpService.currentServerId;
+          if (existingAllocation && elsewhere) {
+            // The port is on another edge. This one used to start listening on
+            // it anyway, where no customer connects. allocatePort moves the
+            // tunnel here only if that edge has gone silent; otherwise the
+            // agent is told which edge to use (index.ts, tcp_port_elsewhere).
+            const moved = await tcpService.allocatePort(existingTunnel.id, agentId, agent.localPort, agent.localHost, organizationId);
+            if (moved) {
+              tcpPort = moved.port;
+              tcpService.startTcpServer(moved);
+              console.log(`✅ TCP tunnel moved here: ${agent.domain} -> port ${tcpPort}`);
+            }
+          } else if (existingAllocation) {
             // Update the allocation with new agent info in DB
             await tcpService.updatePortAllocation(existingTunnel.id, agentId, agent.localPort, agent.localHost);
             // Update the allocation object with new agent info for the server

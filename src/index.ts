@@ -729,6 +729,21 @@ async function startServer() {
               // Wait for tunnel creation and then send TCP port info
               setTimeout(async () => {
                 const allocation = await tcpService.getPortAllocation(agent.tunnelId || '');
+                // The port lives on another edge: say so instead of announcing
+                // an address nothing listens on (half of all starts with two
+                // edges, staging). The worker pins TCP agents to one edge.
+                const ownerId = (allocation as any)?.serverId;
+                if (allocation && ownerId && ownerId !== tcpService.currentServerId) {
+                  const owner = (allocation as any).serverHost || ownerId;
+                  ws.send(JSON.stringify({
+                    type: "error",
+                    code: "tcp_port_elsewhere",
+                    edge: owner,
+                    message: `This TCP tunnel's port ${allocation.port} is on ${owner}: connect the agent there (--edge ${owner})`,
+                  }));
+                  ws.close(4010, "TCP tunnel is on another edge");
+                  return;
+                }
                 if (allocation) {
                   ws.send(JSON.stringify({
                     type: "welcome",
