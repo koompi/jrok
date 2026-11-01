@@ -181,3 +181,30 @@ describe("TCP tunnel flow control", () => {
     client.destroy();
   }, 20000);
 });
+
+describe("TCP tunnel latency", () => {
+  test("Nagle is off on the visitor's socket, so a reply in several pieces isn't held back", async () => {
+    const calls: boolean[] = [];
+    const original = net.Socket.prototype.setNoDelay;
+    net.Socket.prototype.setNoDelay = function (this: net.Socket, noDelay?: boolean) {
+      calls.push(noDelay ?? true);
+      return original.call(this, noDelay);
+    };
+    try {
+      const port = await freePort();
+      const agentId = "agent-nodelay";
+      const ws = makeFakeAgentWs();
+      registerAgentConnection(agentId, ws as any);
+      expect(startTcpServer(makeAllocation(port, agentId))).toBe(true);
+      openPorts.push(port);
+
+      const client = net.createConnection({ port, host: "127.0.0.1" });
+      await new Promise((r) => client.once("connect", r));
+      expect(await waitFor(() => ws.ofType("tcp_connect").length > 0)).toBe(true);
+      expect(calls).toContain(true);
+      client.destroy();
+    } finally {
+      net.Socket.prototype.setNoDelay = original;
+    }
+  });
+});

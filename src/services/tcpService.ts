@@ -478,6 +478,11 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
     // Enable TCP keepalive so idle connections (SSH, Mongo Compass) are not silently
     // dropped by NAT/firewalls. 60s probe interval is well within typical 2-5 min timeouts.
     clientSocket.setKeepAlive(true, 60000);
+    // No Nagle: a reply that reaches us in several pieces (a large query
+    // result) goes out at once. With Nagle the last piece waited for the
+    // client's ACK, up to 40 ms with delayed ACKs. The agent sets the same on
+    // its side.
+    clientSocket.setNoDelay(true);
 
     const agentWs = agentConnections.get(allocation.agentId);
     if (!agentWs || agentWs.readyState !== 1) {
