@@ -40,6 +40,11 @@
     # the first base domain).
     jrok_base_domains: "{{ (base_domains | default(domain_name)).split(',') | map('trim') | list }}"
     jrok_ssl_cert_name: "{{ ssl_cert_name | default(jrok_base_domains[0]) }}"
+    # The edge that issues and renews that certificate (cert_renewer, an
+    # inventory name; default the first edge). Let's Encrypt issues at most 5
+    # certificates a week for the same names, so the others don't issue their
+    # own: they take a copy and then follow MongoDB (roles/certbot).
+    jrok_cert_renewer: "{{ cert_renewer | default(groups['jrok_servers'][0]) }}"
     # Edges reach each other over HTTPS (P10, src/utils/peerLink.ts) once every
     # edge has a forward_host: its own name, an A record for that edge alone and
     # covered by the wildcard certificate (e.g. "edge-a.public.koompi.cloud").

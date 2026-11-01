@@ -32,6 +32,11 @@
   register: cert_exists
   tags: ["certbot"]
 
+# One edge (jrok_cert_renewer) issues and renews the wildcard certificate, and
+# its deploy hook below publishes each renewal to MongoDB, from where every
+# other edge's jrok pulls it (certificateSyncService). Let's Encrypt issues at
+# most 5 certificates a week for the same names: an edge each would hit that
+# when several edges are built or replaced in one week.
 - name: Issue certificate with Certbot (DNS-based for wildcard)
   shell: |
     certbot certonly \
@@ -42,10 +47,62 @@
       --non-interactive \
       --cert-name "{{ jrok_ssl_cert_name }}" \
       {% for d in jrok_base_domains %}-d "{{ d }}" -d "*.{{ d }}" {% endfor %}
-  when: not cert_exists.stat.exists
+  when: not cert_exists.stat.exists and inventory_hostname == jrok_cert_renewer
   tags: ["certbot"]
   register: certbot_result
   ignore_errors: yes
+
+- name: Read the certificate from the renewing edge
+  # A new edge gets a copy of the renewing edge's certificate rather than one
+  # of its own; jrok keeps it current from MongoDB from then on.
+  slurp:
+    src: "/etc/letsencrypt/live/{{ jrok_ssl_cert_name }}/{{ item }}"
+  loop: [cert.pem, chain.pem, fullchain.pem, privkey.pem]
+  delegate_to: "{{ jrok_cert_renewer }}"
+  register: renewer_cert
+  no_log: true
+  when: not cert_exists.stat.exists and inventory_hostname != jrok_cert_renewer
+  tags: ["certbot"]
+
+- name: Create the certificate directory
+  file:
+    path: "/etc/letsencrypt/live/{{ jrok_ssl_cert_name }}"
+    state: directory
+    mode: '0755'
+  when: renewer_cert is not skipped
+  tags: ["certbot"]
+
+- name: Copy the certificate onto this edge
+  copy:
+    content: "{{ item.content | b64decode }}"
+    dest: "/etc/letsencrypt/live/{{ jrok_ssl_cert_name }}/{{ item.item }}"
+    mode: "{{ '0600' if item.item == 'privkey.pem' else '0644' }}"
+  loop: "{{ renewer_cert.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  no_log: true
+  when: renewer_cert is not skipped
+  tags: ["certbot"]
+
+- name: Check for this edge's renewal settings
+  stat:
+    path: "/etc/letsencrypt/renewal/{{ jrok_ssl_cert_name }}.conf"
+  register: renewal_conf
+  tags: ["certbot"]
+
+- name: Renew early on the renewing edge only; the others are a backup
+  # The renewing edge renews 30 days before expiry and the others get the
+  # renewal from MongoDB within minutes. An edge that issued its own copy
+  # (before this rule, or a copy of /etc/letsencrypt) renews it only 10 days
+  # before expiry: never while the renewing edge works, and in time if it
+  # doesn't. Certbot keeps this line when it renews.
+  lineinfile:
+    path: "/etc/letsencrypt/renewal/{{ jrok_ssl_cert_name }}.conf"
+    regexp: '^\s*renew_before_expiry\s*='
+    line: "renew_before_expiry = {{ '30 days' if inventory_hostname == jrok_cert_renewer else '10 days' }}"
+    insertbefore: '^\[renewalparams\]'
+  when: renewal_conf.stat.exists
+  tags: ["certbot"]
 
 - name: Create Certbot renewal hook directory
   # "deploy" rather than "post": deploy hooks run ONCE PER RENEWED CERTIFICATE

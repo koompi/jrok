@@ -10,6 +10,7 @@ import {
   type Edge,
   type ProbeState,
   INITIAL_PROBE_STATE,
+  leftoverAddresses,
   nextProbeState,
   planRecord,
   verdicts,
@@ -27,6 +28,12 @@ export interface DnsHealthConfig {
   /** Votes older than this are ignored: their checker has stopped. */
   maxVoteAgeMs: number;
   leaseMs: number;
+  /**
+   * How long an address the checkers added must stay a leftover (no edge has
+   * it, no checker probes it) before it is removed: a checker that restarts
+   * withdraws its votes for a cycle, and the writer's settings may be older.
+   */
+  leftoverAfterMs: number;
   dryRun: boolean;
 }
 
@@ -47,6 +54,8 @@ export class DnsHealthChecker {
   private states = new Map<string, ProbeState>();
   private leader = false;
   private allDown = false;
+  /** "record address" → when this writer first saw it as a leftover. */
+  private leftoverSince = new Map<string, number>();
 
   constructor(
     private config: DnsHealthConfig,
@@ -60,6 +69,7 @@ export class DnsHealthChecker {
   async cycle(): Promise<void> {
     await this.vote();
     if (await this.holdLease()) await this.applyDns();
+    else this.leftoverSince.clear();
   }
 
   /** Probe every other edge and record what this checker sees. */
@@ -76,7 +86,7 @@ export class DnsHealthChecker {
       return {
         updateOne: {
           filter: { _id: `${checkerId}:${edge.id}` as any },
-          update: [{ $set: { checker: checkerId, edge: edge.id, healthy: next.healthy, at: "$$NOW" } }],
+          update: [{ $set: { checker: checkerId, edge: edge.id, address: edge.address, healthy: next.healthy, at: "$$NOW" } }],
           upsert: true,
         },
       };
@@ -121,7 +131,8 @@ export class DnsHealthChecker {
       .collection("dnsHealthVotes")
       .find({ $expr: { $gte: ["$at", { $subtract: ["$$NOW", maxVoteAgeMs] }] } })
       .toArray();
-    const verdict = verdicts(edges, votes.map((v) => ({ checker: v.checker, edge: v.edge, healthy: v.healthy })));
+    const verdict = verdicts(edges, votes.map((v) => ({ checker: v.checker, edge: v.edge, healthy: v.healthy, address: v.address })));
+    const probed = new Set<string>(votes.map((v) => v.address).filter(Boolean));
 
     // Every edge down at once is more likely the checkers' own trouble than
     // the edges'; the records are left alone (planRecord), and a person told.
@@ -129,6 +140,7 @@ export class DnsHealthChecker {
     if (allDown && !this.allDown) this.notify({ change: "all-down", records });
     this.allDown = allDown;
 
+    const seen = new Set<string>();
     const changed = new Map<string, { change: "removed" | "added"; edge: Edge; records: string[] }>();
     const note = (change: "removed" | "added", edge: Edge, name: string) => {
       const entry = changed.get(edge.id) ?? { change, edge, records: [] };
@@ -138,13 +150,18 @@ export class DnsHealthChecker {
 
     for (const name of records) {
       const current = await this.dns.addressRecords(name);
-      const plan = planRecord(edges, verdict, current.map((r) => r.content));
+      const plan = planRecord(edges, verdict, current.map((r) => r.content), this.dueLeftovers(name, leftoverAddresses(edges, current, probed), seen));
       for (const address of plan.remove) {
         const edge = edges.find((e) => e.address === address)!;
         this.log(`${dryRun ? "would remove" : "removing"} ${edge.id} (${address}) from ${name}: down`);
         if (dryRun) continue;
         for (const record of current.filter((r) => r.content === address)) await this.dns.removeRecord(name, record.id);
         note("removed", edge, name);
+      }
+      for (const address of plan.leftovers) {
+        this.log(`${dryRun ? "would remove" : "removing"} ${address} from ${name}: no edge has this address any more`);
+        if (dryRun) continue;
+        for (const record of current.filter((r) => r.content === address && r.managed)) await this.dns.removeRecord(name, record.id);
       }
       for (const address of plan.add) {
         const edge = edges.find((e) => e.address === address)!;
@@ -156,5 +173,23 @@ export class DnsHealthChecker {
       }
     }
     for (const notice of changed.values()) this.notify(notice);
+    for (const key of this.leftoverSince.keys()) if (!seen.has(key)) this.leftoverSince.delete(key);
+  }
+
+  /** The leftovers in `name` that have been leftovers for leftoverAfterMs. */
+  private dueLeftovers(name: string, leftovers: string[], seen: Set<string>): string[] {
+    const now = Date.now();
+    return leftovers.filter((address) => {
+      const key = `${name} ${address}`;
+      seen.add(key);
+      const since = this.leftoverSince.get(key);
+      if (since === undefined) {
+        this.leftoverSince.set(key, now);
+        if (this.config.leftoverAfterMs > 0) {
+          this.log(`${address} in ${name} belongs to no edge; removing it in ${Math.round(this.config.leftoverAfterMs / 1000)} s unless an edge or checker has it by then`);
+        }
+      }
+      return now - (since ?? now) >= this.config.leftoverAfterMs;
+    });
   }
 }

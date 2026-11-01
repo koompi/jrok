@@ -13,6 +13,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import {
   INITIAL_PROBE_STATE,
+  leftoverAddresses,
   nextProbeState,
   parseEdges,
   planRecord,
@@ -64,27 +65,55 @@ describe("verdicts", () => {
     const v = verdicts(EDGES, [{ checker: "a", edge: "a", healthy: false }]);
     expect(v.get("a")).toBe("unknown");
   });
+
+  test("a vote about another address for the same id doesn't count (an edge replaced, settings not all updated)", () => {
+    const v = verdicts(EDGES, [
+      { checker: "b", edge: "c", healthy: true, address: "203.0.113.3" }, // b knows c's new machine
+      { checker: "a", edge: "c", healthy: false, address: "192.0.2.3" }, // the old one, stopped
+    ]);
+    expect(v.get("c")).toBe("down");
+    // Votes from checkers older than the address field still count.
+    expect(verdicts(EDGES, [{ checker: "a", edge: "c", healthy: false }]).get("c")).toBe("down");
+  });
 });
 
 describe("what changes in a record", () => {
   const all = EDGES.map((e) => e.address);
 
   test("a down edge is removed and an up one added", () => {
-    expect(planRecord(EDGES, verdictMap({ a: "up", b: "up", c: "down" }), all)).toEqual({ add: [], remove: ["192.0.2.3"] });
-    expect(planRecord(EDGES, verdictMap({ a: "up", b: "up", c: "up" }), ["192.0.2.1", "192.0.2.2"])).toEqual({ add: ["192.0.2.3"], remove: [] });
+    expect(planRecord(EDGES, verdictMap({ a: "up", b: "up", c: "down" }), all)).toEqual({ add: [], remove: ["192.0.2.3"], leftovers: [] });
+    expect(planRecord(EDGES, verdictMap({ a: "up", b: "up", c: "up" }), ["192.0.2.1", "192.0.2.2"])).toEqual({ add: ["192.0.2.3"], remove: [], leftovers: [] });
   });
 
   test("an unknown edge stays as it is", () => {
-    expect(planRecord(EDGES, verdictMap({ a: "up", b: "up", c: "unknown" }), all)).toEqual({ add: [], remove: [] });
-    expect(planRecord(EDGES, verdictMap({ a: "up", b: "up", c: "unknown" }), ["192.0.2.1"])).toEqual({ add: ["192.0.2.2"], remove: [] });
+    expect(planRecord(EDGES, verdictMap({ a: "up", b: "up", c: "unknown" }), all)).toEqual({ add: [], remove: [], leftovers: [] });
+    expect(planRecord(EDGES, verdictMap({ a: "up", b: "up", c: "unknown" }), ["192.0.2.1"])).toEqual({ add: ["192.0.2.2"], remove: [], leftovers: [] });
   });
 
   test("never emptied: if every edge looks down, the record is left alone", () => {
-    expect(planRecord(EDGES, verdictMap({ a: "down", b: "down", c: "down" }), all)).toEqual({ add: [], remove: [] });
+    expect(planRecord(EDGES, verdictMap({ a: "down", b: "down", c: "down" }), all)).toEqual({ add: [], remove: [], leftovers: [] });
   });
 
   test("addresses that aren't edges are never touched", () => {
-    expect(planRecord(EDGES, verdictMap({ a: "up", b: "up", c: "down" }), [...all, "198.51.100.9"])).toEqual({ add: [], remove: ["192.0.2.3"] });
+    expect(planRecord(EDGES, verdictMap({ a: "up", b: "up", c: "down" }), [...all, "198.51.100.9"])).toEqual({ add: [], remove: ["192.0.2.3"], leftovers: [] });
+  });
+
+  test("leftovers are removed, unless every edge looks down", () => {
+    const up = verdictMap({ a: "up", b: "up", c: "up" });
+    expect(planRecord(EDGES, up, [...all, "198.51.100.9"], ["198.51.100.9"])).toEqual({ add: [], remove: [], leftovers: ["198.51.100.9"] });
+    expect(planRecord(EDGES, verdictMap({ a: "down", b: "down", c: "down" }), [...all, "198.51.100.9"], ["198.51.100.9"]).leftovers).toEqual([]);
+  });
+});
+
+describe("leftover addresses", () => {
+  const records = (entries: Array<[string, boolean]>) => entries.map(([content, managed]) => ({ content, managed }));
+
+  test("a checker-added address no edge has is a leftover; a hand-made one, or an edge's, never", () => {
+    expect(leftoverAddresses(EDGES, records([["192.0.2.1", true], ["198.51.100.9", true], ["198.51.100.10", false]]), new Set())).toEqual(["198.51.100.9"]);
+  });
+
+  test("not while some checker still probes it (its settings are newer: an edge being added)", () => {
+    expect(leftoverAddresses(EDGES, records([["198.51.100.9", true]]), new Set(["198.51.100.9"]))).toEqual([]);
   });
 });
 
@@ -118,7 +147,7 @@ function fakeDns() {
     async addressRecords(name) { return [...(records.get(name) ?? [])]; },
     async addAddress(name, address) {
       changes.push(`${writer} +${address}`);
-      records.set(name, [...(records.get(name) ?? []), { id: `r${next++}`, name, type: "A", content: address }]);
+      records.set(name, [...(records.get(name) ?? []), { id: `r${next++}`, name, type: "A", content: address, managed: true }]);
     },
     async removeRecord(name, id) {
       const gone = records.get(name)?.find((r) => r.id === id);
@@ -127,8 +156,10 @@ function fakeDns() {
     },
   });
   const addresses = (name: string) => (records.get(name) ?? []).map((r) => r.content).sort();
-  for (const name of ["app.test", "*.app.test"]) for (const e of EDGES) records.set(name, [...(records.get(name) ?? []), { id: `r${next++}`, name, type: "A", content: e.address }]);
-  return { client, addresses, changes };
+  const seed = (name: string, address: string, managed = false) =>
+    records.set(name, [...(records.get(name) ?? []), { id: `r${next++}`, name, type: "A", content: address, managed }]);
+  for (const name of ["app.test", "*.app.test"]) for (const e of EDGES) seed(name, e.address);
+  return { client, addresses, changes, seed };
 }
 
 /** A checker on edge `id`; `down` lists the edges its probes fail to reach. */
@@ -141,6 +172,7 @@ function checkerOn(id: string, dns: ReturnType<typeof fakeDns>, down: Set<string
     recoverAfter: 2,
     maxVoteAgeMs: 60_000,
     leaseMs: 30_000,
+    leftoverAfterMs: 60_000,
     dryRun: false,
     ...overrides,
   };
@@ -230,6 +262,47 @@ describe.skipIf(!MONGO)("checkers agreeing through MongoDB", () => {
     expect(dns.changes).toEqual([]);
   });
 
+  test("an edge replaced by a new machine: its old address leaves, even if a checker added it", async () => {
+    const dns = fakeDns();
+    const replaced = EDGES.map((e) => (e.id === "c" ? { id: "c", address: "203.0.113.3" } : e));
+    // The old machine's address, re-added by a checker; a hand-made record no edge has.
+    for (const name of ["app.test", "*.app.test"]) {
+      dns.seed(name, "198.51.100.9", true);
+      dns.seed(name, "198.51.100.10");
+    }
+    const settings = { edges: replaced, leftoverAfterMs: 0 };
+    await rounds(3, [checkerOn("a", dns, new Set(), settings), checkerOn("b", dns, new Set(), settings)]);
+    expect(dns.addresses("app.test")).toEqual(["192.0.2.1", "192.0.2.2", "192.0.2.3", "198.51.100.10", "203.0.113.3"].sort());
+    expect(dns.addresses("*.app.test")).toContain("203.0.113.3");
+    expect(dns.addresses("*.app.test")).not.toContain("198.51.100.9");
+  });
+
+  test("a leftover is removed only once it has been one for leftoverAfterMs", async () => {
+    const dns = fakeDns();
+    for (const name of ["app.test", "*.app.test"]) dns.seed(name, "198.51.100.9", true);
+    const a = checkerOn("a", dns, new Set(), { leftoverAfterMs: 200 });
+    const b = checkerOn("b", dns, new Set(), { leftoverAfterMs: 200 });
+    await rounds(2, [a, b]);
+    expect(dns.addresses("app.test")).toContain("198.51.100.9");
+    await Bun.sleep(250);
+    await rounds(1, [a, b]);
+    expect(dns.addresses("app.test")).not.toContain("198.51.100.9");
+    expect(dns.addresses("app.test")).toEqual(["192.0.2.1", "192.0.2.2", "192.0.2.3"]);
+  });
+
+  test("a writer with older settings neither re-adds a replaced edge's old address nor removes the new one", async () => {
+    const dns = fakeDns();
+    const replaced = EDGES.map((e) => (e.id === "c" ? { id: "c", address: "203.0.113.3" } : e));
+    // c moved to 203.0.113.3, and its old machine (192.0.2.3) is off: an updated checker added the new address.
+    for (const name of ["app.test", "*.app.test"]) dns.seed(name, "203.0.113.3", true);
+    const old = checkerOn("a", dns, new Set(["c"])); // still lists c at 192.0.2.3, which it can't reach
+    const updated = checkerOn("b", dns, new Set(), { edges: replaced }); // reaches c at its new address
+    await rounds(4, [old, updated]); // a, first to cycle, holds the lease, and runs before b has voted
+    expect(dns.changes.every((c) => c.startsWith("a "))).toBe(true);
+    // b's "c is up" is about 203.0.113.3, so a doesn't put 192.0.2.3 back, and b still probes 203.0.113.3.
+    expect(dns.addresses("app.test")).toEqual(["192.0.2.1", "192.0.2.2", "203.0.113.3"]);
+  });
+
   test("dry run changes nothing", async () => {
     const dns = fakeDns();
     const unreachable = new Set(["c"]);
@@ -256,6 +329,7 @@ describe("Cloudflare DNS", () => {
         if (req.method === "GET" && url.pathname === "/zones/z1/dns_records") {
           return ok([
             { id: "1", type: "A", name: "*.app.example.test", content: "192.0.2.1" },
+            { id: "5", type: "A", name: "*.app.example.test", content: "192.0.2.5", comment: "jrok dns-health" },
             { id: "2", type: "TXT", name: "*.app.example.test", content: "x" },
             { id: "3", type: "A", name: "other.example.test", content: "192.0.2.9" },
           ]);
@@ -268,10 +342,11 @@ describe("Cloudflare DNS", () => {
     try {
       const cf = new CloudflareDns("token", { apiBase: `http://127.0.0.1:${api.port}`, ttl: 60 });
       expect(await cf.addressRecords("*.app.example.test")).toEqual([
-        { id: "1", name: "*.app.example.test", type: "A", content: "192.0.2.1" },
+        { id: "1", name: "*.app.example.test", type: "A", content: "192.0.2.1", managed: false },
+        { id: "5", name: "*.app.example.test", type: "A", content: "192.0.2.5", managed: true },
       ]);
       await cf.addAddress("*.app.example.test", "192.0.2.2");
-      expect(created).toMatchObject({ type: "A", name: "*.app.example.test", content: "192.0.2.2", ttl: 60, proxied: false });
+      expect(created).toMatchObject({ type: "A", name: "*.app.example.test", content: "192.0.2.2", ttl: 60, proxied: false, comment: "jrok dns-health" });
       await cf.removeRecord("*.app.example.test", "1");
       expect(calls).toContain("DELETE /zones/z1/dns_records/1");
       // The zone was looked up once, from the longest name it ends with.

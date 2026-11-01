@@ -20,6 +20,8 @@
  *   DNS_HEALTH_ZONE_ID           optional; else found from the record names
  *   DNS_HEALTH_DRY_RUN=true      log what would change, change nothing
  *   DNS_HEALTH_INTERVAL_MS 10000, DNS_HEALTH_FAIL_AFTER 3, DNS_HEALTH_RECOVER_AFTER 3, DNS_HEALTH_TTL 60
+ *   DNS_HEALTH_LEFTOVER_AFTER_S 300: how long an address the checkers added must
+ *     belong to no edge, and be probed by no checker, before it is removed
  */
 import { MongoClient } from "mongodb";
 import { hostname } from "os";
@@ -79,6 +81,7 @@ const checker = new DnsHealthChecker(
     recoverAfter: number("DNS_HEALTH_RECOVER_AFTER", 3),
     maxVoteAgeMs: 6 * intervalMs,
     leaseMs: 3 * intervalMs,
+    leftoverAfterMs: number("DNS_HEALTH_LEFTOVER_AFTER_S", 300) * 1000,
     dryRun: env.DNS_HEALTH_DRY_RUN === "true",
   },
   client.db("jrok"),

@@ -20,8 +20,8 @@ All three are the $6 size (edges 2 and 3 were replaced on 2026-11-01: DigitalOce
 
 The two new droplets carry the DigitalOcean tag `jrok-production`.
 
-- **Managed by Ansible:** `ansible/inventory.production.ini`, not committed because it names real servers. Every edge runs nginx, jrok, `jrok-dns-health`, certbot (the wildcard certificate is issued on each edge) and GeoIP, with UFW on.
-- **Port 3000:** still open on edge1 (`jrok_port_public=true`) until we know whether kconsole's OpenResty (116.212.132.113, which serves `jrok.koompi.cloud`) reaches jrok there directly. The new edges accept port 3000 only from each other.
+- **Managed by Ansible:** `ansible/inventory.production.ini`, not committed because it names real servers. Every edge runs nginx, jrok, `jrok-dns-health`, certbot and GeoIP, with UFW on.
+- **Port 3000:** closed to the internet on every edge since 2026-11-01. Edges reach each other over HTTPS (`forward_host`).
 - **Database:** every edge uses production's MongoDB Atlas cluster.
 
 ## DNS (Cloudflare, `koompi.cloud`)
@@ -36,11 +36,21 @@ The two new droplets carry the DigitalOcean tag `jrok-production`.
 - **`jrok-edges.koompi.cloud`:** every healthy edge, kept by `jrok-dns-health` like the app records. Deploy workers read their edge list from it (`JROK_EDGES_DNS`), so edges come and go without touching a worker. Nobody connects to this name.
 - **Custom domains** pointed at 152.42.241.139 by an A record reach edge1 only. `scripts/custom-domain-dns-audit.ts` lists them.
 
+## Certificates
+
+The wildcard certificate (`tunnel.koompi.cloud`: `public.` and `tunnel.koompi.cloud`, and `*.` of each) is renewed by one edge only. Let's Encrypt issues at most 5 certificates a week for the same names, so an edge each would run out when several edges are built or replaced in one week.
+
+- **The renewing edge:** `cert_renewer` in the inventory, default the first edge (edge1). It renews 30 days before expiry. Its deploy hook uploads each renewal to MongoDB (`/var/log/certbot-sync.log`), and every other edge's jrok pulls it within 15 s and reloads nginx (staging: 9 s).
+- **The other edges:** a new edge takes a copy of the renewing edge's certificate when it is built, never one of its own. Edges 2 and 3 still have the copies they issued on 2026-11-01; they renew those only 10 days before expiry (`renew_before_expiry` in `/etc/letsencrypt/renewal/tunnel.koompi.cloud.conf`). That never happens while the renewing edge works, and keeps the certificate valid if it doesn't.
+- **Retiring the renewing edge:** set `cert_renewer` to another edge, run `scripts/deploy-production.sh certbot`, then remove it. Only an edge with its own renewal settings (edges 1–3 today) can renew; otherwise issue one there first with certbot.
+
 ## Deploy
 
 ```bash
 scripts/deploy-production.sh                       # tag "app": rebuild and restart jrok, one edge at a time
 scripts/deploy-production.sh nginx                 # nginx only (reload, nothing dropped)
+scripts/deploy-production.sh dns-health            # the DNS checkers' code and settings; jrok keeps running
+scripts/deploy-production.sh certbot               # certificate settings and hooks; nothing restarts
 JROK_LIMIT=edge2,edge3 scripts/deploy-production.sh all   # a full build of some edges
 JROK_LIMIT=edge1 JROK_ANSIBLE_ARGS="--check --diff" JROK_LOG=<file> scripts/deploy-production.sh all   # preview, secrets redacted
 ```
@@ -84,7 +94,7 @@ On each deploy-worker host (no access from here), one worker first, then the res
 Workers follow `jrok-edges.koompi.cloud`, so none of this touches them.
 
 **Add an edge:**
-1. Create the droplet (2 vCPU / 4 GB, tag `jrok-production`).
+1. Create the droplet (1 vCPU / 1 GB is enough today; tag `jrok-production`).
 2. Add its line to the inventory: next `vps_id`, an unused TCP range, `tcp_public_host` and `forward_host`.
 3. Create its two A records: `edge-sgpN.public.koompi.cloud` and `sgpN.private.koompi.cloud`.
 4. `JROK_LIMIT=edgeN scripts/deploy-production.sh all`.
@@ -107,16 +117,16 @@ An edge that dies without warning leaves DNS in about 35 s, and workers stop usi
 **Replace an edge** (new machine, same `vps_id`):
 1. Drain the old edge and wait until it is out of every record.
 2. Stop jrok, the DNS checker and nginx on the old edge.
-3. Copy its `/etc/letsencrypt` to the new machine. This avoids issuing another wildcard: Let's Encrypt allows 5 per week for the same names.
-4. Change its address in the inventory and the two A records.
-5. Update the other edges first: `scripts/deploy-production.sh nginx,dns-health`.
-6. Then build the new edge.
+3. Change its address in the inventory and the two A records.
+4. Update the other edges first: `scripts/deploy-production.sh nginx,dns-health`.
+5. Then build the new edge. It copies the certificate from the renewing edge (see Certificates); if it replaces the renewing edge, move `cert_renewer` first.
 
-Checkers record health by `vps_id`. On 2026-11-01 the new edges were built first, so edge1's checker, still listing the old addresses, added them back to DNS for about 6 minutes. A checker only removes addresses it knows, so remove any old address left in a record by hand.
+On 2026-11-01 the new edges were built first, and edge1's checker, still listing the old addresses, added them back to DNS for about 6 minutes (P38). Two rules have prevented that since:
+- **Votes name the address probed.** A checker counts only votes about the address it knows for an edge, so one with older settings can't use a vote about the new machine to put the old address back.
+- **Leftovers are removed.** An address the checkers added (Cloudflare comment `jrok dns-health`) that no edge has and no checker probes is removed after 5 minutes (`DNS_HEALTH_LEFTOVER_AFTER_S`, logged first). Records made by hand are never touched.
 
 **After the workers:**
-- resize edge1 (it needs a power-off; agents on the other edges cover it);
-- close port 3000 on edge1 once OpenResty's upstream is known;
+- reboot edge1 for its kernel update (agents on the other edges cover it);
 - then the two Cambodian edges (Phase 4).
 
 ## Floods

@@ -26,6 +26,22 @@
     executable: /bin/bash
   tags: ["app"]
 
+# The DNS checker runs from source (src/dnsHealth/main.ts) and jrok from its
+# build (dist/), so a "dns-health" deploy updates the checkers' code without
+# restarting jrok: only src/ is copied. The full copy above would delete dist/.
+- name: Copy the DNS checker's code from staging (tag dns-health alone)
+  shell: |
+    if [ -d /root/jrok-staging/src ]; then
+      rsync -a --delete /root/jrok-staging/src/ {{ app_dir }}/src/
+      echo "src/ copied from staging"
+    else
+      echo "No staging directory found, skipping copy"
+    fi
+  args:
+    executable: /bin/bash
+  when: "'app' not in ansible_run_tags and 'all' not in ansible_run_tags"
+  tags: ["dns-health"]
+
 - name: Create data directory
   file:
     path: "{{ app_dir }}/data"

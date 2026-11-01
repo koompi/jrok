@@ -10,7 +10,12 @@ export interface AddressRecord {
   name: string;
   type: "A" | "AAAA";
   content: string;
+  /** Added by a checker (it carries the checkers' comment), so a checker may also take it away. */
+  managed: boolean;
 }
+
+/** The comment on records the checkers add. */
+export const MANAGED_COMMENT = "jrok dns-health";
 
 /**
  * The API token: CLOUDFLARE_API_TOKEN, or the `dns_cloudflare_api_token` line
@@ -72,7 +77,7 @@ export class CloudflareDns {
     const records: any[] = await this.call("GET", `/zones/${zone}/dns_records?name=${encodeURIComponent(name)}&per_page=100`);
     return records
       .filter((r) => (r.type === "A" || r.type === "AAAA") && r.name === name)
-      .map((r) => ({ id: r.id, name: r.name, type: r.type, content: r.content }));
+      .map((r) => ({ id: r.id, name: r.name, type: r.type, content: r.content, managed: r.comment === (this.options.comment ?? MANAGED_COMMENT) }));
   }
 
   async addAddress(name: string, address: string): Promise<void> {
@@ -83,7 +88,7 @@ export class CloudflareDns {
       content: address,
       ttl: this.options.ttl ?? 60,
       proxied: false,
-      comment: this.options.comment ?? "jrok dns-health",
+      comment: this.options.comment ?? MANAGED_COMMENT,
     });
   }
 

@@ -20,6 +20,8 @@ export interface Vote {
   checker: string;
   edge: string;
   healthy: boolean;
+  /** The address the checker probed (absent from checkers older than this field). */
+  address?: string;
 }
 
 export type Verdict = "up" | "down" | "unknown";
@@ -49,6 +51,7 @@ export function nextProbeState(
  * Each edge's verdict from the checkers' current votes: "down" only when more
  * checkers say down than up, so one checker on a bad network path can't take a
  * healthy edge out. "unknown" when no other checker voted (left as it is).
+ * Only votes about the edge's own address count.
  */
 export function verdicts(edges: Edge[], votes: Vote[]): Map<string, Verdict> {
   const result = new Map<string, Verdict>();
@@ -57,6 +60,10 @@ export function verdicts(edges: Edge[], votes: Vote[]): Map<string, Verdict> {
     let down = 0;
     for (const vote of votes) {
       if (vote.edge !== edge.id || vote.checker === edge.id) continue;
+      // A checker that knows this edge by another address probed another
+      // machine: an edge replaced under the same id, with the checkers'
+      // settings not all updated yet.
+      if (vote.address !== undefined && vote.address !== edge.address) continue;
       if (vote.healthy) up++;
       else down++;
     }
@@ -67,16 +74,18 @@ export function verdicts(edges: Edge[], votes: Vote[]): Map<string, Verdict> {
 
 /**
  * What to change in one record, given the addresses it has now. Only the
- * edges' own addresses are ever added or removed; anything else in the record
- * is left alone. A record is never emptied of edges: if every edge looks down,
- * sending visitors to them is still better than a name that doesn't resolve
- * (and gets cached as missing).
+ * edges' own addresses are added or removed, plus `leftovers`: addresses the
+ * checkers once put there that belong to no edge now (see leftoverAddresses).
+ * Anything else in the record is left alone. A record is never emptied of
+ * edges: if every edge looks down, sending visitors to them is still better
+ * than a name that doesn't resolve (and gets cached as missing).
  */
 export function planRecord(
   edges: Edge[],
   verdict: Map<string, Verdict>,
-  currentAddresses: string[]
-): { add: string[]; remove: string[] } {
+  currentAddresses: string[],
+  leftovers: string[] = []
+): { add: string[]; remove: string[]; leftovers: string[] } {
   const current = new Set(currentAddresses);
   const desired = edges
     .filter((edge) => {
@@ -84,13 +93,29 @@ export function planRecord(
       return v === "up" || (v === "unknown" && current.has(edge.address));
     })
     .map((edge) => edge.address);
-  if (desired.length === 0) return { add: [], remove: [] };
+  if (desired.length === 0) return { add: [], remove: [], leftovers: [] };
 
   const want = new Set(desired);
   return {
     add: desired.filter((address) => !current.has(address)),
     remove: edges.map((edge) => edge.address).filter((address) => current.has(address) && !want.has(address)),
+    leftovers: [...new Set(leftovers)].filter((address) => current.has(address) && !want.has(address)),
   };
+}
+
+/**
+ * Addresses in a record that the checkers added (`managed`) but that no edge
+ * has any more: an edge removed or replaced by a new machine. One is only a
+ * leftover once no checker probes it either, so a checker whose settings are
+ * newer than the writer's (an edge being added) never has its edge taken out.
+ */
+export function leftoverAddresses(
+  edges: Edge[],
+  records: Array<{ content: string; managed: boolean }>,
+  probed: Set<string>
+): string[] {
+  const known = new Set(edges.map((edge) => edge.address));
+  return [...new Set(records.filter((r) => r.managed && !known.has(r.content) && !probed.has(r.content)).map((r) => r.content))];
 }
 
 /** "id=address,id=address" (DNS_HEALTH_EDGES) as edges; malformed entries are refused. */
