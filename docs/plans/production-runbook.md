@@ -2,7 +2,9 @@
 
 **For:** [jrok scale-out plan](jrok-scale-out-plan.md); built and tested on staging first ([staging runbook](staging-runbook.md)).
 
-**Status (2026-11-01):** three edges in DigitalOcean Singapore serve app traffic, all on `v2.6.5` (`f677e66`). The deploy workers have not been changed yet, so every agent is still on edge1 (see [Workers](#workers-still-to-do)).
+**Status (2026-11-01):** three edges in DigitalOcean Singapore serve app traffic, all on `v2.6.5`.
+- **Updated workers:** the deploy workers vps4 and selendra-03 follow `jrok-edges.koompi.cloud` with the connector, so their apps have an agent on every edge (failover tested, below).
+- **Not yet updated:** `riverbase-worker-contabo` and `deploy-worker-01`.
 
 ---
 
@@ -134,6 +136,16 @@ curl -s --resolve app.public.koompi.cloud:443:<edge-ip> https://app.public.koomp
 ssh root@<edge> journalctl -u jrok-dns-health -f      # DNS decisions (the lease holder writes)
 ssh root@<edge> journalctl -u jrok -f
 ```
+
+**Failover test, 2026-11-01:**
+- **Setup:** both deploy workers (vps4, selendra-03) on the new setup, so 42 apps have an agent on every edge.
+- **Test:** jrok on edge1 stopped for 61 s.
+- **Result:**
+  - 244 of 244 requests to those apps succeeded through edge1 (its nginx passed them to edges 2 and 3), through edge2, and through normal DNS;
+  - edge1 stayed in DNS, as it kept serving through its nginx.
+- **Still down while edge1 is:**
+  - tunnels whose agents connect to edge1 only: people running `jrok` themselves through `tunnel.koompi.cloud`, and workers not yet updated;
+  - database/SSH tunnels, which move after 10 minutes, with a new address.
 
 On 2026-11-01:
 - 16 live apps and custom domains answered the same through every edge;
