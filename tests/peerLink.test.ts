@@ -132,6 +132,24 @@ test("a compressed response is passed on exactly as the peer sent it", async () 
   }
 });
 
+test("an app's redirect reaches the visitor as it is, cookie included (P34)", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch: (req) =>
+      new URL(req.url).pathname === "/login"
+        ? new Response("the login page")
+        : new Response(null, { status: 307, headers: { location: "/login?callbackUrl=%2F", "set-cookie": "csrf=1; Path=/" } }),
+  });
+  try {
+    const res = await forwardRequest({ serverHost: "127.0.0.1", serverPort: server.port as number }, visitorRequest(), "/", "203.0.113.7");
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toBe("/login?callbackUrl=%2F");
+    expect(res.headers.get("set-cookie")).toBe("csrf=1; Path=/");
+  } finally {
+    server.stop(true);
+  }
+});
+
 describe("forwarding to an edge without one (one edge, or not yet upgraded)", () => {
   test("plain http to its jrok port, as before, and the key is never sent in the clear", async () => {
     const peer = stubPeer();

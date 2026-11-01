@@ -257,6 +257,11 @@ export async function forwardRequest(
       // while its Content-Encoding: gzip header went on to the visitor, who
       // then failed to unzip plain text.
       decompress: false,
+      // An app's redirect goes back to the visitor as it is (P34). fetch
+      // followed it here instead: the visitor got the next page under the
+      // old URL, a Set-Cookie on the redirect was lost, and a redirect to a
+      // sign-in provider was fetched by this edge.
+      redirect: 'manual',
     } as RequestInit);
 
     // Return the proxied response
