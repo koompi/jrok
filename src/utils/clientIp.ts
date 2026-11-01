@@ -138,6 +138,18 @@ export interface ClientIpOptions {
  * @param req       the request, or just its headers
  * @param socketIp  the TCP peer, from `server.requestIP(req)?.address`
  */
+/**
+ * Did this connection come from one of our proxies (TRUSTED_PROXY_IPS)? With
+ * none configured, every connection is taken to (the setup before it existed).
+ * Headers our proxies set (the visitor address, nginx's ACME marker) count
+ * only from them: anyone reaching jrok's port directly could write them.
+ */
+export function fromTrustedProxy(socketIp: string | null | undefined): boolean {
+  const proxies = trustedProxyIps();
+  const socket = normalizeIp(socketIp);
+  return proxies.length === 0 || (socket !== null && ipMatchesAny(socket, proxies));
+}
+
 export function getClientIp(
   req: Request | Headers,
   socketIp?: string | null,

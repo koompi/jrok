@@ -80,6 +80,21 @@ export function isIpLiteralHost(host: string): boolean {
   return IPV4_HOST.test(host) || (host.startsWith("[") && host.endsWith("]"));
 }
 
+/**
+ * Names no agent or customer may register as a tunnel: the edges' own names
+ * (edge-sgp1, edge-pnh2 …, their forward_host) and jrok's (jrok-peer, nginx's
+ * name for edge-to-edge requests; jrok-edges, the edge list in DNS).
+ * JROK_RESERVED_NAMES adds more (comma-separated).
+ */
+const RESERVED = /^(edge-[a-z]{2,6}[0-9]{1,3}|jrok-peer|jrok-edges)$/;
+
+export function isReservedTunnelName(name: string): boolean {
+  const label = name.trim().toLowerCase();
+  if (RESERVED.test(label)) return true;
+  const extra = (process.env.JROK_RESERVED_NAMES || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  return extra.includes(label);
+}
+
 export type HostRoute =
   /** jrok's own API. `listed` is false for the backward-compatible fallback (step 5 miss). */
   | { kind: "management"; listed: boolean }

@@ -7,6 +7,7 @@ import { PROXY_MODE } from "../config/proxyMode";
 import * as securityService from "../services/securityService";
 import * as db from "../utils/database";
 import { getClientIp } from "../utils/clientIp";
+import { isReservedTunnelName } from "../utils/hostRouting";
 import { resolveAgentOrg } from "../config/impersonation";
 import { isPrivileged, filterOwned } from "../utils/access";
 
@@ -223,6 +224,9 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
     const subdomainRegex = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/;
     if (!subdomainRegex.test(domain)) {
       return new Response("Invalid subdomain format", { status: 400 });
+    }
+    if (isReservedTunnelName(domain)) {
+      return new Response(`'${domain}' is reserved`, { status: 403 });
     }
   }
 

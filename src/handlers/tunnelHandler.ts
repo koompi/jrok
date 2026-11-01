@@ -2,6 +2,7 @@ import type { AuthContext, TunnelResponse, ListTunnelsResponse, CreateTunnelRequ
 import * as tunnelService from "../services/tunnelService";
 import * as authService from "../services/authService";
 import { checkOrgAccess } from "../utils/access";
+import { isReservedTunnelName } from "../utils/hostRouting";
 
 // Helper to create JSON response
 function jsonResponse(data: unknown, status = 200): Response {
@@ -32,6 +33,10 @@ export async function handleCreateTunnel(req: Request): Promise<Response> {
         success: false,
         message: "Missing required fields: domain, agentId",
       } as TunnelResponse, 400);
+    }
+
+    if (isReservedTunnelName(body.domain)) {
+      return jsonResponse({ success: false, message: `'${body.domain}' is reserved` } as TunnelResponse, 403);
     }
 
     // Use org from API key or from body

@@ -24,7 +24,8 @@ SOURCE=${JROK_SECRETS_FROM:-152.42.241.139}
 . "$ENV_FILE"
 
 SSH="ssh -n -o BatchMode=yes"
-unit() { $SSH "root@$SOURCE" "sed -n 's/^Environment=$1=//p' /etc/systemd/system/jrok.service"; }
+# Secrets live in /etc/jrok/jrok.env (root only); the rest, and older edges, in the unit.
+unit() { $SSH "root@$SOURCE" "v=\$(sed -n 's/^$1=//p' /etc/jrok/jrok.env 2>/dev/null | head -1); [ -n \"\$v\" ] && printf '%s\\n' \"\$v\" || sed -n 's/^Environment=$1=//p' /etc/systemd/system/jrok.service"; }
 export MONGODB_URI; MONGODB_URI=$(unit MONGODB_URI)
 export CERT_SYNC_API_KEY; CERT_SYNC_API_KEY=$(unit API_KEY)
 export JWT_SECRET; JWT_SECRET=$(unit JWT_SECRET)

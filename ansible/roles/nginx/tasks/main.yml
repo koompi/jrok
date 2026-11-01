@@ -112,6 +112,8 @@
         tcp_nodelay on;
         keepalive_timeout 65;
         types_hash_max_size 2048;
+        # No nginx version in headers and error pages.
+        server_tokens off;
         client_max_body_size {{ client_max_body_size | default('10M') }};
 
         # Slow clients (attacks that hold connections open by sending a byte

@@ -92,6 +92,58 @@
     msg: "{{ build_output.stdout_lines }}"
   tags: ["app"]
 
+- name: jrok configuration directory (secrets, the drain file)
+  file:
+    path: /etc/jrok
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags: ["app", "dns-health"]
+
+# Secrets in a file only root can read. Unit files are world-readable, and so
+# is `systemctl show`: any local process (nginx's www-data included) could
+# read the database password and the server key from them. Both services
+# load this file.
+- name: jrok secrets (root only)
+  copy:
+    content: |
+      MONGODB_URI={{ mongodb_uri }}
+      API_KEY={{ cert_sync_api_key }}
+      JWT_SECRET={{ jwt_secret }}
+      KOOMPI_CLIENT_SECRET={{ koompi_client_secret }}
+      {% if jrok_peer_tls | bool %}
+      JROK_PEER_KEY={{ jrok_peer_key }}
+      {% endif %}
+      {% if telegram_bot_token | length > 0 and telegram_chat_id | length > 0 %}
+      TELEGRAM_BOT_TOKEN={{ telegram_bot_token }}
+      {% endif %}
+    dest: /etc/jrok/jrok.env
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  tags: ["app", "dns-health"]
+
+- name: Cap the system journal (jrok logs every agent connection)
+  block:
+    - file:
+        path: /etc/systemd/journald.conf.d
+        state: directory
+        mode: '0755'
+    - copy:
+        content: |
+          [Journal]
+          SystemMaxUse=500M
+        dest: /etc/systemd/journald.conf.d/jrok.conf
+        mode: '0644'
+      register: journald_conf
+    - systemd:
+        name: systemd-journald
+        state: restarted
+      when: journald_conf.changed
+  tags: ["app"]
+
 - name: Create systemd service file
   copy:
     content: |
@@ -104,15 +156,17 @@
       Type=simple
       User=root
       WorkingDirectory={{ app_dir }}
+      EnvironmentFile=/etc/jrok/jrok.env
       Environment=NODE_ENV=production
       Environment=PORT=3000
-      Environment=MONGODB_URI={{ mongodb_uri }}
-      Environment=API_KEY={{ cert_sync_api_key }}
+      # Forwarding headers (the visitor's address, nginx's ACME marker) count
+      # only from nginx on this machine and the other edges; anyone else
+      # reaching port 3000 directly is taken for who they are.
+      Environment=TRUSTED_PROXY_IPS=127.0.0.1,::1{% for source in jrok_peer_sources %},{{ source }}{% endfor %}
+
       Environment=BASE_DOMAIN={{ jrok_base_domains[0] }}
       Environment=LEGACY_BASE_DOMAINS={{ jrok_base_domains[1:] | join(',') }}
-      Environment=JWT_SECRET={{ jwt_secret }}
       Environment=KOOMPI_CLIENT_ID={{ koompi_client_id }}
-      Environment=KOOMPI_CLIENT_SECRET={{ koompi_client_secret }}
       Environment=KOOMPI_REDIRECT_URI={{ koompi_redirect_uri }}
       Environment=DASHBOARD_URL={{ dashboard_url }}
       Environment=ALLOWED_ORIGINS={{ dashboard_url }},https://{{ domain_name }}
@@ -144,7 +198,6 @@
       Environment=APP_MAX_WAITING={{ app_max_waiting }}
       {% endif %}
       {% if telegram_bot_token | length > 0 and telegram_chat_id | length > 0 %}
-      Environment=TELEGRAM_BOT_TOKEN={{ telegram_bot_token }}
       Environment=TELEGRAM_CHAT_ID={{ telegram_chat_id }}
       {% endif %}
       {% if server_key_sources is defined %}
@@ -169,7 +222,6 @@
       # Other edges forward here, over HTTPS, proving themselves with the key
       # (src/utils/peerLink.ts).
       Environment=FORWARD_URL=https://{{ forward_host }}
-      Environment=JROK_PEER_KEY={{ jrok_peer_key }}
       {% else %}
       Environment=JROK_PEERS={% for h in groups['jrok_servers'] | default([]) if h != inventory_hostname %}{{ hostvars[h].jrok_peer_address | default(hostvars[h].ansible_host) }}:{{ jrok_port | default('3000') }}{{ '' if loop.last else ',' }}{% endfor %}
 
@@ -342,7 +394,7 @@
       Type=simple
       User=root
       WorkingDirectory={{ app_dir }}
-      Environment=MONGODB_URI={{ mongodb_uri }}
+      EnvironmentFile=/etc/jrok/jrok.env
       Environment=DNS_HEALTH_CHECKER_ID={{ vps_id | default(inventory_hostname) }}
       Environment=DNS_HEALTH_EDGES={% for h in groups['jrok_servers'] %}{{ hostvars[h].vps_id | default(h) }}={{ hostvars[h].dns_address | default(hostvars[h].ansible_host) }}{{ '' if loop.last else ',' }}{% endfor %}
 
@@ -351,7 +403,6 @@
       Environment=CLOUDFLARE_API_TOKEN_FILE=/etc/letsencrypt/secrets/cloudflare.ini
       Environment=DNS_HEALTH_DRY_RUN={{ dns_health_dry_run | default(false) | bool | lower }}
       {% if telegram_bot_token | length > 0 and telegram_chat_id | length > 0 %}
-      Environment=TELEGRAM_BOT_TOKEN={{ telegram_bot_token }}
       Environment=TELEGRAM_CHAT_ID={{ telegram_chat_id }}
       {% endif %}
       ExecStart=/root/.bun/bin/bun run src/dnsHealth/main.ts

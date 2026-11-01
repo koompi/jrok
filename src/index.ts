@@ -31,7 +31,7 @@ import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/i
 import * as planLimitService from "./services/planLimitService";
 import { PROXY_MODE } from "./config/proxyMode";
 import { allBaseDomains } from "./utils/baseDomains";
-import { getClientIp, setForwardedClientHeaders, trustedProxyHops, trustedProxyIps } from "./utils/clientIp";
+import { fromTrustedProxy, getClientIp, setForwardedClientHeaders, trustedProxyHops, trustedProxyIps } from "./utils/clientIp";
 import { isFromPeer, stripPeerHeaders } from "./utils/peerLink";
 import * as acmeChallenge from "./services/acmeChallenge";
 import { serverKeyAllowedFrom } from "./utils/serverKeySources";
@@ -39,6 +39,7 @@ import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "
 import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
 import { firstSubprotocol } from "./utils/wsSubprotocol";
 import { DRAIN_HEADER, isDraining } from "./utils/drain";
+import { maintenancePage } from "./utils/maintenancePage";
 import {
   normalizeHostname,
   classifyHost,
@@ -1194,7 +1195,8 @@ async function startServer() {
 
         // A certificate challenge nginx passed on from port 80 (plan step 2.3):
         // answered from this edge's certbot webroot, or another edge's.
-        if (acmeChallenge.isAcmeChallengeRequest(req, path)) {
+        // Only from nginx: its marker header means nothing from anyone else.
+        if (acmeChallenge.isAcmeChallengeRequest(req, path) && fromTrustedProxy(server.requestIP(req)?.address)) {
           return acmeChallenge.answerAcmeChallenge(
             req, path, crossServerService.getHealthyServers, crossServerService.currentServerId);
         }
@@ -1409,14 +1411,13 @@ async function startServer() {
             // health monitor can tell "jrok has no agent for this domain" apart
             // from a user app that merely returns its own 503, and restart the
             // tunnel only in the former case.
-            const maintenanceHtmlPath = import.meta.dir + "/../index.html";
-            try {
-              const htmlContent = await Bun.file(maintenanceHtmlPath).text();
+            const htmlContent = maintenancePage(import.meta.dir + "/../index.html", hostname, crossServerService.currentServerId);
+            if (htmlContent) {
               return addCors(new Response(htmlContent, {
                 status: 503,
-                headers: { "Content-Type": "text/html; charset=utf-8", "X-Jrok-Tunnel": "down" }
+                headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Jrok-Tunnel": "down" }
               }));
-            } catch {
+            } else {
               // Fallback if index.html is not found
               return addCors(new Response(
                 JSON.stringify({
