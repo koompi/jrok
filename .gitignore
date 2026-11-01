@@ -45,6 +45,7 @@ public-binary
 cli/bin
 # Staging inventory names real servers (docs/plans/staging-runbook.md)
 ansible/inventory.staging.ini
+ansible/inventory.production.ini
 
 # Rust connector builds
 connector/target/
