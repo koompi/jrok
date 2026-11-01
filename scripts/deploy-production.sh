@@ -65,11 +65,15 @@ LOG=${JROK_LOG:-/dev/null}
 # isn't committed, so it comes from here).
 INVENTORY_PATH="$PWD/$INVENTORY"
 cd "$TREE/ansible"
+# The playbook's exit status is the script's (a failed edge exits non-zero),
+# after the log is redacted.
+status=0
 uvx --from ansible ansible-playbook -i "$INVENTORY_PATH" playbook.yml --tags "$TAGS" \
   ${JROK_LIMIT:+--limit "$JROK_LIMIT"} ${JROK_ANSIBLE_ARGS:-} | tee -a "$LOG" | \
-  grep -E '^(PLAY RECAP|TASK \[app : (Check application health|Show application status))|fatal|FAILED|ok=|"msg": "✅|agents connected|agents came back' || true
+  { grep -E '^(PLAY RECAP|TASK \[app : (Check application health|Show application status))|fatal|FAILED|ok=|"msg": "✅|agents connected|agents came back' || true; } || status=$?
 if [ "$LOG" != /dev/null ]; then
   for v in MONGODB_URI CERT_SYNC_API_KEY JWT_SECRET KOOMPI_CLIENT_SECRET CLOUDFLARE_TOKEN MAXMIND_LICENSE_KEY JROK_PEER_KEY TELEGRAM_BOT_TOKEN; do
-    [ -n "${!v}" ] && SECRET="${!v}" perl -pi -e 's/\Q$ENV{SECRET}\E/<redacted>/g' "$LOG"
+    if [ -n "${!v}" ]; then SECRET="${!v}" perl -pi -e 's/\Q$ENV{SECRET}\E/<redacted>/g' "$LOG"; fi
   done
 fi
+exit "$status"
