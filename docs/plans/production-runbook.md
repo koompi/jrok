@@ -29,6 +29,7 @@ The two new droplets carry the DigitalOcean tag `jrok-production`.
 
   Agents of the old worker code don't know `tcp_port_elsewhere`, so the names they connect through must not change until the workers are updated.
 - **One edge each:** `edge-sgp1/2/3.public.koompi.cloud` (used between edges) and `sgp2/3.private.koompi.cloud` (TCP).
+- **`jrok-edges.koompi.cloud`:** every healthy edge, kept by `jrok-dns-health` like the app records. Deploy workers read their edge list from it (`JROK_EDGES_DNS`), so edges come and go without touching a worker. Nobody connects to this name.
 - **Custom domains** pointed at 152.42.241.139 by an A record reach edge1 only. `scripts/custom-domain-dns-audit.ts` lists them.
 
 ## Deploy
@@ -65,14 +66,39 @@ On each deploy-worker host (no access from here), one worker first, then the res
 2. Deploy the worker from kconsole `main`.
 3. In the worker's env:
    - `JROK_SERVER=https://tunnel.koompi.cloud`. The edges have no certificate for `jrok.koompi.cloud`, so agents connecting to an edge by address with that name fail TLS.
-   - `JROK_EDGES=152.42.241.139,201.79.98.49,159.65.8.153`.
-   - `JROK_TCP_EDGE=152.42.241.139`: production's TCP ports are on edge1.
+   - `JROK_EDGES_DNS=jrok-edges.koompi.cloud`. The worker looks it up every 30 s: a new edge gets agents at once, and one missing for 3 minutes loses them. A failed lookup changes nothing. A fixed `JROK_EDGES=<ip>,<ip>` wins if set (for tests or an emergency).
+   - `JROK_TCP_EDGE=152.42.241.139`: production's TCP ports are on edge1, and TCP tunnels must not follow DNS.
 4. Restart the worker.
 5. Check:
    - `agentCount` in `/cluster/stats` on any edge rises on edges 2 and 3;
    - the worker logs `tunnels run in one jrok connector`;
    - an app keeps answering through each edge (`curl --resolve`).
-6. **Fallback:** `JROK_CONNECTOR=false` plus a restart gives one `jrok` process per tunnel. Removing `JROK_EDGES` puts agents back on one edge.
+6. **Fallback:** `JROK_CONNECTOR=false` plus a restart gives one `jrok` process per tunnel. Removing `JROK_EDGES_DNS` (and `JROK_EDGES`) puts agents back on one edge.
+
+## Adding, draining and removing edges
+
+Workers follow `jrok-edges.koompi.cloud`, so none of this touches them.
+
+**Add an edge:**
+1. Create the droplet (2 vCPU / 4 GB, tag `jrok-production`).
+2. Add its line to the inventory: next `vps_id`, an unused TCP range, `tcp_public_host` and `forward_host`.
+3. Create its two A records: `edge-sgpN.public.koompi.cloud` and `sgpN.private.koompi.cloud`.
+4. `JROK_LIMIT=edgeN scripts/deploy-production.sh all`.
+5. `scripts/deploy-production.sh nginx,dns-health`: the other edges learn about it. This reloads nginx and restarts only the checkers, never jrok.
+6. Result: the checkers add it to the app records and `jrok-edges` once it passes 3 checks, and workers start agents on it within about a minute.
+
+**Drain an edge** (before maintenance or removal):
+1. On the edge: `touch /etc/jrok/drain`.
+2. The other checkers take it out of every record (about 30 s, plus up to 60 s of DNS caching).
+3. Workers stop their agents there 3 minutes later. jrok on it keeps serving meanwhile.
+4. `rm /etc/jrok/drain` puts it back. The last healthy edge is never taken out.
+
+**Remove an edge:**
+1. Drain it, and wait until `/cluster/stats` shows it with no agents (about 5 minutes).
+2. Delete its inventory line, then `scripts/deploy-production.sh nginx,dns-health`.
+3. Destroy the droplet and delete its two A records.
+
+An edge that dies without warning leaves DNS in about 35 s, and workers stop using it 3 minutes later, while the other edges carry its traffic.
 
 **After the workers:**
 - resize edge1 (it needs a power-off; agents on the other edges cover it);

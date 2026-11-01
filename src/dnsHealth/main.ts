@@ -27,6 +27,7 @@ import { parseEdges, type Edge } from "./decide";
 import { CloudflareDns, cloudflareToken } from "./cloudflare";
 import { DnsHealthChecker } from "./checker";
 import { initTelegram, notifyEdgeDns } from "../services/notificationService";
+import { DRAIN_HEADER } from "../utils/drain";
 
 const env = process.env;
 const number = (name: string, fallback: number) => {
@@ -43,7 +44,10 @@ if (!env.MONGODB_URI || !checkHost || records.length === 0 || edges.length === 0
   process.exit(1);
 }
 
-/** /health over HTTPS on the edge's own address, verified as checkHost: what a visitor's connection does. */
+/**
+ * /health over HTTPS on the edge's own address, verified as checkHost: what a
+ * visitor's connection does. A draining edge (utils/drain.ts) counts as down.
+ */
 async function probe(edge: Edge): Promise<boolean> {
   const host = edge.address.includes(":") ? `[${edge.address}]` : edge.address;
   try {
@@ -54,7 +58,7 @@ async function probe(edge: Edge): Promise<boolean> {
       signal: AbortSignal.timeout(5_000),
     } as RequestInit);
     await res.arrayBuffer().catch(() => {});
-    return res.status === 200;
+    return res.status === 200 && !res.headers.has(DRAIN_HEADER);
   } catch {
     return false;
   }

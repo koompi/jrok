@@ -37,6 +37,7 @@ import { serverKeyAllowedFrom } from "./utils/serverKeySources";
 import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "./utils/wsFlowControl";
 import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
 import { firstSubprotocol } from "./utils/wsSubprotocol";
+import { DRAIN_HEADER, isDraining } from "./utils/drain";
 import {
   normalizeHostname,
   classifyHost,
@@ -1587,14 +1588,18 @@ async function startServer() {
         // ============ Public Routes (no auth required) ============
 
         // Health check (tunnel hosts never get here: there /health is the app's).
+        // A draining edge (utils/drain.ts) says so in a header, which only the
+        // DNS checkers act on.
         if (path === "/health" && method === "GET") {
+          const draining = isDraining();
           return addCors(new Response(
             JSON.stringify({
               success: true,
-              message: "Server is running",
+              message: draining ? "Server is running (draining)" : "Server is running",
               serverId: crossServerService.currentServerId,
+              ...(draining ? { draining: true } : {}),
             }),
-            { status: 200, headers: { "Content-Type": "application/json" } }
+            { status: 200, headers: { "Content-Type": "application/json", ...(draining ? { [DRAIN_HEADER]: "1" } : {}) } }
           ));
         }
 

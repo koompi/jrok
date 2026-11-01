@@ -29,6 +29,12 @@
     - `connector-crash.ts` (kills the connector under the worker's real `JrokService`; needs the worker source in `/root/kconsole-deploy` and the TCP echo `stg-tcp-echo`);
     - `cpu-per-request.sh` (connector against Node agents).
   - **WebSocket subprotocols (P32):** start `ws-protocol-app.cjs`; give it an agent each (connector and Node CLI) for 18083 (requires a protocol) and 18084 (ignores them); run `ws-protocol-client.cjs DOMAIN EDGE PROTOCOLS` through each edge with `graphql-transport-ws`, `graphql-transport-ws,graphql-ws` and `-`.
+  - **Edges from DNS (workers' `JROK_EDGES_DNS`):** `jrok-edges.jrok-staging.koompi.cloud` lists the healthy edges. To drain an edge, `touch /etc/jrok/drain` on it; `rm` brings it back. On the test droplet, `/root/edge-discovery-check.ts` runs the worker's real `JrokService` with `JROK_EDGES_DNS` and logs every 5 s which edges it uses, its agents per edge, and the app through each edge.
+    - Short timings for tests: `JROK_EDGES_DNS_INTERVAL_S=10`, `JROK_EDGES_DNS_REMOVE_AFTER_S=40`.
+    - 2026-11-01 results:
+      - drain: out of DNS after about 95 s, agent stopped 40 s later;
+      - undrain: back after 71 s;
+      - jrok stopped on edge2 for 75 s: kept in DNS (its nginx served through edge1), 68 of 68 requests OK.
   - **IP rules (P33):** use a new domain each time, so the tunnel record doesn't exist yet. Pass `--allow-ip <test droplet>` and check from elsewhere: 403, or a reset for `--tcp`.
   - **Start test processes with `systemd-run`:** anything started in the background over SSH dies when the session closes. Transient units disappear when stopped, so `stg-cd-<edge>` (the custom-domain agents) must be started again with `systemd-run` and the same command line.
 - **Server key (plan 3.4):** staging accepts it only from the edges and the operator's address in `server_key_sources` (inventory); from anywhere else jrok answers 401 and logs it. Update the address if yours changes.
