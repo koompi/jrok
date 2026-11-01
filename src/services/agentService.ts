@@ -40,11 +40,24 @@ export const AGENT_QUIET_MS = envMs("AGENT_QUIET_MS", 20_000);
 /** Silent this long (two missed heartbeats): closed, its unanswered requests failed or retried elsewhere. */
 export const AGENT_SILENT_MS = envMs("AGENT_SILENT_MS", 30_000);
 
-/** Record that an agent sent something (any message on its socket). */
+/**
+ * Record that an agent sent something (any message on its socket). It also
+ * keeps the agent's MongoDB record fresh: some older CLIs never send the
+ * "heartbeat" message, and the stale sweep and TTL then deleted the record of
+ * an agent still connected here. One edge served it from memory anyway; the
+ * other edges, which find agents through that record, answered "tunnel down".
+ */
 export function agentHeardFrom(socket: WebSocket): void {
   const id = socketAgentIds.get(socket);
-  if (id) lastHeard.set(id, Date.now());
+  if (id) {
+    lastHeard.set(id, Date.now());
+    void updateHeartbeat(id);
+  }
 }
+
+// How each local agent's record was written, to write it again if it's gone
+// (flushHeartbeats).
+const localRecords = new Map<string, { filter: Record<string, unknown>; record: Record<string, unknown> }>();
 
 /**
  * Close agents here that have been silent for AGENT_SILENT_MS. Returns their
@@ -391,6 +404,11 @@ export async function registerAgent(options: RegisterAgentOptions): Promise<Regi
     caps,
   };
 
+  localRecords.set(agentId, {
+    filter: groupMode && groupId ? { domain: finalDomain, instanceId: effectiveInstanceId } : { domain: finalDomain },
+    record: connectionRecord as unknown as Record<string, unknown>,
+  });
+
   if (groupMode && groupId) {
     // GROUP MODE: Upsert by domain + instanceId (handles reconnects after server restart)
     await collections.agentConnections.updateOne(
@@ -697,6 +715,7 @@ export async function unregisterAgent(id: string): Promise<void> {
 
   // Remove local socket reference
   localSockets.delete(id);
+  localRecords.delete(id);
   lastHeard.delete(id);
   pendingHeartbeats.delete(id);
 
@@ -896,10 +915,26 @@ export async function flushHeartbeats(): Promise<void> {
   pendingHeartbeats.clear();
   try {
     const collections = getCollections();
-    await collections.agentConnections.updateMany(
+    const now = new Date();
+    const result = await collections.agentConnections.updateMany(
       { agentId: { $in: ids } },
-      { $set: { lastHeartbeat: new Date() } }
+      { $set: { lastHeartbeat: now } }
     );
+    // A record gone while its agent is still connected here (deleted by the
+    // TTL or another server, or lost on a MongoDB outage): write it again, or
+    // the other edges can't find the agent.
+    if (result.matchedCount < ids.length) {
+      const present = new Set(
+        (await collections.agentConnections.find({ agentId: { $in: ids } }, { projection: { agentId: 1 } }).toArray())
+          .map((doc: any) => doc.agentId)
+      );
+      for (const id of ids) {
+        const saved = localRecords.get(id);
+        if (present.has(id) || !saved || !localSockets.has(id)) continue;
+        await collections.agentConnections.updateOne(saved.filter, { $set: { ...saved.record, lastHeartbeat: now } }, { upsert: true });
+        console.warn(`🩹 Agent ${id} (${localAgentDomain.get(id) ?? "?"}) is connected here but had no record: written again`);
+      }
+    }
   } catch (err) {
     // Retry on the next flush, but only for agents still connected here.
     for (const id of ids) {
