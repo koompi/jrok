@@ -4,11 +4,13 @@
 **Branch:** `feat/phase0-edge-fixes` (jrok repo)
 **Goal:** prove the Phase 0 changes on real servers with real TLS before production, and record how today's code behaves with several edges (the baseline Phase 1 must improve on).
 
-**Status:** built 2026-10-31 and **kept running** for the later phases (2 edges + 1 test droplet, DigitalOcean tag `jrok-staging`). Results are in the plan, section 2. Section 0 covers day-to-day use; sections 1–7 cover building it from scratch.
+**Status:** built 2026-10-31, used for every phase, and **destroyed 2026-11-01** once everything was in production (droplets and DNS records deleted, no snapshot). Results are in the plan, section 2. To test again, rebuild it with sections 1–7 (the playbook and `scripts/staging/` are kept); section 0 describes how it was used.
+- **Let's Encrypt:** a rebuild issues a wildcard for `jrok-staging.koompi.cloud`; three were issued in the week of 2026-11-01 (limit 5 a week for the same names). With the single renewer (`cert_renewer`), only the first edge issues one.
+- **Kept locally:** `~/.config/jrok-staging/secrets.env` (DigitalOcean token, zone id, old staging keys: make new ones for a rebuild) and the git-ignored `ansible/inventory.staging.ini` (old addresses).
 
 ---
 
-## 0. Working with the running staging
+## 0. Working with staging (as it ran until 2026-11-01)
 
 - **Hosts** are in `ansible/inventory.staging.ini` (not in git). The test droplet runs MongoDB (Docker `mongo`, private network, only the edges allowed by `mongo-firewall.service`), the test app (`stg-app.service`) and the same group-mode replica for `app` connected to each edge, as a worker will run it (`stg-agent@<edge-ip>.service`, with `--edge`; secrets in `/root/staging.env`). All of it comes back after a reboot.
 - **Deploy a branch to the edges:** `scripts/staging/deploy-edges.sh [tags]` (default `app`: rebuild and restart jrok; `nginx` for the nginx config). It copies the working tree to each edge and runs the playbook with the secrets from `~/.config/jrok-staging/secrets.env`. Done by hand, export the section 3 variables with the same values as before, or the playbook rewrites `jrok.service` with empty ones.

@@ -1,6 +1,6 @@
 # Production Runbook: jrok Edges
 
-**For:** [jrok scale-out plan](jrok-scale-out-plan.md); built and tested on staging first ([staging runbook](staging-runbook.md)).
+**For:** [jrok scale-out plan](jrok-scale-out-plan.md); built and tested on staging first ([staging runbook](staging-runbook.md); staging was destroyed on 2026-11-01 and is rebuilt from that runbook when needed).
 
 **Status (2026-11-01):** three edges in DigitalOcean Singapore serve app traffic, all on `v2.6.5`.
 - **Updated workers:** the deploy workers vps4 and selendra-03 follow `jrok-edges.koompi.cloud` with the connector, so their apps have an agent on every edge (failover tested, below).
