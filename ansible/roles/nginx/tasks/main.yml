@@ -157,7 +157,7 @@
             ''      "";
         }
 
-        # Per-IP request limit (zone "general") for jrok's own hosts: its API
+        # Per-IP request limit (zone "jrok_general") for jrok's own hosts: its API
         # and the agent endpoint. App traffic (a single-label subdomain of a
         # base domain) gets an empty key, which nginx never counts: one page
         # load makes dozens of requests, and many mobile users share one IP.
@@ -168,7 +168,10 @@
         {% endfor %}
             default $binary_remote_addr;
         }
-        limit_req_zone $jrok_limit_key zone=general:10m rate=10r/s;
+        # Not "general": edges built before this keyed a zone of that name by
+        # $binary_remote_addr, and nginx refuses a reload that gives an
+        # existing zone a new key (it keeps running the old configuration).
+        limit_req_zone $jrok_limit_key zone=jrok_general:10m rate=10r/s;
         # Agent handshakes (/ws/agent) have their own limit. A worker is one IP
         # holding hundreds of agents, which all reconnect at once when an edge
         # restarts: under the general limit 300 of them took 57 s to come back
@@ -306,7 +309,7 @@
           ssl_session_timeout 10m;
           
           # Rate limiting: jrok's own hosts only (see $jrok_limit_key)
-          limit_req zone=general burst=20 nodelay;
+          limit_req zone=jrok_general burst=20 nodelay;
 
           # The agent endpoint: this edge's jrok only (see upstream jrok_agents).
           location = /ws/agent {
@@ -483,9 +486,18 @@
 - name: Reload Nginx so a changed configuration takes effect
   # "started" leaves a running nginx alone, including the one apt started with
   # its default config, so without this the file above never went live.
-  systemd:
-    name: nginx
-    state: reloaded
+  # A reload nginx refuses (one that passes nginx -t, such as an existing
+  # limit zone given a new key) leaves the old configuration running while
+  # systemctl reports success: production ran its old nginx.conf that way
+  # after the first multi-edge deploy. So read what nginx logged about it.
+  shell: |
+    since=$(date '+%Y/%m/%d %H:%M:%S')
+    systemctl reload nginx
+    sleep 2
+    refused=$(awk -v s="$since" 'substr($0, 1, 19) >= s && /\[emerg\]/' /var/log/nginx/error.log)
+    if [ -n "$refused" ]; then echo "$refused" >&2; exit 1; fi
+  args:
+    executable: /bin/bash
   when: nginx_conf.changed
   tags: ["nginx"]
 

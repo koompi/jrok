@@ -56,7 +56,16 @@ while read -r name ip; do
 done < <(hosts)
 
 export ANSIBLE_NOCOLOR=1
+# JROK_LOG=<file>: the full output as well (e.g. with JROK_ANSIBLE_ARGS="--check --diff"
+# to preview), mode 600, every secret value replaced by <redacted>.
+LOG=${JROK_LOG:-/dev/null}
+[ "$LOG" = /dev/null ] || { (umask 077; : > "$LOG"); }
 cd ansible
 uvx --from ansible ansible-playbook -i inventory.production.ini playbook.yml --tags "$TAGS" \
-  ${JROK_LIMIT:+--limit "$JROK_LIMIT"} ${JROK_ANSIBLE_ARGS:-} | \
-  grep -E '^(PLAY RECAP|TASK \[app : (Check application health|Show application status))|fatal|FAILED|ok=|"msg": "✅|agents connected|agents came back'
+  ${JROK_LIMIT:+--limit "$JROK_LIMIT"} ${JROK_ANSIBLE_ARGS:-} | tee -a "$LOG" | \
+  grep -E '^(PLAY RECAP|TASK \[app : (Check application health|Show application status))|fatal|FAILED|ok=|"msg": "✅|agents connected|agents came back' || true
+if [ "$LOG" != /dev/null ]; then
+  for v in MONGODB_URI CERT_SYNC_API_KEY JWT_SECRET KOOMPI_CLIENT_SECRET CLOUDFLARE_TOKEN MAXMIND_LICENSE_KEY JROK_PEER_KEY TELEGRAM_BOT_TOKEN; do
+    [ -n "${!v}" ] && SECRET="${!v}" perl -pi -e 's/\Q$ENV{SECRET}\E/<redacted>/g' "$LOG"
+  done
+fi
