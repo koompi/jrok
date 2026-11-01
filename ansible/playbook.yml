@@ -84,6 +84,35 @@
         state: present
       tags: ["basic"]
 
+    # Small edges (1 GB, like the original) get swap for short spikes; RAM is
+    # still preferred (swappiness 10). swap_size: "0" for none.
+    - name: Swap file on edges with under 3 GB of RAM (swap_size, default 2G)
+      shell: |
+        set -e
+        if [ "$(swapon --show --noheadings | wc -l)" -eq 0 ]; then
+          fallocate -l {{ swap_size | default('2G') }} /swapfile
+          chmod 600 /swapfile
+          mkswap /swapfile > /dev/null
+          swapon /swapfile
+          grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          echo created
+        fi
+      args:
+        executable: /bin/bash
+      register: swap_result
+      changed_when: "'created' in swap_result.stdout"
+      when: ansible_memtotal_mb < 3000 and (swap_size | default('2G') | string) != '0'
+      tags: ["basic"]
+
+    - name: Prefer RAM over swap
+      sysctl:
+        name: vm.swappiness
+        value: "10"
+        state: present
+        sysctl_set: true
+      when: ansible_memtotal_mb < 3000
+      tags: ["basic"]
+
   roles:
     - certbot
     - nginx

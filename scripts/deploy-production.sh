@@ -6,7 +6,7 @@
 #   JROK_LIMIT=edge2,edge3 scripts/deploy-production.sh ...    some edges only
 #
 # Deploys exactly the release branch (origin/v2.6.5, what workers' install.sh
-# installs), never the working tree. The inventory is ansible/inventory.production.ini
+# installs): the code and the playbook, never the working tree. The inventory is ansible/inventory.production.ini
 # (not committed). Secrets are read from the first production edge's
 # jrok.service, certbot and GeoIP files at run time, so they are kept in one
 # place and never printed; JROK_PEER_KEY (and Telegram, when set) come from
@@ -61,8 +61,11 @@ export ANSIBLE_NOCOLOR=1
 # to preview), mode 600, every secret value replaced by <redacted>.
 LOG=${JROK_LOG:-/dev/null}
 [ "$LOG" = /dev/null ] || { (umask 077; : > "$LOG"); }
-cd ansible
-uvx --from ansible ansible-playbook -i inventory.production.ini playbook.yml --tags "$TAGS" \
+# The playbook and roles from the same release as the code (the inventory
+# isn't committed, so it comes from here).
+INVENTORY_PATH="$PWD/$INVENTORY"
+cd "$TREE/ansible"
+uvx --from ansible ansible-playbook -i "$INVENTORY_PATH" playbook.yml --tags "$TAGS" \
   ${JROK_LIMIT:+--limit "$JROK_LIMIT"} ${JROK_ANSIBLE_ARGS:-} | tee -a "$LOG" | \
   grep -E '^(PLAY RECAP|TASK \[app : (Check application health|Show application status))|fatal|FAILED|ok=|"msg": "✅|agents connected|agents came back' || true
 if [ "$LOG" != /dev/null ]; then
