@@ -105,6 +105,16 @@ An edge that dies without warning leaves DNS in about 35 s, and workers stop usi
 - close port 3000 on edge1 once OpenResty's upstream is known;
 - then the two Cambodian edges (Phase 4).
 
+## Floods
+
+- **Settings:** see jrok's [scale-out plan](jrok-scale-out-plan.md), 3.6. `flood_exempt` in the inventory lists the deploy workers (116.212.132.113, 202.124.44.232): apps calling other apps through their public URLs must never be blocked. Add any new worker or monitor there and run `scripts/deploy-production.sh` (tag `app`).
+- **A block happening:** an edge logs `🛑 Flood blocked: <ip> …` (`journalctl -u jrok | grep "Flood blocked"`). With `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` set on the edges, a person gets the same message; not configured yet.
+- **List or lift blocks** with the server key, on any edge (the change reaches the others within 10 s):
+  - list: `GET /security/blocked-ips`;
+  - lift: `POST /security/unblock-ip` with `{"ip":"…"}`;
+  - block by hand: `POST /security/block-ip` with `{"ip":"…","reason":"…","duration":3600}`.
+- **One app busy:** its visitors get 503 with `X-Jrok-App-Busy`, and jrok logs `🚦 <app>: N requests already waiting`. The app itself is too slow for its traffic: more replicas, or a look at the app.
+
 ## Checks
 
 ```bash

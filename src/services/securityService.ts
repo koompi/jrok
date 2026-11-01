@@ -1184,6 +1184,18 @@ export function unblockIp(ip: string): void {
 /**
  * Check if IP is blocked
  */
+/** The block on `ip` in force now (why, and seconds left), or null. */
+export function activeBlock(ip: string): { reason: string; secondsLeft: number } | null {
+  const blocked = blockedIps.get(ip);
+  if (!blocked) return null;
+  const left = blocked.expiresAt - Date.now();
+  if (left <= 0) {
+    blockedIps.delete(ip);
+    return null;
+  }
+  return { reason: blocked.reason, secondsLeft: Math.ceil(left / 1000) };
+}
+
 export function isIpBlocked(ip: string): boolean {
   const blocked = blockedIps.get(ip);
   if (!blocked) return false;

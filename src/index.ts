@@ -24,14 +24,15 @@ import { initGeoip, lookupGeo } from "./services/geoipService";
 import { connectDatabase, closeDatabase, createDistributedStateIndexes, cleanupStaleConnectionsOnStartup, AGENT_STALE_MS } from "./utils/mongodb";
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { purgeExpiredCaches } from "./utils/database";
-import { initTelegram } from "./services/notificationService";
+import { initTelegram, notifyOperators } from "./services/notificationService";
+import { FloodGuard, floodGuardOptionsFromEnv, blockedResponse, appBusyResponse } from "./services/floodGuard";
 import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
 import * as planLimitService from "./services/planLimitService";
 import { PROXY_MODE } from "./config/proxyMode";
 import { allBaseDomains } from "./utils/baseDomains";
 import { getClientIp, setForwardedClientHeaders, trustedProxyHops, trustedProxyIps } from "./utils/clientIp";
-import { stripPeerHeaders } from "./utils/peerLink";
+import { isFromPeer, stripPeerHeaders } from "./utils/peerLink";
 import * as acmeChallenge from "./services/acmeChallenge";
 import { serverKeyAllowedFrom } from "./utils/serverKeySources";
 import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "./utils/wsFlowControl";
@@ -233,6 +234,18 @@ async function handleWebSocketTunnel(
   return new Response("Failed to upgrade WebSocket connection", { status: 400 });
 }
 
+// Flood protection for app traffic (services/floodGuard.ts). A flooding
+// address is blocked here at once and saved for the other edges.
+const floodGuard = new FloodGuard({
+  ...floodGuardOptionsFromEnv(),
+  block: (ip, reason, seconds) => {
+    securitySync.setRule("block-ip", ip, true, { reason, durationSeconds: seconds }).catch((error) =>
+      console.error(`⚠️ Flood block of ${ip} holds on this edge only (not saved for the others):`, error?.message || error));
+  },
+  notify: (message) => { notifyOperators(message).catch(() => {}); },
+  log: (message) => console.warn(message),
+});
+
 // Forward HTTP request to agent via WebSocket
 /**
  * Save a security rule for every server (securitySync). If MongoDB can't take
@@ -290,7 +303,21 @@ function answerAgentsPendingRequests(agentId: string): void {
   }
 }
 
+/**
+ * A request for the app, sent to its agent; resolves when the app starts
+ * answering. At most APP_MAX_WAITING of an app's requests wait at once
+ * (services/floodGuard.ts): beyond that, that app alone is answered 503.
+ */
 async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string, clientIp?: string): Promise<Response> {
+  if (!floodGuard.startWaiting(agent.domain)) return appBusyResponse();
+  try {
+    return await sendRequestToAgent(req, agentWs, agent, tunnelId, clientIp);
+  } finally {
+    floodGuard.stopWaiting(agent.domain);
+  }
+}
+
+async function sendRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string, clientIp?: string): Promise<Response> {
   return new Promise(async (resolve) => {
     const requestId = generateId();
     const timeout = setTimeout(() => {
@@ -1296,6 +1323,17 @@ async function startServer() {
         // path on a tunnel host ends here; this block always returns.
         if (tunnelDomain) {
           const subdomain = tunnelDomain; // For backward compatibility with existing code
+
+          // Flood protection (services/floodGuard.ts): a blocked address is
+          // refused before any routing work, and one sending far more than any
+          // person would is blocked on every edge. A request another edge
+          // forwarded here was counted there.
+          const block = securityService.activeBlock(clientIp);
+          if (block) return blockedResponse(block);
+          if (floodGuard.count(clientIp, subdomain, isFromPeer(req.headers))) {
+            const now = securityService.activeBlock(clientIp);
+            if (now) return blockedResponse(now);
+          }
 
           // Check if agent is on this server or needs cross-server routing
           const routeResult = await crossServerService.findServerForDomain(subdomain);

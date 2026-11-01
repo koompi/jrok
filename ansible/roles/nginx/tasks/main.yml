@@ -49,7 +49,7 @@
     content: |
       user www-data;
       worker_processes auto;
-      worker_rlimit_nofile 8192;
+      worker_rlimit_nofile {{ nginx_worker_rlimit_nofile | default(65536) }};
       pid /run/nginx.pid;
       error_log /var/log/nginx/error.log warn;
       
@@ -57,7 +57,9 @@
       load_module /usr/lib/nginx/modules/ngx_stream_module.so;
       
       events {
-        worker_connections 4096;
+        # Each proxied request holds two (visitor and jrok); with 4096, two
+        # addresses at the per-address limit (jrok_conn_per_ip) filled an edge.
+        worker_connections {{ nginx_worker_connections | default(16384) }};
         use epoll;
       }
       
@@ -111,6 +113,14 @@
         keepalive_timeout 65;
         types_hash_max_size 2048;
         client_max_body_size {{ client_max_body_size | default('10M') }};
+
+        # Slow clients (attacks that hold connections open by sending a byte
+        # now and then): headers within 15 s, and no 30 s gap while sending a
+        # body (nginx's defaults are 60 s each). Timed-out connections are
+        # reset at once instead of lingering.
+        client_header_timeout 15s;
+        client_body_timeout 30s;
+        reset_timedout_connection on;
 
         # Gzip compression. jrok's agent decompresses whatever the app sent
         # before it crosses the tunnel, so this is the only compression a
@@ -179,6 +189,29 @@
         # bounds a flood of handshakes from one address.
         limit_req_zone $binary_remote_addr zone=agents:10m rate={{ jrok_agent_rate | default('20r/s') }};
         limit_req_zone $binary_remote_addr zone=strict:10m rate=5r/s;
+
+        # Connections at once from one address (with HTTP/2, each request in
+        # flight counts as one). One address can't use up the edge's
+        # connections; a page load is 30–60 requests, so the limit is far above
+        # people, even many behind one carrier address. Agents (/ws/agent: a
+        # worker holds hundreds of them) and the other edges are never
+        # counted. Request floods are jrok's (src/services/floodGuard.ts).
+        geo $jrok_conn_exempt {
+          default 0;
+          127.0.0.1 1;
+          {% for source in jrok_peer_sources %}
+          {{ source }} 1;
+          {% endfor %}
+        }
+        map "$jrok_conn_exempt:$uri" $jrok_conn_key {
+          ~^1: "";
+          ~^0:/ws/agent "";
+          default $binary_remote_addr;
+        }
+        limit_conn_zone $jrok_conn_key zone=jrok_conn:10m;
+        limit_conn jrok_conn {{ jrok_conn_per_ip | default(1000) }};
+        limit_conn_status 429;
+        limit_conn_log_level warn;
 
         # This server's own jrok. Each edge's nginx sends to its local jrok,
         # which forwards to whichever edge holds an app's tunnel. The other

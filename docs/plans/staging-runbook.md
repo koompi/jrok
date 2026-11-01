@@ -35,6 +35,12 @@
       - drain: out of DNS after about 95 s, agent stopped 40 s later;
       - undrain: back after 71 s;
       - jrok stopped on edge2 for 75 s: kept in DNS (its nginx served through edge1), 68 of 68 requests OK.
+  - **Flood protection (plan 3.6):** staging sets `flood_block_seconds=120` and `app_max_waiting=200` (inventory) so tests finish quickly.
+    - Flood: `autocannon -c 50 -d 20` from the test droplet; it gets blocked, on both edges.
+    - App cap: 400 parallel requests to `/slow?ms=8000`, from one Bun process (400 curl processes overload the droplet).
+    - Connections: 1,200 WebSockets to `/ws-echo` (`/root/connflood.ts`, the app pinned to edge1 in `/etc/hosts`).
+    - Slow clients: half-sent headers (`slowloris.py`).
+    - The test droplet is also where the agents run; a block never affects agents.
   - **IP rules (P33):** use a new domain each time, so the tunnel record doesn't exist yet. Pass `--allow-ip <test droplet>` and check from elsewhere: 403, or a reset for `--tcp`.
   - **Start test processes with `systemd-run`:** anything started in the background over SSH dies when the session closes. Transient units disappear when stopped, so `stg-cd-<edge>` (the custom-domain agents) must be started again with `systemd-run` and the same command line.
 - **Server key (plan 3.4):** staging accepts it only from the edges and the operator's address in `server_key_sources` (inventory); from anywhere else jrok answers 401 and logs it. Update the address if yours changes.

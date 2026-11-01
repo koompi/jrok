@@ -28,9 +28,35 @@ use tokio_util::sync::CancellationToken;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Every tunnel on the worker, and every visitor connection to its apps, is
+/// an open file in this one process. The usual soft limit (1024) ran out at
+/// 1,000 WebSockets on staging ("Too many open files"), so raise it to the
+/// hard limit, as the jrok CLI's many processes never needed. Returns the
+/// limit now in force.
+fn raise_open_file_limit() -> u64 {
+    // SAFETY: getrlimit/setrlimit only read and write the struct passed.
+    unsafe {
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+            return 0;
+        }
+        if limit.rlim_cur < limit.rlim_max {
+            let raised = libc::rlimit { rlim_cur: limit.rlim_max, rlim_max: limit.rlim_max };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &raised) == 0 {
+                return raised.rlim_cur as u64;
+            }
+        }
+        limit.rlim_cur as u64
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
+    let open_files = raise_open_file_limit();
+    if open_files > 0 && open_files < 65_536 {
+        eprintln!("jrok-connector: only {open_files} open files allowed (hard limit); a busy worker needs more (LimitNOFILE)");
+    }
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("--version") {
         println!("jrok-connector {VERSION}");
@@ -60,15 +86,15 @@ async fn main() {
         return;
     }
 
-    control(tx).await;
+    control(tx, open_files).await;
     // Nobody reads what is left: don't wait on a tunnel still winding down.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), writer).await;
     std::process::exit(0);
 }
 
 /// Open and close tunnels as the worker asks; stop them all when it goes away.
-async fn control(tx: mpsc::UnboundedSender<String>) {
-    let _ = tx.send(serde_json::json!({ "ready": true, "version": VERSION }).to_string());
+async fn control(tx: mpsc::UnboundedSender<String>, open_files: u64) {
+    let _ = tx.send(serde_json::json!({ "ready": true, "version": VERSION, "maxOpenFiles": open_files }).to_string());
     let mut tunnels: HashMap<String, CancellationToken> = HashMap::new();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
 

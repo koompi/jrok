@@ -208,6 +208,11 @@ export async function notifyEdgeDns(
   await sendTelegramMessage(`${what}\nRecords: <code>${detail.records.join(", ")}</code>`);
 }
 
+/** A message for whoever runs the edges (e.g. a flood blocked). */
+export async function notifyOperators(message: string): Promise<void> {
+  await sendTelegramMessage(message);
+}
+
 /**
  * Notify about VPS server health status change
  */

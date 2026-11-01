@@ -123,6 +123,8 @@ Two edges built from the Ansible role on DigitalOcean SGP1, each 1 vCPU / 1 GB "
 | P33 | An agent's IP rules (`--allow-ip`, `--block-ip`) on a new tunnel were often not enforced | `index.ts` (applied while the tunnel record was still being created), `securityService.setTunnelIpSecurity` | The rules stayed under the domain only, unsaved, while requests and TCP connections check the tunnel id: a new service's allowlist let everyone in until its agent reconnected. **In production** (the worker passes customers' allowlists this way). Found testing the connector, which connects fast enough to lose the race every time. **Fixed:** in force at once under the domain (requests fall back to it), saved against the tunnel once its record exists. Staging: new and existing tunnels, connector and CLI, HTTP and TCP, refused from outside the list. | 1 |
 | P34 | An edge forwarding a request to another edge followed the app's redirect itself | `crossServerService.forwardRequest` (`fetch` without `redirect: 'manual'`) | The visitor got the next page under the old URL (a sign-in redirect showed the login page at "/"); a Set-Cookie on the redirect was lost; a redirect to an external sign-in provider was fetched by the edge. Found on production's second edge (200 where the first answered 307). **Fixed:** redirects pass through. | 1 |
 | P35 | nginx refused the first reload of the new configuration on production, and the deploy carried on | Ansible nginx role: zone `general` changed its key; the reload task trusted systemctl | Production kept its old nginx.conf in memory: per-IP limits on app traffic, no edge-to-edge entry, and no later reload could take effect. **Fixed:** zone renamed `jrok_general`; the reload task fails if nginx logs an `[emerg]` for it. | 2 |
+| P36 | The connector ran with the usual limit of 1,024 open files, and it holds every tunnel on a worker and every visitor connection to their apps | `connector/src/main.rs` | At 1,000 WebSockets to one app on staging: "Too many open files", and new visitors' connections failed. Found by the flood tests, before any worker used the connector. **Fixed:** it raises the limit to the hard limit at start (524,288 under systemd) and reports it (`maxOpenFiles`). | 5 |
+| P37 | nginx allowed 4,096 connections per worker; each proxied request holds two | Ansible nginx role | Two addresses at the per-address connection limit would fill a 1 vCPU edge. **Fixed:** 16,384 connections, 65,536 open files per worker. | 3 |
 | P15 | When jrok stops but nginx keeps running, that edge answers 502, and DNS keeps sending visitors to it | nginx `upstream jrok` lists only the local jrok | With two edges in DNS, about half of visitors fail until jrok is back or the edge leaves DNS (staging). **Fixed in 2.6** for jrok down; a whole machine down still needs health-checked DNS. | 2 |
 
 ---
@@ -398,6 +400,29 @@ Browsers and curl try the next address when one doesn't answer, so a dead edge c
 A third run was disturbed by a deploy and is left out. So capacity adds up with edges (1.6–1.8× here; the replicas, on 2 vCPU machines, were close to their own limit). DNS hands out the edges about evenly: of 40 queries, the first address was each edge 16–24 times from 1.1.1.1, 8.8.8.8 and Cloudflare itself.
 
 **Before shipping** (found comparing production with the branch): GeoIP role (P28), production's `MAX_REQUEST_BODY_MB` kept, base certificate by default (P29), and alerts to Telegram when an edge leaves or rejoins DNS, every edge looks down, or a rolling deploy stops (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`; none until they are set).
+
+**3.6 Flood protection (built 2026-11-01).** With no proxy in front and no per-IP limit on app traffic, jrok and nginx now stop floods themselves (src/services/floodGuard.ts, Ansible nginx role):
+- **Request floods:** an address sending one edge more than 3,000 requests in 10 s (a page load is 30–60) is blocked on every edge:
+  - for 10 minutes, doubling each time it returns the same day, up to a day;
+  - shared through securitySync, so the other edges apply it within 10 s;
+  - refused with 429 before any routing work, with an alert to Telegram.
+
+  Never blocked: `flood_exempt` (production: the deploy workers' addresses), private addresses, and requests forwarded between edges. Agents and jrok's API are never counted.
+- **One app's flood:** at most 1,000 of an app's requests wait at once for it to start answering (per edge, `app_max_waiting`). Beyond that, that app alone gets 503 (`X-Jrok-App-Busy`), and every other app is served normally.
+- **Connection floods:** nginx caps simultaneous connections per address at 1,000 (with HTTP/2, each request in flight counts) and answers 429 beyond that. Agents and other edges are not counted.
+- **Slow clients:** headers must arrive within 15 s, with at most 30 s between body reads.
+
+Staging results:
+
+| Test | Result |
+|---|---|
+| One address flooding at 2,100 requests/s | Exactly 3,000 served; the next 39,370 got 429; the other edge applied the block within 9 s; other visitors served normally on both edges; the block lifted by itself |
+| 10 page loads × 60 requests in 5 s from one address | All 600 served, no block |
+| 400 requests at once to one app's 8 s page (cap 200 on staging) | 200 served, 200 refused at once with 503 app busy; another app answered in 0.1–0.16 s meanwhile |
+| 1,200 WebSockets from one address | 1,000 opened, 200 refused; others' requests stayed at 0.13–0.17 s (P36 was found here) |
+| 50 slow-header connections | All closed at 15 s |
+
+Not covered: a network flood measured in gigabits, which fills the link before nginx sees it. That needs a provider in front (decided later).
 
 ### Phase 4: More regions in Cambodia, about 2 weeks, after Phase 2 is stable
 

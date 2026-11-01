@@ -519,6 +519,7 @@ dependencies = [
  "bytes",
  "flate2",
  "futures-util",
+ "libc",
  "rand",
  "reqwest",
  "rustls",

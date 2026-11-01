@@ -129,6 +129,20 @@
       Environment=VPS_REGION={{ vps_region | default('default') }}
       # Largest request body jrok accepts; nginx's client_max_body_size caps it too.
       Environment=MAX_REQUEST_BODY_MB={{ max_request_body_mb | default(10) }}
+      # Flood protection (src/services/floodGuard.ts); unset: its defaults.
+      # flood_exempt: addresses never blocked (e.g. kconsole's hosts).
+      {% if flood_requests is defined %}
+      Environment=FLOOD_REQUESTS={{ flood_requests }}
+      {% endif %}
+      {% if flood_block_seconds is defined %}
+      Environment=FLOOD_BLOCK_S={{ flood_block_seconds }}
+      {% endif %}
+      {% if flood_exempt is defined %}
+      Environment=FLOOD_EXEMPT={{ flood_exempt }}
+      {% endif %}
+      {% if app_max_waiting is defined %}
+      Environment=APP_MAX_WAITING={{ app_max_waiting }}
+      {% endif %}
       {% if telegram_bot_token | length > 0 and telegram_chat_id | length > 0 %}
       Environment=TELEGRAM_BOT_TOKEN={{ telegram_bot_token }}
       Environment=TELEGRAM_CHAT_ID={{ telegram_chat_id }}
