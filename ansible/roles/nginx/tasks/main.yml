@@ -146,6 +146,22 @@
         # Authorization header are neither cached nor answered from cache.
         proxy_cache_path /var/cache/nginx/jrok levels=1:2 keys_zone=jrok_cache:20m
                          max_size={{ jrok_cache_max_size | default('1g') }} inactive=7d use_temp_path=off;
+        # HTML is never kept here: a page names the app's other files, and after
+        # a redeploy the old one (Next.js marks prerendered pages s-maxage=1 year)
+        # kept showing the old app. Hashed files (_next/static) still are.
+        map $upstream_http_content_type $jrok_is_html {
+            "~*^text/html" 1;
+            default 0;
+        }
+        # Browsers ask again each time (a 304 when nothing changed) for what the
+        # app says nothing about, and for HTML it only lets shared caches keep:
+        # a redeploy shows at once, with no forced refresh. What sets its own
+        # max-age keeps it. Like Vercel's default for responses without one.
+        map "$upstream_http_content_type|$upstream_http_cache_control" $jrok_revalidate {
+            "~^[^|]*\|$" "no-cache";
+            "~*^text/html[^|]*\|(?!.*max-age=)" "no-cache";
+            default "";
+        }
         map $upstream_http_cache_control $jrok_not_shareable {
             "~*(^|[ ,])(public|s-maxage=)" 0;
             default 1;
@@ -164,6 +180,7 @@
         # value adds no header). Here rather than in a location: a location's
         # own add_header would drop the security headers above.
         add_header X-Cache-Status $upstream_cache_status always;
+        add_header Cache-Control $jrok_revalidate;
         
         # WebSocket upgrades. Ordinary requests get an empty Connection header,
         # which lets nginx reuse its connections to jrok (upstream keepalive);
@@ -415,8 +432,9 @@
             # Edge cache (see proxy_cache_path). While the app or its tunnel is
             # down, cached files are still served (use_stale).
             proxy_cache jrok_cache;
-            proxy_cache_key $scheme$host$request_uri;
-            proxy_no_cache $jrok_not_shareable $http_authorization;
+            # v2: drops what v1 kept, HTML among it.
+            proxy_cache_key v2$scheme$host$request_uri;
+            proxy_no_cache $jrok_not_shareable $jrok_is_html $http_authorization;
             proxy_cache_bypass $http_authorization;
             # No proxy_cache_lock: it makes concurrent requests for one URL wait
             # (up to 5 s) to learn whether the first answer is cacheable, which
