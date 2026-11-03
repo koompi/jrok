@@ -252,7 +252,17 @@
         # (staging). The burst lets a whole worker in at once; the rate still
         # bounds a flood of handshakes from one address.
         limit_req_zone $binary_remote_addr zone=agents:10m rate={{ jrok_agent_rate | default('20r/s') }};
-        limit_req_zone $binary_remote_addr zone=strict:10m rate=5r/s;
+        # jrok's certificate API (/certificates/ on a base domain itself), 5/s
+        # per address. On an app's own name the path is the app's: it used to
+        # match there too, and gave the app's visitors 503s. A new zone name
+        # because the old "strict" one had another key (see jrok_general).
+        map "$host:$uri" $jrok_strict_key {
+          default "";
+        {% for d in jrok_base_domains %}
+          "~^{{ d | regex_escape }}:/certificates/" $binary_remote_addr;
+        {% endfor %}
+        }
+        limit_req_zone $jrok_strict_key zone=jrok_strict:10m rate=5r/s;
 
         # Connections at once from one address (with HTTP/2, each request in
         # flight counts as one). One address can't use up the edge's
@@ -405,8 +415,10 @@
           ssl_session_cache shared:SSL:10m;
           ssl_session_timeout 10m;
           
-          # Rate limiting: jrok's own hosts only (see $jrok_limit_key)
+          # Rate limiting: jrok's own hosts only (see $jrok_limit_key), and its
+          # certificate API more strictly ($jrok_strict_key).
           limit_req zone=jrok_general burst=20 nodelay;
+          limit_req zone=jrok_strict burst=5 nodelay;
 
           # The agent endpoint: this edge's jrok only (see upstream jrok_agents).
           location = /ws/agent {
@@ -483,25 +495,11 @@
             proxy_send_timeout 60s;
             proxy_read_timeout 3600s;
           }
-          
-          # Health check endpoint
-          location /health {
-            proxy_pass http://jrok/health;
-            access_log off;
-          }
-          
-          # API endpoints - stricter rate limiting
-          location /certificates/ {
-            limit_req zone=strict burst=5 nodelay;
-            proxy_pass http://jrok;
-            proxy_http_version 1.1;
-            
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_set_header Connection "";
-          }
+
+          # /health and /certificates/ have no location of their own: on an
+          # app's name they are the app's (an uptime monitor on its /health got
+          # jrok's answer while the app was down), and on a base domain itself
+          # jrok answers them through "/" above, with the Host it needs.
         }
         {% if jrok_peer_tls | bool %}
 
