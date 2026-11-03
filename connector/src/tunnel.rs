@@ -10,15 +10,22 @@
 //! edge doesn't take in 30 s (an edge that stopped reading) ends the
 //! connection, and the kernel gives up on a link whose data goes unacknowledged
 //! for a minute (TCP_USER_TIMEOUT).
+//!
+//! The other way, a TCP tunnel pushes back: while more than 8 MB waits for its
+//! local services, its link isn't read (until below 4 MB), so the edge's
+//! buffer toward us fills and the edge pauses the customer's socket. A pause
+//! is ours, not the edge's silence: the watchdog doesn't count it, and
+//! heartbeats go on.
 
 use crate::args::TunnelConfig;
 use crate::output::Output;
 use futures_util::{Sink, SinkExt, StreamExt};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{interval_at, sleep, timeout};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -33,6 +40,10 @@ pub const QUEUE_BYTES: usize = 8 << 20;
 /// Data the edge doesn't acknowledge this long ends the connection
 /// (TCP_USER_TIMEOUT): it is gone, or stopped reading.
 const EDGE_USER_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bytes waiting for a tunnel's TCP services above which its link isn't
+/// read, and below which it is again.
+const TCP_HIGH_WATER: usize = 8 << 20;
+const TCP_LOW_WATER: usize = 4 << 20;
 
 /// How a tunnel paces itself. Tests shorten these.
 #[derive(Clone, Copy, Debug)]
@@ -78,6 +89,10 @@ pub struct Conn {
     pub http_aborts: Mutex<HashMap<String, CancellationToken>>,
     pub ws_conns: Mutex<HashMap<String, crate::ws::Entry>>,
     pub tcp_conns: Mutex<HashMap<String, crate::tcp::Local>>,
+    /// Bytes from the edge waiting for this tunnel's TCP services (tcp.rs).
+    tcp_backlog: AtomicUsize,
+    /// Told when the backlog falls below TCP_LOW_WATER.
+    tcp_drained: Notify,
     /// Cancelled when the connection ends: everything relayed through it stops.
     pub closed: CancellationToken,
 }
@@ -94,9 +109,29 @@ impl Conn {
             http_aborts: Mutex::new(HashMap::new()),
             ws_conns: Mutex::new(HashMap::new()),
             tcp_conns: Mutex::new(HashMap::new()),
+            tcp_backlog: AtomicUsize::new(0),
+            tcp_drained: Notify::new(),
             closed: CancellationToken::new(),
         });
         (conn, rx)
+    }
+
+    /// `bytes` more wait for a TCP service. Counted before they can be
+    /// written, so the count never goes below zero.
+    pub fn tcp_queued(&self, bytes: usize) {
+        self.tcp_backlog.fetch_add(bytes, Ordering::SeqCst);
+    }
+
+    /// `bytes` were written to a TCP service, or never will be.
+    pub fn tcp_written(&self, bytes: usize) {
+        let before = self.tcp_backlog.fetch_sub(bytes, Ordering::SeqCst);
+        if before >= TCP_LOW_WATER && before - bytes < TCP_LOW_WATER {
+            self.tcp_drained.notify_one();
+        }
+    }
+
+    fn tcp_backlog(&self) -> usize {
+        self.tcp_backlog.load(Ordering::SeqCst)
     }
 
     pub fn has(&self, feature: &str) -> bool {
@@ -291,13 +326,28 @@ async fn serve(
     let mut ping = interval_at(start + timing.ping, timing.ping);
     let mut watchdog = interval_at(start + timing.watchdog, timing.watchdog);
     let mut last_inbound = Instant::now();
+    // Set while the link isn't read: too much waits for the TCP services.
+    let mut paused: Option<Instant> = None;
 
     loop {
+        if paused.is_none() && conn.tcp_backlog() > TCP_HIGH_WATER {
+            paused = Some(Instant::now());
+        }
         tokio::select! {
             _ = stop.cancelled() => break,
             // The writer gave up on the edge.
             _ = conn.closed.cancelled() => break,
-            message = stream.next() => match message {
+            _ = conn.tcp_drained.notified(), if paused.is_some() => {
+                if conn.tcp_backlog() < TCP_LOW_WATER {
+                    let waited = paused.take().map(|since| since.elapsed()).unwrap_or_default();
+                    // Ours, not the edge's silence.
+                    last_inbound = Instant::now();
+                    if waited >= Duration::from_secs(1) {
+                        out.out(format!("⏸️  TCP: waited {:.1}s for the local service to catch up", waited.as_secs_f64()));
+                    }
+                }
+            }
+            message = stream.next(), if paused.is_none() => match message {
                 Some(Ok(m)) => {
                     last_inbound = Instant::now();
                     match m {
@@ -315,7 +365,7 @@ async fn serve(
             _ = heartbeat.tick() => conn.send_now(Message::Text(serde_json::json!({ "type": "heartbeat" }).to_string())),
             _ = ping.tick() => conn.send_now(Message::Ping(Vec::new())),
             _ = watchdog.tick() => {
-                if last_inbound.elapsed() > timing.dead_after {
+                if paused.is_none() && last_inbound.elapsed() > timing.dead_after {
                     out.err(format!("⚠️  No response from server for {}s — connection is dead, forcing reconnect", last_inbound.elapsed().as_secs()));
                     break;
                 }
@@ -419,6 +469,34 @@ pub mod testing {
         let (conn, rx) = Conn::new(Arc::new(config("http://127.0.0.1:9", app_port)), out);
         conn.features.lock().unwrap().extend(features.iter().map(|f| f.to_string()));
         (conn, rx, lines)
+    }
+
+    /// A database that takes the connection and stops reading (a checkpoint,
+    /// an index build) until `go`, then reads everything: what it got, in order.
+    pub async fn stalling_service() -> (u16, tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<Vec<u8>>) {
+        use tokio::io::AsyncReadExt;
+        // A small receive buffer: a stalled database's would be full.
+        let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        socket.set_recv_buffer_size(64 * 1024).unwrap();
+        socket.bind(&"127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap().into()).unwrap();
+        socket.listen(8).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(socket.into()).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (go, go_rx) = tokio::sync::oneshot::channel::<()>();
+        let (done_tx, done) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let _ = go_rx.await;
+            let mut got = Vec::new();
+            let _ = timeout(Duration::from_secs(30), s.read_to_end(&mut got)).await;
+            let _ = done_tx.send(got);
+        });
+        (port, go, done)
+    }
+
+    pub fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
     }
 
     /// The JSON messages sent to the edge so far (binary frames skipped).
@@ -551,4 +629,78 @@ mod tests {
         timeout(Duration::from_secs(1), tunnel).await.expect("the tunnel ended within a second").unwrap();
         assert!(asked.elapsed() < Duration::from_secs(1));
     }
+
+    /// The TCP finding's scenario, end to end: a restore at full speed into a
+    /// database that stalls for longer than the watchdog allows. The tunnel
+    /// holds the edge back instead of buffering or cutting it off, keeps
+    /// heartbeating, isn't dropped for its own pause, and everything arrives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tcp_tunnel_holds_the_edge_back_while_its_service_stalls() {
+        use base64::Engine;
+        use std::sync::atomic::AtomicUsize;
+        let (port, go, done) = testing::stalling_service().await;
+        let data = testing::pattern(70 << 20);
+        let messages: Vec<String> = data
+            .chunks(64 * 1024)
+            .map(|c| serde_json::json!({ "type": "tcp_data", "connectionId": "c1", "data": base64::engine::general_purpose::STANDARD.encode(c) }).to_string())
+            .collect();
+        let edge = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let edge_port = edge.local_addr().unwrap().port();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let heartbeats = Arc::new(AtomicUsize::new(0));
+        let (pushed_tx, pushed) = tokio::sync::oneshot::channel::<Duration>();
+        {
+            let (connections, heartbeats) = (connections.clone(), heartbeats.clone());
+            tokio::spawn(async move {
+                let (s, _) = edge.accept().await.unwrap();
+                connections.fetch_add(1, Ordering::SeqCst);
+                let (mut sink, mut stream) = tokio_tungstenite::accept_async(s).await.unwrap().split();
+                tokio::spawn(async move {
+                    while let Some(Ok(m)) = stream.next().await {
+                        if matches!(&m, Message::Text(t) if t.contains("\"heartbeat\"")) {
+                            heartbeats.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                });
+                let welcome = serde_json::json!({ "type": "welcome", "agentId": "a", "features": ["stream"] });
+                let connect = serde_json::json!({ "type": "tcp_connect", "connectionId": "c1", "localHost": "127.0.0.1", "localPort": port });
+                sink.send(Message::Text(welcome.to_string())).await.unwrap();
+                sink.send(Message::Text(connect.to_string())).await.unwrap();
+                let started = Instant::now();
+                for m in messages {
+                    sink.send(Message::Text(m)).await.unwrap();
+                }
+                sink.send(Message::Text(serde_json::json!({ "type": "tcp_close", "connectionId": "c1" }).to_string())).await.unwrap();
+                let _ = pushed_tx.send(started.elapsed());
+                // Later connections are counted, never served.
+                while edge.accept().await.is_ok() {
+                    connections.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+        }
+        let timing = Timing {
+            heartbeat: Duration::from_millis(100),
+            ping: Duration::from_millis(200),
+            watchdog: Duration::from_millis(100),
+            dead_after: Duration::from_secs(1),
+            write_stall: Duration::from_secs(5),
+        };
+        let (out, _lines) = testing::output();
+        let stop = CancellationToken::new();
+        tokio::spawn(run_with(testing::config(&format!("http://127.0.0.1:{edge_port}"), port), out, stop.clone(), timing));
+
+        let stall = Duration::from_millis(2500);
+        sleep(stall).await;
+        let heartbeats_before = heartbeats.load(Ordering::SeqCst);
+        go.send(()).unwrap();
+        let got = timeout(Duration::from_secs(30), done).await.unwrap().unwrap();
+        let took = timeout(Duration::from_secs(5), pushed).await.unwrap().unwrap();
+        stop.cancel();
+        assert_eq!(got.len(), data.len(), "the connection was cut off");
+        assert!(got == data, "bytes were reordered or changed");
+        assert!(took >= Duration::from_secs(2), "the edge pushed everything in {took:?}: nothing held it back");
+        assert!(heartbeats_before >= 10, "only {heartbeats_before} heartbeats while the link was held back");
+        assert_eq!(connections.load(Ordering::SeqCst), 1, "the tunnel dropped the link for its own pause");
+    }
 }
+

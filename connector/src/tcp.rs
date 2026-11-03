@@ -1,11 +1,17 @@
 //! A customer's TCP connection (database, SSH), relayed to the local service
 //! (the CLI's handleTcpConnect / handleTcpData / handleTcpClose).
+//!
+//! Data for the service waits in order: a chunk is never dropped or
+//! reordered, and a connection isn't cut off because its service is slow.
+//! Instead the tunnel pushes back: past 8 MB waiting for its services, it
+//! stops reading its link (tunnel.rs), and the edge then pauses the
+//! customer's socket, so a restore slows down while the database stalls (a
+//! checkpoint, an index build), as it did through the CLI.
 
 use crate::tunnel::Conn;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -17,34 +23,36 @@ pub enum ToLocal {
     Close,
 }
 
-/// Data for the local service waits here in order (an unbounded queue: a
-/// chunk must never be dropped or reordered), up to this much; beyond it the
-/// connection is closed rather than letting a stalled service grow memory.
-const MAX_QUEUED_BYTES: usize = 64 << 20;
-
 #[derive(Clone)]
 pub struct Local {
     tx: mpsc::UnboundedSender<ToLocal>,
-    queued: Arc<AtomicUsize>,
 }
 
 pub fn connect(conn: Arc<Conn>, message: &Value) {
     let Some(id) = message["connectionId"].as_str().map(String::from) else { return };
     let host = message["localHost"].as_str().filter(|h| !h.is_empty()).unwrap_or(&conn.cfg.local_host).to_string();
     let port = message["localPort"].as_u64().map(|p| p as u16).unwrap_or(conn.cfg.local_port);
-    let (tx, rx) = mpsc::unbounded_channel::<ToLocal>();
-    let queued = Arc::new(AtomicUsize::new(0));
+    let (tx, mut rx) = mpsc::unbounded_channel::<ToLocal>();
     // Registered first: data the server sends while this connects is kept.
-    conn.tcp_conns.lock().unwrap().insert(id.clone(), Local { tx, queued: queued.clone() });
-    tokio::spawn(relay(conn, id, host, port, rx, queued));
+    conn.tcp_conns.lock().unwrap().insert(id.clone(), Local { tx });
+    tokio::spawn(async move {
+        relay(&conn, &id, &host, port, &mut rx).await;
+        // What still waits will never be written: it no longer holds the link back.
+        rx.close();
+        while let Ok(command) = rx.try_recv() {
+            if let ToLocal::Data(bytes) = command {
+                conn.tcp_written(bytes.len());
+            }
+        }
+    });
 }
 
-async fn relay(conn: Arc<Conn>, id: String, host: String, port: u16, mut rx: mpsc::UnboundedReceiver<ToLocal>, queued: Arc<AtomicUsize>) {
-    let stream = match TcpStream::connect((host.as_str(), port)).await {
+async fn relay(conn: &Arc<Conn>, id: &str, host: &str, port: u16, rx: &mut mpsc::UnboundedReceiver<ToLocal>) {
+    let stream = match TcpStream::connect((host, port)).await {
         Ok(s) => s,
         Err(e) => {
             conn.out.err(format!("❌ TCP Error: {host}:{port} [{id}]: {e}"));
-            conn.tcp_conns.lock().unwrap().remove(&id);
+            conn.tcp_conns.lock().unwrap().remove(id);
             conn.send_json(json!({ "type": "tcp_error", "connectionId": id, "error": e.to_string() })).await;
             return;
         }
@@ -56,40 +64,61 @@ async fn relay(conn: Arc<Conn>, id: String, host: String, port: u16, mut rx: mps
     conn.send_json(json!({ "type": "tcp_connected", "connectionId": id })).await;
 
     let (mut reader, mut writer) = stream.into_split();
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut writing = true;
-    loop {
-        tokio::select! {
-            read = reader.read(&mut buf) => match read {
-                Ok(0) => break,
-                // The link ended: so does this connection.
-                Ok(n) => if !conn.send_json(json!({ "type": "tcp_data_response", "connectionId": id, "data": B64.encode(&buf[..n]) })).await { return },
-                Err(e) => {
-                    conn.send_json(json!({ "type": "tcp_error", "connectionId": id, "error": e.to_string() })).await;
-                    conn.tcp_conns.lock().unwrap().remove(&id);
-                    return;
-                }
-            },
-            command = rx.recv(), if writing => match command {
-                Some(ToLocal::Data(bytes)) => {
-                    queued.fetch_sub(bytes.len(), Ordering::Relaxed);
-                    if let Err(e) = writer.write_all(&bytes).await {
-                        conn.send_json(json!({ "type": "tcp_error", "connectionId": id, "error": e.to_string() })).await;
-                        conn.tcp_conns.lock().unwrap().remove(&id);
-                        return;
+    // Both ways at once, so a service slow to read still gets its answers out.
+    // The service to the customer, until the service's end (Ok(true)), the
+    // link's (Ok(false)) or an error.
+    let from_local = async {
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => return Ok(true),
+                Ok(n) => {
+                    if !conn.send_json(json!({ "type": "tcp_data_response", "connectionId": id, "data": B64.encode(&buf[..n]) })).await {
+                        return Ok(false);
                     }
                 }
-                // The customer hung up: stop writing, read what the service still sends.
-                Some(ToLocal::Close) | None => {
-                    let _ = writer.shutdown().await;
-                    writing = false;
+                Err(e) => return Err(e),
+            }
+        }
+    };
+    // The customer to the service, in order. When the customer hangs up, our
+    // writing side shuts and what the service still sends is read on.
+    let to_local = async {
+        while let Some(command) = rx.recv().await {
+            match command {
+                ToLocal::Data(bytes) => {
+                    let written = writer.write_all(&bytes).await;
+                    conn.tcp_written(bytes.len());
+                    written?;
                 }
+                ToLocal::Close => break,
+            }
+        }
+        let _ = writer.shutdown().await;
+        Ok::<(), std::io::Error>(())
+    };
+    tokio::pin!(from_local, to_local);
+    let mut writing = true;
+    let ended = loop {
+        tokio::select! {
+            read = &mut from_local => break read,
+            written = &mut to_local, if writing => match written {
+                Ok(()) => writing = false,
+                Err(e) => break Err(e),
             },
             _ = conn.closed.cancelled() => return,
         }
+    };
+    conn.tcp_conns.lock().unwrap().remove(id);
+    match ended {
+        Ok(true) => {
+            conn.send_json(json!({ "type": "tcp_close_response", "connectionId": id })).await;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            conn.send_json(json!({ "type": "tcp_error", "connectionId": id, "error": e.to_string() })).await;
+        }
     }
-    conn.tcp_conns.lock().unwrap().remove(&id);
-    conn.send_json(json!({ "type": "tcp_close_response", "connectionId": id })).await;
 }
 
 pub fn data(conn: &Arc<Conn>, message: &Value) {
@@ -99,18 +128,49 @@ pub fn data(conn: &Arc<Conn>, message: &Value) {
         return;
     };
     let bytes = B64.decode(message["data"].as_str().unwrap_or_default()).unwrap_or_default();
-    if local.queued.fetch_add(bytes.len(), Ordering::Relaxed) + bytes.len() > MAX_QUEUED_BYTES {
-        conn.out.err(format!("⚠️ TCP connection [{id}]: the local service isn't reading; closing it"));
-        let _ = local.tx.send(ToLocal::Close);
-        conn.tcp_conns.lock().unwrap().remove(id);
-        return;
+    let len = bytes.len();
+    conn.tcp_queued(len);
+    if local.tx.send(ToLocal::Data(bytes)).is_err() {
+        conn.tcp_written(len);
     }
-    let _ = local.tx.send(ToLocal::Data(bytes));
 }
 
 pub fn close(conn: &Arc<Conn>, message: &Value) {
     let Some(id) = message["connectionId"].as_str() else { return };
     if let Some(local) = conn.tcp_conns.lock().unwrap().get(id).cloned() {
         let _ = local.tx.send(ToLocal::Close);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tunnel::testing::{self, pattern, stalling_service};
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    use serde_json::json;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    fn tcp_data(chunk: &[u8]) -> serde_json::Value {
+        json!({ "connectionId": "c1", "data": B64.encode(chunk) })
+    }
+
+    /// The finding's scenario, at the connector: a restore at full speed into a
+    /// database that stops reading for a while. Nothing is dropped or cut off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_service_that_stops_reading_for_a_while_still_gets_everything() {
+        let (port, go, done) = stalling_service().await;
+        let data = pattern(70 << 20);
+        let messages: Vec<_> = data.chunks(64 * 1024).map(tcp_data).collect();
+        let (conn, _sent, _lines) = testing::conn(port, &[]);
+        super::connect(conn.clone(), &json!({ "connectionId": "c1", "localHost": "127.0.0.1", "localPort": port }));
+        for message in &messages {
+            super::data(&conn, message);
+        }
+        super::close(&conn, &json!({ "connectionId": "c1" }));
+        go.send(()).unwrap();
+        let got = timeout(Duration::from_secs(30), done).await.unwrap().unwrap();
+        assert_eq!(got.len(), data.len(), "the connection was cut off");
+        assert!(got == data, "bytes were reordered or changed");
     }
 }
