@@ -17,7 +17,7 @@ flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "gzip", "brotli", "deflate"] }
 rand = "0.8"
 url = "2"
-socket2 = "0.5"
+socket2 = { version = "0.5", features = ["all"] }
 bytes = "1"
 libc = "0.2"
 

@@ -62,7 +62,8 @@ async fn relay(conn: Arc<Conn>, id: String, host: String, port: u16, mut rx: mps
         tokio::select! {
             read = reader.read(&mut buf) => match read {
                 Ok(0) => break,
-                Ok(n) => conn.send_json(json!({ "type": "tcp_data_response", "connectionId": id, "data": B64.encode(&buf[..n]) })).await,
+                // The link ended: so does this connection.
+                Ok(n) => if !conn.send_json(json!({ "type": "tcp_data_response", "connectionId": id, "data": B64.encode(&buf[..n]) })).await { return },
                 Err(e) => {
                     conn.send_json(json!({ "type": "tcp_error", "connectionId": id, "error": e.to_string() })).await;
                     conn.tcp_conns.lock().unwrap().remove(&id);

@@ -117,8 +117,8 @@ async fn relay(conn: Arc<Conn>, ws_id: String, path: String, headers: Value, mut
                 None => break,
             },
             incoming = stream.next() => match incoming {
-                Some(Ok(Message::Text(t))) => conn.send_json(json!({ "type": "ws_message_response", "wsId": ws_id, "data": t, "isBinary": false })).await,
-                Some(Ok(Message::Binary(b))) => conn.send_json(json!({ "type": "ws_message_response", "wsId": ws_id, "data": B64.encode(&b), "isBinary": true })).await,
+                Some(Ok(Message::Text(t))) => { if !conn.send_json(json!({ "type": "ws_message_response", "wsId": ws_id, "data": t, "isBinary": false })).await { break } }
+                Some(Ok(Message::Binary(b))) => { if !conn.send_json(json!({ "type": "ws_message_response", "wsId": ws_id, "data": B64.encode(&b), "isBinary": true })).await { break } }
                 Some(Ok(Message::Close(frame))) => {
                     let (code, reason) = frame.map(|f| (u16::from(f.code), f.reason.to_string())).unwrap_or((1005, String::new()));
                     conn.send_json(json!({ "type": "ws_close_response", "wsId": ws_id, "code": code, "reason": reason })).await;
