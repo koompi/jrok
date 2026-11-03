@@ -13,7 +13,8 @@
  * Environment:
  *   MONGODB_URI                  the edges' MongoDB (votes and the writer lease);
  *                                MONGODB_DB or the URI's path names the database, as for jrok
- *   DNS_HEALTH_EDGES             id=address,…  every edge, ids as their VPS_ID
+ *   DNS_HEALTH_EDGES             id=address[@region],…  every edge, ids as their VPS_ID
+ *   DNS_HEALTH_CHECKER_REGION    a checker that isn't an edge: its region (decide.ts)
  *   DNS_HEALTH_RECORDS           record names to keep healthy, comma-separated
  *   DNS_HEALTH_CHECK_HOST        name for TLS and Host on probes (a base domain)
  *   DNS_HEALTH_CHECKER_ID        default VPS_ID: never probes the edge with that id
@@ -102,6 +103,7 @@ const checker = new DnsHealthChecker(
     leftoverAfterMs: number("DNS_HEALTH_LEFTOVER_AFTER_S", 300) * 1000,
     dryRun: env.DNS_HEALTH_DRY_RUN === "true",
     writer,
+    region: env.DNS_HEALTH_CHECKER_REGION?.trim() || undefined,
   },
   client.db(databaseName(env.MONGODB_URI)),
   dns ?? { addressRecords: voteOnly, addAddress: voteOnly, removeRecord: voteOnly },

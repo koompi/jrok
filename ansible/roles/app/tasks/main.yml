@@ -444,7 +444,10 @@
       WorkingDirectory={{ app_dir }}
       EnvironmentFile=/etc/jrok/jrok.env
       Environment=DNS_HEALTH_CHECKER_ID={{ vps_id | default(inventory_hostname) }}
-      Environment=DNS_HEALTH_EDGES={% for h in groups['jrok_servers'] %}{{ hostvars[h].vps_id | default(h) }}={{ hostvars[h].dns_address | default(hostvars[h].ansible_host) }}{{ '' if loop.last else ',' }}{% endfor %}
+      # id=address, plus @dns_region where set (src/dnsHealth/decide.ts): the
+      # checkers of each region give one view, so a cut between regions doesn't
+      # take one region's edges out. Unset everywhere: one region, as before.
+      Environment=DNS_HEALTH_EDGES={% for h in groups['jrok_servers'] %}{{ hostvars[h].vps_id | default(h) }}={{ hostvars[h].dns_address | default(hostvars[h].ansible_host) }}{% if hostvars[h].dns_region is defined %}@{{ hostvars[h].dns_region }}{% endif %}{{ '' if loop.last else ',' }}{% endfor %}
 
       Environment=DNS_HEALTH_RECORDS={{ dns_health_records }}
       Environment=DNS_HEALTH_CHECK_HOST={{ jrok_base_domains[0] }}
