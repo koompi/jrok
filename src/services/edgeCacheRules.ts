@@ -40,6 +40,9 @@ const CHECK_MS = 5_000;
 const MIN_RELOAD_GAP_MS = 15_000;
 // A content nginx refused is not tried again before this.
 const RETRY_REFUSED_MS = 5 * 60_000;
+// A reload that failed (nginx -t passed; nginx stopped, systemctl failing) is
+// tried again after this, whether or not the rules change meanwhile.
+const RETRY_FAILED_RELOAD_MS = 60_000;
 // How long an organization's list of domains is reused.
 const ORG_LOOKUP_MS = 60_000;
 
@@ -143,10 +146,12 @@ export interface EdgeCacheFiles {
   now: number;
 }
 
-export type EdgeCacheOutcome = "unchanged" | "reloaded" | "waiting" | "refused";
+export type EdgeCacheOutcome = "unchanged" | "reloaded" | "waiting" | "refused" | "reload-failed";
 
 let lastReloadAt = 0;
 let refused: { content: string; at: number } | null = null;
+// The files on disk are newer than what nginx runs: its reload failed.
+let reloadPending = false;
 
 async function readOrNull(path: string): Promise<string | null> {
   return readFile(path, "utf8").catch(() => null);
@@ -162,11 +167,11 @@ export async function writeEdgeCacheFiles({ wanted, reload, now }: EdgeCacheFile
     const current = await readOrNull(path);
     if (current !== content) previous.set(path, current);
   }
-  if (previous.size === 0) return "unchanged";
+  if (previous.size === 0 && !reloadPending) return "unchanged";
 
   const all = [...wanted.values()].join("\0");
   if (refused && refused.content === all && now - refused.at < RETRY_REFUSED_MS) return "refused";
-  if (now - lastReloadAt < MIN_RELOAD_GAP_MS) return "waiting";
+  if (now - lastReloadAt < (reloadPending ? RETRY_FAILED_RELOAD_MS : MIN_RELOAD_GAP_MS)) return "waiting";
 
   for (const path of previous.keys()) await writeAtomically(path, wanted.get(path)!);
   const result = await reload();
@@ -181,7 +186,15 @@ export async function writeEdgeCacheFiles({ wanted, reload, now }: EdgeCacheFile
   }
   lastReloadAt = now;
   refused = null;
-  console.log(`🧊 Edge cache rules updated (${[...previous.keys()].join(", ")})`);
+  if (result !== "reloaded") {
+    // nginx -t accepted the files, but nginx still runs the old rules: it
+    // used to count as done, and was never reloaded for them.
+    reloadPending = true;
+    console.error(`❌ Edge cache rules written, but nginx was not reloaded (${result}); trying again in ${RETRY_FAILED_RELOAD_MS / 1000} s`);
+    return "reload-failed";
+  }
+  reloadPending = false;
+  console.log(`🧊 Edge cache rules updated (${[...previous.keys()].join(", ") || "reloaded again"})`);
   return "reloaded";
 }
 
@@ -243,5 +256,6 @@ export function stopEdgeCacheRules(): void {
 export function resetEdgeCacheRules(): void {
   lastReloadAt = 0;
   refused = null;
+  reloadPending = false;
   orgLookup = null;
 }

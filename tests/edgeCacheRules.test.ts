@@ -150,6 +150,21 @@ test("when nginx refuses the rules, the files are put back and the same rules ar
   expect(reloads).toEqual(["refused"]);
 });
 
+test("a reload that failed is tried again, though the files already say what is wanted", async () => {
+  await writeFile(MAP, "# empty\n");
+  reloads.length = 0;
+  const reloadFailed = async () => { reloads.push("failed"); return "reload-failed" as const; };
+  const wanted = new Map([[MAP, cacheOffMap(["office"], BASES)]]);
+  // nginx -t passes but the reload doesn't happen: nginx still runs the old rules.
+  expect(await writeEdgeCacheFiles({ wanted, reload: reloadFailed, now: 5_000_000 })).toBe("reload-failed");
+  expect(await readFile(MAP, "utf8")).toContain("office.public.koompi.cloud 1;");
+  // It used to count as done: "unchanged" from then on, never reloaded.
+  expect(await writeEdgeCacheFiles({ wanted, reload: reloadOk, now: 5_030_000 })).toBe("waiting");
+  expect(await writeEdgeCacheFiles({ wanted, reload: reloadOk, now: 5_061_000 })).toBe("reloaded");
+  expect(await writeEdgeCacheFiles({ wanted, reload: reloadOk, now: 5_200_000 })).toBe("unchanged");
+  expect(reloads).toEqual(["failed", "ok"]);
+});
+
 test("nothing is written where nginx.conf includes neither file, nor before this edge has loaded the rules", async () => {
   const conf = join(DIR, "nginx.conf");
   const saved = { conf: process.env.NGINX_CONF_PATH, map: process.env.JROK_CACHE_OFF_MAP, geo: process.env.JROK_BLOCKED_IPS_GEO };
