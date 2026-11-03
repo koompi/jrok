@@ -76,7 +76,7 @@ pub struct Conn {
     room: Arc<Semaphore>,
     features: Mutex<HashSet<String>>,
     pub http_aborts: Mutex<HashMap<String, CancellationToken>>,
-    pub ws_conns: Mutex<HashMap<String, mpsc::Sender<crate::ws::ToLocal>>>,
+    pub ws_conns: Mutex<HashMap<String, crate::ws::Entry>>,
     pub tcp_conns: Mutex<HashMap<String, crate::tcp::Local>>,
     /// Cancelled when the connection ends: everything relayed through it stops.
     pub closed: CancellationToken,
@@ -419,6 +419,17 @@ pub mod testing {
         let (conn, rx) = Conn::new(Arc::new(config("http://127.0.0.1:9", app_port)), out);
         conn.features.lock().unwrap().extend(features.iter().map(|f| f.to_string()));
         (conn, rx, lines)
+    }
+
+    /// The JSON messages sent to the edge so far (binary frames skipped).
+    pub fn sent_json(rx: &mut mpsc::UnboundedReceiver<Outbound>) -> Vec<serde_json::Value> {
+        let mut all = Vec::new();
+        while let Ok(o) = rx.try_recv() {
+            if let Message::Text(t) = o.message {
+                all.push(serde_json::from_str(&t).unwrap());
+            }
+        }
+        all
     }
 }
 
