@@ -110,10 +110,15 @@ fn local_request(url: &str, headers: &Value, offer: Option<&str>) -> Result<Requ
             if lower == "upgrade" || lower == "connection" || lower == "content-length" || lower.starts_with("sec-websocket-") {
                 continue;
             }
-            if let (Some(v), Ok(n)) = (value.as_str(), HeaderName::from_bytes(lower.as_bytes())) {
-                if let Ok(v) = v.parse() {
-                    req.headers_mut().insert(n, v);
-                }
+            let Some(v) = value.as_str() else { continue };
+            // tungstenite writes only visible ASCII in a handshake and fails
+            // the whole upgrade on anything else (a cookie with Khmer text):
+            // such a header is left out instead.
+            if !v.bytes().all(|b| b == b'\t' || (0x20..0x7f).contains(&b)) {
+                continue;
+            }
+            if let (Ok(n), Ok(v)) = (HeaderName::from_bytes(lower.as_bytes()), v.parse()) {
+                req.headers_mut().insert(n, v);
             }
         }
     }
@@ -329,6 +334,19 @@ mod subprotocol_tests {
 
         let again = super::local_request("ws://127.0.0.1:1/", &headers, None).unwrap();
         assert!(again.headers().get("sec-websocket-protocol").is_none());
+    }
+
+    /// A header with bytes that aren't visible ASCII (a cookie with Khmer
+    /// text): tungstenite can't write it in a handshake and failed the whole
+    /// upgrade, so it is left out and the visitor still gets through.
+    #[test]
+    fn a_header_the_handshake_cant_carry_is_left_out() {
+        let khmer: String = "lang=ខ្មែរ".as_bytes().iter().map(|&b| b as char).collect();
+        let headers = json!({ "host": "app.example", "cookie": khmer, "x-ok": "plain" });
+        let req = super::local_request("ws://127.0.0.1:1/", &headers, None).unwrap();
+        assert!(req.headers().get("cookie").is_none());
+        let (bytes, _) = tokio_tungstenite::tungstenite::handshake::client::generate_request(req).expect("the handshake can be written");
+        assert!(String::from_utf8_lossy(&bytes).contains("\r\nx-ok: plain\r\n"));
     }
 
     /// What the app reads: the handshake carries the visitor's Host, not the

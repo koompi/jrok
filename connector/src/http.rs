@@ -142,6 +142,24 @@ fn should_gzip(conn: &Conn, method: &str, accept_encoding: &str, status: u16, he
     }
 }
 
+/// A header value as Bun reads one: a character per byte (Latin-1), so bytes
+/// that aren't ASCII (a Khmer path in a Location, a file name) reach the
+/// visitor as the app sent them, as with Node's fetch in the CLI. Not UTF-8:
+/// Bun's Headers refuses characters above U+00FF.
+fn latin1(value: &reqwest::header::HeaderValue) -> String {
+    value.as_bytes().iter().map(|&b| char::from(b)).collect()
+}
+
+/// The way back: what the server read as Latin-1 characters goes to the app
+/// as those bytes (re-encoding them as UTF-8 garbled them). Characters above
+/// U+00FF don't come from Bun; they go as UTF-8.
+fn header_value(text: &str) -> Option<reqwest::header::HeaderValue> {
+    match text.chars().map(|c| u8::try_from(c).ok()).collect::<Option<Vec<u8>>>() {
+        Some(bytes) => reqwest::header::HeaderValue::from_bytes(&bytes).ok(),
+        None => reqwest::header::HeaderValue::from_str(text).ok(),
+    }
+}
+
 fn capped_header(headers: &Value, name: &str) -> Option<String> {
     headers[name].as_str().filter(|v| !v.is_empty()).map(|v| v.chars().take(300).collect())
 }
@@ -224,10 +242,7 @@ async fn proxy(conn: &Arc<Conn>, request: &Request, message: &Value, abort: &Can
             if lower == "accept-encoding" || HOP_BY_HOP.contains(&lower.as_str()) {
                 continue;
             }
-            if let (Ok(n), Ok(v)) = (
-                reqwest::header::HeaderName::from_bytes(lower.as_bytes()),
-                reqwest::header::HeaderValue::from_str(value),
-            ) {
+            if let (Ok(n), Some(v)) = (reqwest::header::HeaderName::from_bytes(lower.as_bytes()), header_value(value)) {
                 builder = builder.header(n, v);
             }
         }
@@ -257,13 +272,13 @@ async fn proxy(conn: &Arc<Conn>, request: &Request, message: &Value, abort: &Can
     let mut headers = Map::new();
     let mut set_cookie: Vec<String> = Vec::new();
     for name in response.headers().keys() {
-        let values: Vec<&str> = response.headers().get_all(name).iter().filter_map(|v| v.to_str().ok()).collect();
+        let values: Vec<String> = response.headers().get_all(name).iter().map(latin1).collect();
         if values.is_empty() {
             continue;
         }
         if name.as_str() == "set-cookie" {
-            set_cookie.extend(values.iter().map(|v| v.to_string()));
-            headers.insert(name.to_string(), Value::String(values.last().unwrap().to_string()));
+            set_cookie.extend(values.iter().cloned());
+            headers.insert(name.to_string(), Value::String(values.last().unwrap().clone()));
         } else {
             headers.insert(name.to_string(), Value::String(values.join(", ")));
         }
@@ -448,6 +463,19 @@ mod tests {
     }
 
     #[test]
+    fn header_bytes_survive_the_round_trip() {
+        // é in Latin-1 (one byte), and ក in UTF-8 (three), as the app wrote them.
+        for raw in [&b"caf\xe9"[..], "ក".as_bytes()] {
+            let value = reqwest::header::HeaderValue::from_bytes(raw).unwrap();
+            let text = latin1(&value);
+            assert_eq!(text.chars().count(), raw.len());
+            assert_eq!(header_value(&text).unwrap().as_bytes(), raw);
+        }
+        // Not from Bun: anything above U+00FF goes as UTF-8.
+        assert_eq!(header_value("ក").unwrap().as_bytes(), "ក".as_bytes());
+    }
+
+    #[test]
     fn the_app_is_asked_for_gzip_or_for_nothing() {
         assert_eq!(asked_encoding(true, "gzip, deflate, br, zstd"), "gzip");
         assert_eq!(asked_encoding(true, "br;q=1, GZIP;q=0.5"), "gzip");
@@ -622,6 +650,45 @@ mod proxy_tests {
         let (start, body) = answered(&mut sent);
         assert!(start.get("encoding").is_none(), "{start}");
         assert_eq!(body, script());
+    }
+
+    /// A Khmer-first app that doesn't percent-encode: a redirect to a Khmer
+    /// path, a Khmer file name, cookies with non-ASCII bytes. It echoes the
+    /// cookie bytes it got in a header of its own.
+    fn khmer_app(head: &str) -> Vec<u8> {
+        let cookie = head.lines().find_map(|l| l.strip_prefix("cookie: ")).unwrap_or("").to_string();
+        let mut r = b"HTTP/1.1 302 Found\r\nlocation: /".to_vec();
+        r.extend_from_slice("ទំព័រ".as_bytes());
+        r.extend_from_slice(b"\r\ncontent-disposition: attachment; filename=\"");
+        r.extend_from_slice("វិក្កយបត្រ.pdf".as_bytes());
+        r.extend_from_slice(b"\"\r\nset-cookie: lang=");
+        r.extend_from_slice("ខ្មែរ".as_bytes());
+        r.extend_from_slice(b"\r\nset-cookie: city=Si\xe9m Reap\r\nx-cookie-seen: ");
+        r.extend(cookie.chars().map(|c| c as u8));
+        r.extend_from_slice(b"\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+        r
+    }
+
+    /// Bytes as Bun hands them over: one character per byte (Latin-1).
+    fn as_bun_reads(bytes: &[u8]) -> String {
+        bytes.iter().map(|&b| b as char).collect()
+    }
+
+    #[tokio::test]
+    async fn header_bytes_pass_through_as_with_the_cli() {
+        let (port, mut heads) = app(khmer_app).await;
+        let (conn, mut sent, _lines) = testing::conn(port, &["stream", "binchunk", "gzip"]);
+        // The visitor's browser sent the cookie as UTF-8; the server read it as Latin-1.
+        let cookie = as_bun_reads("name=សុខា".as_bytes());
+        super::handle(conn, request("/login", json!({ "cookie": cookie }))).await;
+        let head = heads.recv().await.unwrap();
+        assert!(head.contains(&format!("\r\ncookie: {cookie}\r\n")), "the app got other bytes: {head:?}");
+        let (start, _) = answered(&mut sent);
+        let headers = &start["headers"];
+        assert_eq!(headers["location"], as_bun_reads("/ទំព័រ".as_bytes()), "{start}");
+        assert_eq!(headers["content-disposition"], as_bun_reads("attachment; filename=\"វិក្កយបត្រ.pdf\"".as_bytes()), "{start}");
+        assert_eq!(headers["x-cookie-seen"], cookie, "{start}");
+        assert_eq!(start["setCookie"], json!([as_bun_reads("lang=ខ្មែរ".as_bytes()), as_bun_reads(b"city=Si\xe9m Reap")]), "{start}");
     }
 }
 
