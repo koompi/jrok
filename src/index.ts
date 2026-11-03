@@ -26,7 +26,7 @@ import { connectDatabase, closeDatabase, createDistributedStateIndexes, cleanupS
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { purgeExpiredCaches } from "./utils/database";
 import { initTelegram, notifyOperators } from "./services/notificationService";
-import { FloodGuard, floodGuardOptionsFromEnv, blockedResponse, appBusyResponse } from "./services/floodGuard";
+import { FloodGuard, floodGuardOptionsFromEnv, blockedResponse, appBusyResponse, floodKey } from "./services/floodGuard";
 import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
 import * as planLimitService from "./services/planLimitService";
@@ -236,13 +236,14 @@ async function handleWebSocketTunnel(
   return new Response("Failed to upgrade WebSocket connection", { status: 400 });
 }
 
-// Flood protection for app traffic (services/floodGuard.ts). A flooding
-// address is blocked here at once and saved for the other edges.
+// Flood protection for app traffic (services/floodGuard.ts). An address
+// flooding an app again is blocked for that app here at once, and saved for
+// the other edges.
 const floodGuard = new FloodGuard({
   ...floodGuardOptionsFromEnv(),
-  block: (ip, reason, seconds) => {
-    securitySync.setRule("block-ip", ip, true, { reason, durationSeconds: seconds }).catch((error) =>
-      console.error(`⚠️ Flood block of ${ip} holds on this edge only (not saved for the others):`, error?.message || error));
+  block: (address, app, reason, seconds) => {
+    securitySync.setRule("block-ip-app", `${address}|${app}`, true, { reason, durationSeconds: seconds }).catch((error) =>
+      console.error(`⚠️ Flood block of ${address} for ${app} holds on this edge only (not saved for the others):`, error?.message || error));
   },
   notify: (message) => { notifyOperators(message).catch(() => {}); },
   log: (message) => console.warn(message),
@@ -1329,16 +1330,14 @@ async function startServer() {
         if (tunnelDomain) {
           const subdomain = tunnelDomain; // For backward compatibility with existing code
 
-          // Flood protection (services/floodGuard.ts): a blocked address is
-          // refused before any routing work, and one sending far more than any
-          // person would is blocked on every edge. A request another edge
+          // Flood protection (services/floodGuard.ts): a blocked address (for
+          // this app, or by hand for every app) is refused before any routing
+          // work, and so is a flood of this app. A request another edge
           // forwarded here was counted there.
-          const block = securityService.activeBlock(clientIp);
+          const block = securityService.activeBlock(clientIp) ?? securityService.activeAppBlock(floodKey(clientIp), subdomain);
           if (block) return blockedResponse(block);
-          if (floodGuard.count(clientIp, subdomain, isFromPeer(req.headers))) {
-            const now = securityService.activeBlock(clientIp);
-            if (now) return blockedResponse(now);
-          }
+          const flood = floodGuard.count(clientIp, subdomain, isFromPeer(req.headers));
+          if (flood) return blockedResponse(flood);
 
           // Check if agent is on this server or needs cross-server routing
           const routeResult = await crossServerService.findServerForDomain(subdomain);
@@ -2123,13 +2122,9 @@ async function startServer() {
 
         // Get security stats (requires admin auth)
         if (path === "/security/stats" && method === "GET") {
-          const authContext = await authenticateRequest(req);
-          if (!authContext || authContext.user?.role !== 'super_admin') {
-            return addCors(new Response(
-              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
-              { status: 401, headers: { "Content-Type": "application/json" } }
-            ));
-          }
+          // A super admin, or the server key (operators on an edge).
+          const authError = await requireServerKeyOrSuperAdmin(req);
+          if (authError) return addCors(authError);
           const stats = securityService.getSecurityStats();
           return addCors(new Response(
             JSON.stringify({ success: true, stats }),
@@ -2139,16 +2134,12 @@ async function startServer() {
 
         // Get blocked IPs (requires admin auth)
         if (path === "/security/blocked-ips" && method === "GET") {
-          const authContext = await authenticateRequest(req);
-          if (!authContext || authContext.user?.role !== 'super_admin') {
-            return addCors(new Response(
-              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
-              { status: 401, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-          const blockedIps = securityService.getBlockedIps();
+          // A super admin, or the server key (operators on an edge).
+          const authError = await requireServerKeyOrSuperAdmin(req);
+          if (authError) return addCors(authError);
+          // blockedIps: every app (by hand); appBlocks: one app each (floods).
           return addCors(new Response(
-            JSON.stringify({ success: true, blockedIps }),
+            JSON.stringify({ success: true, blockedIps: securityService.getBlockedIps(), appBlocks: securityService.getAppBlocks() }),
             { status: 200, headers: { "Content-Type": "application/json" } }
           ));
         }
@@ -2178,14 +2169,22 @@ async function startServer() {
           // A super admin, or the server key (X-Admin-Key) as for suspensions.
           const authError = await requireAdminOrServerKey(req);
           if (authError) return addCors(authError);
-          const body = await req.json() as { ip: string };
+          const body = await req.json() as { ip: string; app?: string };
           if (!body.ip) {
             return addCors(new Response(
               JSON.stringify({ success: false, message: "Missing ip" }),
               { status: 400, headers: { "Content-Type": "application/json" } }
             ));
           }
-          const saveError = await saveSharedRule("block-ip", body.ip, false);
+          // With "app", that app's flood block only; else the address's block
+          // and every flood block it has (an IPv6 one is by /64).
+          const address = floodKey(body.ip);
+          const appBlocks = securityService.getAppBlocks().filter((b) => b.ip === address && (!body.app || b.app === body.app));
+          for (const appBlock of appBlocks) {
+            const appError = await saveSharedRule("block-ip-app", `${appBlock.ip}|${appBlock.app}`, false);
+            if (appError) return addCors(appError);
+          }
+          const saveError = body.app ? null : await saveSharedRule("block-ip", body.ip, false);
           if (saveError) return addCors(saveError);
           return addCors(new Response(
             JSON.stringify({ success: true, message: `IP ${body.ip} unblocked` }),

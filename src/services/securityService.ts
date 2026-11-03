@@ -1219,6 +1219,45 @@ export function activeBlock(ip: string): { reason: string; secondsLeft: number }
   return { reason: blocked.reason, secondsLeft: Math.ceil(left / 1000) };
 }
 
+// An address blocked for one app only: the flood guard's blocks
+// (services/floodGuard.ts), keyed `${address}|${app}`. The address keeps every
+// other app.
+const appBlocks = new Map<string, BlockedIp & { app: string }>();
+
+export function blockIpForApp(address: string, app: string, reason: string, durationSeconds: number): void {
+  const now = Date.now();
+  appBlocks.set(`${address}|${app}`, { ip: address, app, reason, blockedAt: now, expiresAt: now + durationSeconds * 1000 });
+  console.log(`🚫 Blocked ${address} for ${app} for ${durationSeconds}s: ${reason}`);
+}
+
+export function unblockIpForApp(address: string, app: string): void {
+  if (appBlocks.delete(`${address}|${app}`)) console.log(`✅ Unblocked ${address} for ${app}`);
+}
+
+/** The block on `address` for `app` in force now, or null. */
+export function activeAppBlock(address: string, app: string): { reason: string; secondsLeft: number } | null {
+  const key = `${address}|${app}`;
+  const blocked = appBlocks.get(key);
+  if (!blocked) return null;
+  const left = blocked.expiresAt - Date.now();
+  if (left <= 0) {
+    appBlocks.delete(key);
+    return null;
+  }
+  return { reason: blocked.reason, secondsLeft: Math.ceil(left / 1000) };
+}
+
+/** Every per-app block in force. */
+export function getAppBlocks(): Array<BlockedIp & { app: string }> {
+  const now = Date.now();
+  const result: Array<BlockedIp & { app: string }> = [];
+  for (const [key, entry] of appBlocks) {
+    if (entry.expiresAt > now) result.push(entry);
+    else appBlocks.delete(key);
+  }
+  return result;
+}
+
 export function isIpBlocked(ip: string): boolean {
   const blocked = blockedIps.get(ip);
   if (!blocked) return false;

@@ -137,10 +137,11 @@ On 2026-11-01 the new edges were built first, and edge1's checker, still listing
 ## Floods
 
 - **Settings:** see jrok's [scale-out plan](jrok-scale-out-plan.md), 3.6. `flood_exempt` in the inventory lists the deploy workers (116.212.132.113, 202.124.44.232): apps calling other apps through their public URLs must never be blocked. Add any new worker or monitor there and run `scripts/deploy-production.sh` (tag `app`).
+- **What is refused:** an address (an IPv6 /64 counts as one) sending one app more than 3,000 requests in 10 s gets 429 from that app for the rest of those 10 s (`🚦 … the rest of this window refused`). Doing it again within the hour blocks it from that app on every edge: 10 minutes, doubling each time, at most an hour. Its other apps are never refused. An address asking one edge for more than 500 different names in 10 s (names at random, each a MongoDB lookup) is refused every app on that edge for 10 minutes.
 - **A block happening:** an edge logs `🛑 Flood blocked: <ip> …` (`journalctl -u jrok | grep "Flood blocked"`). With `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` set on the edges, a person gets the same message; not configured yet.
 - **List or lift blocks** with the server key, on any edge itself (see "The server key"; the change reaches the others within 10 s):
-  - list: `GET /security/blocked-ips`;
-  - lift: `POST /security/unblock-ip` with `{"ip":"…"}`;
+  - list: `GET /security/blocked-ips`: `blockedIps` (by hand, every app) and `appBlocks` (floods, one app each);
+  - lift: `POST /security/unblock-ip` with `{"ip":"…"}` (every block of that address), or `{"ip":"…","app":"…"}` (that app's);
   - block by hand: `POST /security/block-ip` with `{"ip":"…","reason":"…","duration":3600}`.
 - **One app busy:** its visitors get 503 with `X-Jrok-App-Busy`, and jrok logs `🚦 <app>: N requests already waiting`. The app itself is too slow for its traffic: more replicas, or a look at the app.
 
