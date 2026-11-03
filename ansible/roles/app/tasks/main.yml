@@ -448,7 +448,11 @@
 
       Environment=DNS_HEALTH_RECORDS={{ dns_health_records }}
       Environment=DNS_HEALTH_CHECK_HOST={{ jrok_base_domains[0] }}
+      # Writers (jrok_dns_writers) change DNS with certbot's token; the others only vote.
+      Environment=DNS_HEALTH_WRITER={{ (inventory_hostname in jrok_dns_writers) | lower }}
+      {% if inventory_hostname in jrok_dns_writers %}
       Environment=CLOUDFLARE_API_TOKEN_FILE=/etc/letsencrypt/secrets/cloudflare.ini
+      {% endif %}
       Environment=DNS_HEALTH_DRY_RUN={{ dns_health_dry_run | default(false) | bool | lower }}
       {% if telegram_bot_token | length > 0 and telegram_chat_id | length > 0 %}
       Environment=TELEGRAM_CHAT_ID={{ telegram_chat_id }}
@@ -483,4 +487,12 @@
     enabled: no
   when: dns_health_records is not defined
   failed_when: false
+  tags: ["app", "dns-health"]
+
+# After the checker above was restarted to only vote, so it no longer reads it.
+- name: No Cloudflare token on edges that neither renew certificates nor write DNS
+  file:
+    path: /etc/letsencrypt/secrets/cloudflare.ini
+    state: absent
+  when: inventory_hostname not in jrok_cloudflare_holders
   tags: ["app", "dns-health"]

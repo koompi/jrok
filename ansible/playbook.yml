@@ -45,6 +45,13 @@
     # certificates a week for the same names, so the others don't issue their
     # own: they take a copy and then follow MongoDB (roles/certbot).
     jrok_cert_renewer: "{{ cert_renewer | default(groups['jrok_servers'][0]) }}"
+    # Who may change DNS (health-checked DNS, src/dnsHealth): dns_health_writers,
+    # comma-separated inventory names; default the renewing edge and one more,
+    # so either can fail. The other edges' checkers only vote.
+    jrok_dns_writers: "{{ (dns_health_writers | default('')).split(',') | map('trim') | select | list or ([jrok_cert_renewer] + (groups['jrok_servers'] | reject('equalto', jrok_cert_renewer) | list)[:1]) }}"
+    # Certbot's Cloudflare token can change the whole koompi.cloud zone, the
+    # dashboard's records too: only the renewing edge and the DNS writers keep it.
+    jrok_cloudflare_holders: "{{ ([jrok_cert_renewer] + jrok_dns_writers) | unique }}"
     # Edges reach each other over HTTPS (P10, src/utils/peerLink.ts) once every
     # edge has a forward_host: its own name, an A record for that edge alone and
     # covered by the wildcard certificate (e.g. "edge-a.public.koompi.cloud").

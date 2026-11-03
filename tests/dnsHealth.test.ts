@@ -226,6 +226,19 @@ describe.skipIf(!MONGO)("checkers agreeing through MongoDB", () => {
     expect(dns.changes).toEqual([]);
   });
 
+  test("a checker without the Cloudflare token votes, and never takes the lease", async () => {
+    const dns = fakeDns();
+    const unreachable = new Set(["c"]);
+    const voter = checkerOn("a", dns, unreachable, { writer: false });
+    const writer = checkerOn("b", dns, unreachable);
+    await rounds(3, [voter, writer]); // the voter goes first: the lease is free each time
+    expect(dns.addresses("app.test")).toEqual(["192.0.2.1", "192.0.2.2"]); // its vote counted
+    expect(dns.changes.length).toBeGreaterThan(0);
+    expect(dns.changes.every((c) => c.startsWith("b "))).toBe(true);
+    const lease = await db!.collection("dnsHealthLease").findOne({ _id: "dns-writer" as any });
+    expect(lease?.holder).toBe("b");
+  });
+
   test("when the writer stops, another checker takes over", async () => {
     const dns = fakeDns();
     const unreachable = new Set<string>();

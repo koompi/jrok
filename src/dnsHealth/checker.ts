@@ -35,6 +35,12 @@ export interface DnsHealthConfig {
    */
   leftoverAfterMs: number;
   dryRun: boolean;
+  /**
+   * May this checker change DNS? False: it only votes, and needs no Cloudflare
+   * token (which can change the whole zone): only the writers hold one.
+   * Default true.
+   */
+  writer?: boolean;
 }
 
 /** Changes worth telling a person about (Telegram in main.ts). */
@@ -68,7 +74,7 @@ export class DnsHealthChecker {
 
   async cycle(): Promise<void> {
     await this.vote();
-    if (await this.holdLease()) await this.applyDns();
+    if (this.config.writer !== false && await this.holdLease()) await this.applyDns();
     else this.leftoverSince.clear();
   }
 

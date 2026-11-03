@@ -34,6 +34,7 @@ The two new droplets carry the DigitalOcean tag `jrok-production`.
   Agents of the old worker code don't know `tcp_port_elsewhere`, so the names they connect through must not change until the workers are updated.
 - **One edge each:** `edge-sgp1/2/3.public.koompi.cloud` (used between edges) and `sgp2/3.private.koompi.cloud` (TCP).
 - **`jrok-edges.koompi.cloud`:** every healthy edge, kept by `jrok-dns-health` like the app records. Deploy workers read their edge list from it (`JROK_EDGES_DNS`), so edges come and go without touching a worker. Nobody connects to this name.
+- **Who changes DNS:** every edge's checker votes; only the writers (`dns_health_writers` in the inventory, default the renewing edge and the next one) may take the lease and change records. Certbot's Cloudflare token can change the whole `koompi.cloud` zone, so only the renewing edge and the writers keep `/etc/letsencrypt/secrets/cloudflare.ini`; a deploy (`app` or `dns-health`) removes it from the others once their checker only votes. Keep at least two writers on different edges.
 - **Custom domains** pointed at 152.42.241.139 by an A record reach edge1 only. `scripts/custom-domain-dns-audit.ts` lists them.
 
 ## Certificates
