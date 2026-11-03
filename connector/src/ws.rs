@@ -139,6 +139,10 @@ type LocalSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// The app's side: offered the visitor's subprotocol; an app that ignores
 /// subprotocols answers with none, which the handshake refuses, so connect
 /// again without offering one.
+// tungstenite's Error is large (clippy 1.99's result_large_err); this runs
+// once per visitor connection, and the caller only logs it, so boxing it
+// would buy nothing.
+#[allow(clippy::result_large_err)]
 async fn open_local(conn: &Conn, ws_id: &str, path: &str, headers: &Value) -> Result<LocalSocket, TungsteniteError> {
     let url = format!("ws://{}:{}{}", conn.cfg.local_host, conn.cfg.local_port, path);
     let offered = headers["sec-websocket-protocol"]
