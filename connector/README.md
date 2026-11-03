@@ -14,7 +14,7 @@ Supported arguments: `--server`, `--edge`, `--port`, `--host`, `--domain`, `--tc
 
 ## Install
 
-`install.sh` at the repo root builds it after the CLI: with `cargo` if present, otherwise in Docker (`rust:1.93-slim-bullseye`, a few minutes the first time). It installs the binary next to `jrok`. With `JROK_CONNECTOR=skip`, it leaves the connector out.
+`install.sh` at the repo root builds it after the CLI: with `cargo` if present, otherwise in Docker (`rust:1.93-slim-bullseye`, a few minutes the first time). It installs the binary next to `jrok`, but only if it runs on that machine (`jrok-connector --version`; a wrong architecture or an older glibc doesn't). Otherwise it says why and leaves the connector out, and removes an installed one that doesn't run either, so workers use a `jrok` process per tunnel. With `JROK_CONNECTOR=skip`, it leaves the connector out.
 
 To build by hand, run `cargo build --release --locked`. The binary is `target/release/jrok-connector`. A build in the bullseye image needs glibc 2.30, so it runs on Ubuntu 20.04 and later.
 

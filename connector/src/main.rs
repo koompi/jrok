@@ -52,15 +52,17 @@ fn raise_open_file_limit() -> u64 {
 
 #[tokio::main]
 async fn main() {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // First and alone: install.sh and the worker run it to see that this
+    // binary runs here at all.
+    if argv.first().map(String::as_str) == Some("--version") {
+        println!("jrok-connector {VERSION}");
+        return;
+    }
     let _ = rustls::crypto::ring::default_provider().install_default();
     let open_files = raise_open_file_limit();
     if open_files > 0 && open_files < 65_536 {
         eprintln!("jrok-connector: only {open_files} open files allowed (hard limit); a busy worker needs more (LimitNOFILE)");
-    }
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv.first().map(String::as_str) == Some("--version") {
-        println!("jrok-connector {VERSION}");
-        return;
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
