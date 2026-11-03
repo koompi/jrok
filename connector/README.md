@@ -13,6 +13,16 @@ Each tunnel speaks the same agent protocol as the CLI (binary frames, compressio
 
 Supported arguments: `--server`, `--edge`, `--port`, `--host`, `--domain`, `--tcp`, `--group`, `--instance-id`, `--org`, `--force-new`, `--auth`, `--restrict`, `--allow-ip` and `--block-ip`. These are all the arguments the worker passes. The key can also come from `JROK_AUTH` or `JROK_API_KEY`.
 
+## Limits
+
+One process carries every tunnel on the worker, so nothing in it may grow without bound or wait for good:
+
+- **Toward the edge:** at most 8 MB waits per tunnel (the CLI's limit); a local app sending faster waits for room. A message the edge doesn't take in 30 s (plus 1 s per 64 KB), or data it doesn't acknowledge in 60 s (`TCP_USER_TIMEOUT`), ends the link, and the tunnel reconnects. Heartbeats and pings never wait behind data.
+- **HTTP:** the app is asked for `gzip` when the visitor and the server take it, else for no encoding; its own gzip goes through as it is, so a file of known size keeps its length and the edge can cache it. Anything else it compresses is decoded. Errors shown to visitors never carry the app's address or the query, nor do the logs. `HTTP_PROXY` and `ALL_PROXY` are ignored.
+- **WebSocket:** the app has 30 s to answer the upgrade; a visitor who leaves meanwhile ends the attempt. Up to 16 MB of a visitor's messages wait for the app, in order; beyond that the visitor's socket is closed with 1013, never a message dropped. The visitor's Host reaches the app.
+- **TCP:** past 8 MB waiting for a tunnel's services, its link isn't read (until below 4 MB), so the edge pauses the customer's socket: a stalled database slows a restore down instead of having it cut off.
+- **Reconnects:** backoff from 1 s to 30 s, starting over only after a link that held 30 s past the server's welcome.
+
 ## Install
 
 `install.sh` at the repo root builds it after the CLI: with `cargo` if present, otherwise in Docker (`rust:1.93-slim-bullseye`, a few minutes the first time). It installs the binary next to `jrok`, but only if it runs on that machine (`jrok-connector --version`; a wrong architecture or an older glibc doesn't). Otherwise it says why and leaves the connector out, and removes an installed one that doesn't run either, so workers use a `jrok` process per tunnel. With `JROK_CONNECTOR=skip`, it leaves the connector out.
