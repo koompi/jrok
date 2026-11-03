@@ -39,9 +39,12 @@ fn gzip_level() -> u32 {
     std::env::var("JROK_TUNNEL_GZIP_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 9)
 }
 
-/// The client for the app. `gzip_through`: the app's gzip goes through
-/// untouched, so this one doesn't decode gzip (br and deflate, which it never
-/// asks for, still are).
+/// The client for the app. Never through a proxy: HTTP_PROXY or ALL_PROXY
+/// in the worker's environment (set for Docker pulls, say) would get every
+/// app's traffic, cookies and Authorization included, or break it (a proxy
+/// can't reach 172.18.x.x); the CLI ignores them too. `gzip_through`: the
+/// app's gzip goes through untouched, so this one doesn't decode gzip (br and
+/// deflate, which it never asks for, still are).
 fn client(gzip_through: bool) -> &'static reqwest::Client {
     static DECODING: OnceLock<reqwest::Client> = OnceLock::new();
     static GZIP_THROUGH: OnceLock<reqwest::Client> = OnceLock::new();
@@ -51,6 +54,7 @@ fn client(gzip_through: bool) -> &'static reqwest::Client {
 
 fn build_client(gzip_through: bool) -> reqwest::Client {
     let builder = reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .pool_idle_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(32)
@@ -689,6 +693,41 @@ mod proxy_tests {
         assert_eq!(headers["content-disposition"], as_bun_reads("attachment; filename=\"វិក្កយបត្រ.pdf\"".as_bytes()), "{start}");
         assert_eq!(headers["x-cookie-seen"], cookie, "{start}");
         assert_eq!(start["setCookie"], json!([as_bun_reads("lang=ខ្មែរ".as_bytes()), as_bun_reads(b"city=Si\xe9m Reap")]), "{start}");
+    }
+
+    /// Runs only in the child process of the test below, with proxy variables set.
+    #[tokio::test]
+    #[ignore]
+    async fn child_requests_ignore_proxy_variables() {
+        let Ok(app_port) = std::env::var("JROK_TEST_APP_PORT") else { return };
+        for gzip_through in [false, true] {
+            let answer = super::build_client(gzip_through).get(format!("http://127.0.0.1:{app_port}/")).send().await.unwrap();
+            assert_eq!(answer.text().await.unwrap(), "direct", "gzip_through {gzip_through}: the request went to the proxy");
+        }
+    }
+
+    /// HTTP_PROXY or ALL_PROXY on a worker (set for Docker pulls, say) must
+    /// not get every app's traffic, cookies and Authorization included: the
+    /// CLI ignores them. A child process, so this one's environment is untouched.
+    #[tokio::test]
+    async fn proxy_variables_in_the_workers_environment_are_ignored() {
+        let (proxy_port, _) = app(|_| response("HTTP/1.1 200 OK\r\ncontent-length: 7\r\nconnection: close\r\n\r\n", b"proxied")).await;
+        let (app_port, _) = app(|_| response("HTTP/1.1 200 OK\r\ncontent-length: 6\r\nconnection: close\r\n\r\n", b"direct")).await;
+        let proxy = format!("http://127.0.0.1:{proxy_port}");
+        let child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "http::proxy_tests::child_requests_ignore_proxy_variables"])
+            .env("HTTP_PROXY", &proxy)
+            .env("http_proxy", &proxy)
+            .env("ALL_PROXY", &proxy)
+            .env("all_proxy", &proxy)
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .env("JROK_TEST_APP_PORT", app_port.to_string())
+            .output()
+            .await
+            .unwrap();
+        let said = String::from_utf8_lossy(&child.stdout);
+        assert!(said.contains("1 passed"), "{said}");
     }
 }
 
