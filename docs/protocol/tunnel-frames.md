@@ -13,6 +13,7 @@ The agent lists what it supports in the `caps` query parameter of its WebSocket 
 | `binchunk` | Body chunks may be binary frames (below) instead of `http_response_chunk` JSON with base64 `data`. |
 | — | `"streamed": true` in `http_response_start` means the app sent no `Content-Length` (it produces the body as it goes). The server then adds `X-Accel-Buffering: no`, so nginx passes chunks on as they arrive. Servers that don't know the flag ignore it. |
 | `gzip` | The agent may gzip a response itself. It says so with `"encoding": "gzip"` in `http_response_start`; the server then keeps `Content-Encoding: gzip` and passes the bytes through. Without the flag the server drops `Content-Encoding`, because the agent's `fetch` already decoded whatever the app sent. |
+| `tcp_pushback` | The server pauses a TCP customer's socket while the agent's link is backed up (more than 8 MB waiting). An agent may then stop reading its link to slow a customer down, as the connector does while a local service isn't reading. Without the feature, an agent must keep reading: the server goes on sending, and Bun drops what it can't buffer (past 16 MB), leaving a hole in the customer's stream. |
 
 ## Binary frame, version 1
 

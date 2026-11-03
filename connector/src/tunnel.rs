@@ -11,11 +11,14 @@
 //! connection, and the kernel gives up on a link whose data goes unacknowledged
 //! for a minute (TCP_USER_TIMEOUT).
 //!
-//! The other way, a TCP tunnel pushes back: while more than 8 MB waits for its
-//! local services, its link isn't read (until below 4 MB), so the edge's
-//! buffer toward us fills and the edge pauses the customer's socket. A pause
-//! is ours, not the edge's silence: the watchdog doesn't count it, and
-//! heartbeats go on.
+//! The other way, a TCP tunnel pushes back, on an edge that says it can hold
+//! a customer back ("tcp_pushback"): while more than 8 MB waits for its local
+//! services, its link isn't read (until below 4 MB), so the edge's buffer
+//! toward us fills and the edge pauses the customer's socket. A pause is
+//! ours, not the edge's silence: the watchdog doesn't count it, and
+//! heartbeats go on. A pause that lasts 30 s cuts off the connection whose
+//! service stopped reading (tcp.rs). An edge without the feature drops what
+//! it can't buffer, so its link is always read.
 
 use crate::args::TunnelConfig;
 use crate::output::Output;
@@ -26,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
-use tokio::time::{interval_at, sleep, timeout};
+use tokio::time::{interval_at, sleep, sleep_until, timeout};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
@@ -82,6 +85,9 @@ pub struct Timing {
     /// A link that stayed up this long after its welcome was a good one: the
     /// backoff starts over.
     pub stable_after: Duration,
+    /// A TCP tunnel holds its link back at most this long for a service that
+    /// stopped reading; then that connection is cut off.
+    pub tcp_max_pause: Duration,
 }
 
 impl Timing {
@@ -94,6 +100,7 @@ impl Timing {
         reconnect_base: Duration::from_secs(1),
         reconnect_max: Duration::from_secs(30),
         stable_after: Duration::from_secs(30),
+        tcp_max_pause: Duration::from_secs(30),
     };
 
     fn write_limit(&self, bytes: usize) -> Duration {
@@ -383,12 +390,14 @@ async fn serve(
     let mut welcomed: Option<Instant> = None;
     let mut _connected: Option<Counted> = None;
     // Set while the link isn't read: too much waits for the TCP services.
-    let mut paused: Option<Instant> = None;
+    // Only on an edge that then holds the customer back.
+    let mut paused: Option<tokio::time::Instant> = None;
 
     loop {
-        if paused.is_none() && conn.tcp_backlog() > TCP_HIGH_WATER {
-            paused = Some(Instant::now());
+        if paused.is_none() && conn.tcp_backlog() > TCP_HIGH_WATER && conn.has(crate::tcp::PUSHBACK) {
+            paused = Some(tokio::time::Instant::now());
         }
+        let cut_due = paused.map(|since| since + timing.tcp_max_pause);
         tokio::select! {
             _ = stop.cancelled() => break,
             // The writer gave up on the edge.
@@ -401,6 +410,18 @@ async fn serve(
                     if waited >= Duration::from_secs(1) {
                         out.out(format!("⏸️  TCP: waited {:.1}s for the local service to catch up", waited.as_secs_f64()));
                     }
+                }
+            }
+            // Held back this long: the service that stopped reading is cut
+            // off, so it can't hold up the tunnel's other connections, new
+            // ones and the customers' closes for good.
+            _ = async move { match cut_due { Some(at) => sleep_until(at).await, None => std::future::pending().await } }, if paused.is_some() => {
+                if crate::tcp::cut_slowest(&conn, timing.tcp_max_pause) {
+                    paused = Some(tokio::time::Instant::now());
+                } else {
+                    // Nothing left to cut: what still waits is on its way out.
+                    paused = None;
+                    last_inbound = Instant::now();
                 }
             }
             message = stream.next(), if paused.is_none() => match message {
@@ -727,7 +748,7 @@ mod tests {
                         }
                     }
                 });
-                let welcome = serde_json::json!({ "type": "welcome", "agentId": "a", "features": ["stream"] });
+                let welcome = serde_json::json!({ "type": "welcome", "agentId": "a", "features": ["stream", crate::tcp::PUSHBACK] });
                 let connect = serde_json::json!({ "type": "tcp_connect", "connectionId": "c1", "localHost": "127.0.0.1", "localPort": port });
                 sink.send(Message::Text(welcome.to_string())).await.unwrap();
                 sink.send(Message::Text(connect.to_string())).await.unwrap();
@@ -767,6 +788,113 @@ mod tests {
         assert!(took >= Duration::from_secs(2), "the edge pushed everything in {took:?}: nothing held it back");
         assert!(heartbeats_before >= 10, "only {heartbeats_before} heartbeats while the link was held back");
         assert_eq!(connections.load(Ordering::SeqCst), 1, "the tunnel dropped the link for its own pause");
+    }
+
+    fn tcp_data(id: &str, chunk: &[u8]) -> Message {
+        use base64::Engine;
+        text(serde_json::json!({ "type": "tcp_data", "connectionId": id, "data": base64::engine::general_purpose::STANDARD.encode(chunk) }))
+    }
+
+    /// One TCP tunnel's link from a fake edge: welcomes with `features`, then
+    /// the test drives it. What the tunnel sends back comes out of the receiver.
+    async fn tcp_edge(features: &'static [&'static str]) -> (u16, mpsc::UnboundedReceiver<futures_util::stream::SplitSink<WebSocketStream<TcpStream>, Message>>, mpsc::UnboundedReceiver<serde_json::Value>) {
+        let edge = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = edge.local_addr().unwrap().port();
+        let (sink_tx, sinks) = mpsc::unbounded_channel();
+        let (said_tx, said) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((s, _)) = edge.accept().await {
+                let (mut sink, mut stream) = tokio_tungstenite::accept_async(s).await.unwrap().split();
+                let said_tx = said_tx.clone();
+                tokio::spawn(async move {
+                    while let Some(Ok(m)) = stream.next().await {
+                        if let Message::Text(t) = m {
+                            let _ = said_tx.send(serde_json::from_str(&t).unwrap());
+                        }
+                    }
+                });
+                sink.send(text(serde_json::json!({ "type": "welcome", "agentId": "a", "features": features }))).await.unwrap();
+                let _ = sink_tx.send(sink);
+            }
+        });
+        (port, sinks, said)
+    }
+
+    /// An edge without push-back (before tcp_pushback) keeps sending whether
+    /// the link is read or not, and Bun drops what it can't buffer: a tunnel
+    /// that stopped reading there left holes in the customer's stream. Its
+    /// link is always read, and what the customer sent all arrives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_edge_that_cant_hold_the_customer_back_is_always_read() {
+        let (service, go, done) = testing::stalling_service().await;
+        let (edge_port, mut sinks, mut said) = tcp_edge(&["stream"]).await;
+        let (out, mut lines) = testing::output();
+        let stop = CancellationToken::new();
+        tokio::spawn(run_with(testing::config(&format!("http://127.0.0.1:{edge_port}"), service), out, stop.clone(), Timing::DEFAULT));
+        let mut sink = timeout(Duration::from_secs(5), sinks.recv()).await.unwrap().unwrap();
+        sink.send(text(serde_json::json!({ "type": "tcp_connect", "connectionId": "c1", "localHost": "127.0.0.1", "localPort": service }))).await.unwrap();
+        // Well past the 8 MB at which an edge with push-back is held back,
+        // while the service stalls for a while (a checkpoint).
+        let data = testing::pattern(12 << 20);
+        let stall = Duration::from_secs(3);
+        let stalled_until = tokio::time::Instant::now() + stall;
+        let pushed = timeout(stall, async {
+            for chunk in data.chunks(64 * 1024) {
+                sink.send(tcp_data("c1", chunk)).await.unwrap();
+            }
+        })
+        .await;
+        assert!(pushed.is_ok(), "the tunnel stopped reading an edge that can't hold the customer back");
+        sink.send(text(serde_json::json!({ "type": "tcp_close", "connectionId": "c1" }))).await.unwrap();
+        sleep_until(stalled_until).await;
+        go.send(()).unwrap();
+        let got = timeout(Duration::from_secs(20), done).await.unwrap().unwrap();
+        stop.cancel();
+        assert!(got == data, "got {} of {} bytes, or other bytes", got.len(), data.len());
+        while let Ok(m) = said.try_recv() {
+            assert_ne!(m["type"], "tcp_error", "{m}");
+        }
+        // The kernel's buffers can hide a pause from the edge; the tunnel says when it paused.
+        while let Ok(line) = lines.try_recv() {
+            assert!(!line.contains("⏸️"), "the link wasn't read for a while: {line}");
+        }
+    }
+
+    /// Push-back has a limit: a service that never reads again (a lock that
+    /// is never released) is cut off after `tcp_max_pause`, the edge is told,
+    /// and the tunnel's other connections go on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_service_that_never_reads_is_cut_off_and_the_tunnel_goes_on() {
+        let (hung, _never, _) = testing::stalling_service().await;
+        let (healthy, go, done) = testing::stalling_service().await;
+        go.send(()).unwrap();
+        let (edge_port, mut sinks, mut said) = tcp_edge(&["stream", crate::tcp::PUSHBACK]).await;
+        let (out, _lines) = testing::output();
+        let stop = CancellationToken::new();
+        let timing = Timing { tcp_max_pause: Duration::from_secs(1), dead_after: Duration::from_secs(5), ..Timing::DEFAULT };
+        tokio::spawn(run_with(testing::config(&format!("http://127.0.0.1:{edge_port}"), hung), out, stop.clone(), timing));
+        let mut sink = timeout(Duration::from_secs(5), sinks.recv()).await.unwrap().unwrap();
+        let connect = |id: &str, port: u16| text(serde_json::json!({ "type": "tcp_connect", "connectionId": id, "localHost": "127.0.0.1", "localPort": port }));
+        sink.send(connect("c1", hung)).await.unwrap();
+        for chunk in testing::pattern(12 << 20).chunks(64 * 1024) {
+            sink.send(tcp_data("c1", chunk)).await.unwrap();
+        }
+        // Held back while c1's service doesn't read; read again once it is cut off.
+        sink.send(connect("c2", healthy)).await.unwrap();
+        sink.send(tcp_data("c2", b"SELECT 1;")).await.unwrap();
+        sink.send(text(serde_json::json!({ "type": "tcp_close", "connectionId": "c2" }))).await.unwrap();
+        let got = timeout(Duration::from_secs(15), done).await.expect("the tunnel stayed held back").unwrap();
+        assert_eq!(got, b"SELECT 1;");
+        let mut cut = None;
+        while let Ok(m) = said.try_recv() {
+            if m["type"] == "tcp_error" {
+                cut = Some(m);
+            }
+        }
+        stop.cancel();
+        let cut = cut.expect("the edge wasn't told c1 was cut off");
+        assert_eq!(cut["connectionId"], "c1", "{cut}");
+        assert!(sinks.try_recv().is_err(), "the link was dropped");
     }
 
     /// A fake edge running `script` on every connection; how many it got.

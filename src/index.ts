@@ -777,7 +777,10 @@ async function startServer() {
               // Server capabilities: the CLI only uses a feature when the
               // server says it can handle it (safe rollout with old servers).
               // See docs/protocol/tunnel-frames.md.
-              features: ["stream", "b64body", "binchunk", "gzip"],
+              // tcp_pushback: this edge pauses a TCP customer while the
+              // agent's link is backed up (tcpService), so an agent may stop
+              // reading its link to slow a customer down (jrok-connector).
+              features: ["stream", "b64body", "binchunk", "gzip", "tcp_pushback"],
             };
 
             // Include group info if in group mode
