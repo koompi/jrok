@@ -184,6 +184,17 @@ describe("flood blocks", () => {
     expect(securityService.activeAppBlock("192.0.2.80", "shop")).toBeNull();
   });
 
+  test("a block by hand whose reason starts with \"Flood:\" is still applied everywhere", async () => {
+    // What POST /security/block-ip saves for {"reason": "Flood: …"}.
+    const reason = securitySync.handBlockReason(`${"Flood:"} 50k requests a second from one host`);
+    await securitySync.setRule("block-ip", "192.0.2.83", true, { reason, durationSeconds: 600 });
+    expect(securityService.isIpBlocked("192.0.2.83")).toBe(true); // here, at once
+    becomeAnotherServer();
+    await securitySync.syncSecurityRules();
+    expect(securityService.isIpBlocked("192.0.2.83")).toBe(true); // and on the others
+    expect(securitySync.handBlockReason("Scraping")).toBe("Scraping");
+  });
+
   test("an older edge's flood block of every app is not applied; a block by hand still is", async () => {
     await securitySync.setRule("block-ip", "192.0.2.81", true, { reason: "Flood: over 3000 requests in 10 s", durationSeconds: 600 });
     await securitySync.setRule("block-ip", "192.0.2.82", true, { reason: "Scraping", durationSeconds: 600 });

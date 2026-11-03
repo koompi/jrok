@@ -88,6 +88,17 @@ function applyRule(rule: SecurityRule): void {
 }
 
 /**
+ * The reason a block by hand (POST /security/block-ip) is saved with. A
+ * block-ip rule whose reason starts with "Flood:" is taken for an older edge's
+ * flood block of every app and not applied (applyRule), so a hand block given
+ * such a reason ("Flood: 50k requests a second") was saved, reported as done,
+ * and enforced nowhere.
+ */
+export function handBlockReason(reason: string): string {
+  return reason.startsWith(FLOOD_REASON_PREFIX) ? `By hand: ${reason}` : reason;
+}
+
+/**
  * Save a rule for every server and apply it here at once. Throws if MongoDB
  * can't take it: the caller must report that, since the other servers won't
  * enforce it.

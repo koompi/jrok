@@ -2161,7 +2161,9 @@ async function startServer() {
               { status: 400, headers: { "Content-Type": "application/json" } }
             ));
           }
-          const saveError = await saveSharedRule("block-ip", body.ip, true, { reason: body.reason, durationSeconds: body.duration || 3600 });
+          // handBlockReason: a reason starting "Flood:" would be taken for an
+          // older edge's flood block and applied nowhere.
+          const saveError = await saveSharedRule("block-ip", body.ip, true, { reason: securitySync.handBlockReason(body.reason), durationSeconds: body.duration || 3600 });
           if (saveError) return addCors(saveError);
           return addCors(new Response(
             JSON.stringify({ success: true, message: `IP ${body.ip} blocked` }),
