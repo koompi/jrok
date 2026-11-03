@@ -48,6 +48,16 @@ let collections: Collections;
  */
 export function databaseName(uri: string, override: string | undefined = process.env.MONGODB_DB): string {
   if (override?.trim()) return override.trim();
+  return uriDatabaseName(uri);
+}
+
+/**
+ * The database the URI itself names (mongodb://host/<name>), else "jrok".
+ * MONGODB_DB plays no part: tests use this to check where they will write.
+ * (Passing `undefined` to databaseName does not skip MONGODB_DB: a default
+ * parameter takes over for an explicit undefined too.)
+ */
+export function uriDatabaseName(uri: string): string {
   // The driver's shape: scheme://[user[:password]@]hosts[/name][?options]
   const path = /^mongodb(?:\+srv)?:\/\/(?:[^:@]*(?::[^@]*)?@)?[^/?@]*\/([^?]*)/.exec(uri)?.[1];
   try {
