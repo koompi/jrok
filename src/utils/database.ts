@@ -149,6 +149,76 @@ export async function getCustomDomainByName(domain: string): Promise<CustomDomai
   return result;
 }
 
+// ===== CUSTOM DOMAINS ON THE REQUEST PATH =====
+// Every request for a name that isn't ours asks "is this an active custom
+// domain?". That was a MongoDB query per name every minute, with no fallback:
+// a minute into a MongoDB outage, every custom-domain request waited 10 s and
+// got 503, even with its agent connected. The active set is small, so it is
+// kept whole: reloaded in the background with one query when older than
+// ACTIVE_CUSTOM_DOMAINS_TTL_MS, kept when a reload fails, and changed at once
+// when this server activates or deletes a domain. Only the first load is waited
+// for. Random Host headers from scanners cost nothing and evict nothing.
+const ACTIVE_CUSTOM_DOMAINS_TTL_MS = 15_000;
+let activeCustomDomains: Set<string> | null = null;
+let activeCustomDomainsAt = 0;
+let activeCustomDomainsLoad: Promise<Set<string>> | null = null;
+let activeCustomDomainsFailing = false;
+
+function loadActiveCustomDomains(): Promise<Set<string>> {
+  if (!activeCustomDomainsLoad) {
+    activeCustomDomainsLoad = (async () => {
+      const docs = await getCollections().customDomains.find({ active: true }, { projection: { domain: 1 } }).toArray();
+      const names = new Set<string>();
+      for (const doc of docs) if (typeof doc.domain === "string") names.add(doc.domain.toLowerCase());
+      activeCustomDomains = names;
+      activeCustomDomainsAt = Date.now();
+      if (activeCustomDomainsFailing) console.log(`✅ Custom domains reloaded (${names.size} active)`);
+      activeCustomDomainsFailing = false;
+      return names;
+    })().finally(() => {
+      activeCustomDomainsLoad = null;
+    });
+  }
+  return activeCustomDomainsLoad;
+}
+
+/**
+ * Is `hostname` an active custom domain? Answers from memory; waits on MongoDB
+ * only until the first load (and throws if that fails).
+ */
+export async function isActiveCustomDomain(hostname: string): Promise<boolean> {
+  const host = hostname.toLowerCase();
+  if (activeCustomDomains === null) return (await loadActiveCustomDomains()).has(host);
+  if (Date.now() - activeCustomDomainsAt >= ACTIVE_CUSTOM_DOMAINS_TTL_MS) {
+    loadActiveCustomDomains().catch((error) => {
+      if (!activeCustomDomainsFailing) {
+        console.warn(`⚠️ Custom domains not reloaded, serving the ${activeCustomDomains?.size ?? 0} known:`, error?.message || error);
+      }
+      activeCustomDomainsFailing = true;
+    });
+  }
+  return activeCustomDomains.has(host);
+}
+
+/** This server changed a domain: the set follows at once (other servers on their next reload). */
+function noteCustomDomain(domain: string | undefined, active: boolean | undefined): void {
+  if (!activeCustomDomains) return;
+  if (!domain || active === undefined) {
+    activeCustomDomainsAt = 0; // which one isn't known here: reload on the next request
+    return;
+  }
+  if (active) activeCustomDomains.add(domain.toLowerCase());
+  else activeCustomDomains.delete(domain.toLowerCase());
+}
+
+/** For tests: forget the set, as a server that just started. */
+export function resetActiveCustomDomains(): void {
+  activeCustomDomains = null;
+  activeCustomDomainsAt = 0;
+  activeCustomDomainsLoad = null;
+  activeCustomDomainsFailing = false;
+}
+
 export async function getAllCustomDomains(): Promise<CustomDomain[]> {
   const collections = getCollections();
   return await collections.customDomains.find({}).toArray() as CustomDomain[];
@@ -167,6 +237,7 @@ export async function createCustomDomain(domain: CustomDomain): Promise<void> {
   });
   // Invalidate cache so next request sees the new domain
   invalidateCustomDomainCache(domain.domain);
+  if (domain.active) noteCustomDomain(domain.domain, true);
 }
 
 export async function updateCustomDomain(id: string, updates: Partial<CustomDomain>): Promise<void> {
@@ -175,6 +246,7 @@ export async function updateCustomDomain(id: string, updates: Partial<CustomDoma
     { _id: new ObjectId(id) },
     { $set: updates }
   );
+  if ("active" in updates) noteCustomDomain(undefined, undefined);
 }
 
 export async function updateCustomDomainByName(domain: string, updates: Partial<CustomDomain>): Promise<void> {
@@ -184,6 +256,7 @@ export async function updateCustomDomainByName(domain: string, updates: Partial<
     { $set: updates }
   );
   invalidateCustomDomainCache(domain);
+  if ("active" in updates) noteCustomDomain(domain, updates.active);
 }
 
 export async function deleteCustomDomainById(id: string): Promise<void> {
@@ -195,6 +268,7 @@ export async function deleteCustomDomainById(id: string): Promise<void> {
     // Fallback: try by UUID 'id' field (legacy)
     await collections.customDomains.deleteOne({ id: id });
   }
+  noteCustomDomain(undefined, undefined);
 }
 
 export async function deleteCustomDomainByName(domainName: string): Promise<void> {
@@ -204,4 +278,5 @@ export async function deleteCustomDomainByName(domainName: string): Promise<void
     throw new Error(`Domain ${domainName} not found in database`);
   }
   invalidateCustomDomainCache(domainName);
+  noteCustomDomain(domainName, false);
 }

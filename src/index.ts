@@ -1260,10 +1260,11 @@ async function startServer() {
           tunnelDomain = hostRoute.name;
         } else if (hostRoute.kind === "custom-candidate") {
           // Not one of ours by name — might be a registered custom domain.
+          // Answered from memory (utils/database.ts), so a MongoDB outage
+          // doesn't take custom domains down.
           try {
-            const { getCustomDomainByName } = await import("./utils/database");
-            const customDomain = await getCustomDomainByName(hostname);
-            if (customDomain && customDomain.active) {
+            const { isActiveCustomDomain } = await import("./utils/database");
+            if (await isActiveCustomDomain(hostname)) {
               tunnelDomain = hostname;
               isCustomDomainRequest = true;
             }
