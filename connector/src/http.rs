@@ -265,10 +265,10 @@ async fn proxy(conn: &Arc<Conn>, request: &Request, message: &Value, abort: &Can
     let response = tokio::select! {
         r = tokio::time::timeout(headers_timeout(), builder.send()) => match r {
             Ok(Ok(response)) => response,
-            Ok(Err(e)) => return fail_before_start(conn, request, &e.to_string()).await,
-            Err(_) => return fail_before_start(conn, request, "timed out waiting for the app").await,
+            Ok(Err(e)) => return fail_before_start(conn, request, AppError::from(e)).await,
+            Err(_) => return fail_before_start(conn, request, AppError::said(TIMED_OUT)).await,
         },
-        _ = abort.cancelled() => return fail_before_start(conn, request, "aborted").await,
+        _ = abort.cancelled() => return fail_before_start(conn, request, AppError::said("aborted")).await,
     };
 
     let status = response.status().as_u16();
@@ -306,7 +306,7 @@ async fn proxy(conn: &Arc<Conn>, request: &Request, message: &Value, abort: &Can
                 conn.send_json(reply).await;
                 request.event(conn, status, "buffered", body.len() as u64);
             }
-            Err(e) => fail_before_start(conn, request, &e.to_string()).await,
+            Err(e) => fail_before_start(conn, request, AppError::from(e)).await,
         }
         return;
     }
@@ -368,7 +368,7 @@ async fn proxy(conn: &Arc<Conn>, request: &Request, message: &Value, abort: &Can
         };
         let body = match body {
             Ok(b) => b,
-            Err(e) => return fail_mid_stream(conn, request, &e.to_string(), 0).await,
+            Err(e) => return fail_mid_stream(conn, request, AppError::from(e), 0).await,
         };
         let level = gzip_level();
         let compressed = tokio::task::spawn_blocking(move || {
@@ -412,7 +412,7 @@ async fn proxy(conn: &Arc<Conn>, request: &Request, message: &Value, abort: &Can
                     send_chunk(out).await;
                 }
             }
-            Some(Err(e)) => return fail_mid_stream(conn, request, &e.to_string(), bytes_out).await,
+            Some(Err(e)) => return fail_mid_stream(conn, request, AppError::from(e), bytes_out).await,
             None => break,
         }
     }
@@ -427,21 +427,67 @@ async fn proxy(conn: &Arc<Conn>, request: &Request, message: &Value, abort: &Can
     request.event(conn, status, "streamed", bytes_out);
 }
 
-async fn fail_before_start(conn: &Conn, request: &Request, error: &str) {
-    conn.out.err(format!("❌ Error forwarding request: {error}"));
+const TIMED_OUT: &str = "the app did not answer in time";
+
+/// What went wrong with the app: `said`, in words a visitor may read, never
+/// the app's address or the request's query (reqwest's errors carry the whole
+/// URL, a password-reset token with it); `cause`, for the worker's log.
+struct AppError {
+    said: String,
+    cause: String,
+}
+
+impl AppError {
+    fn said(text: &str) -> AppError {
+        AppError { said: text.to_string(), cause: String::new() }
+    }
+}
+
+impl From<reqwest::Error> for AppError {
+    fn from(e: reqwest::Error) -> AppError {
+        let e = e.without_url();
+        let said = if e.is_timeout() {
+            TIMED_OUT.to_string()
+        } else if e.is_connect() {
+            "the app refused the connection".to_string()
+        } else {
+            e.to_string()
+        };
+        let mut cause = String::new();
+        let mut source = std::error::Error::source(&e);
+        while let Some(s) = source {
+            cause.push_str(": ");
+            cause.push_str(&s.to_string());
+            source = s.source();
+        }
+        AppError { said, cause }
+    }
+}
+
+/// The log line: method and path, never the query.
+fn log_failure(conn: &Conn, request: &Request, error: &AppError) {
+    let mut line = format!("❌ Error forwarding {} {}: {}{}", request.method, request.path, error.said, error.cause);
+    if request.query.len() > 1 {
+        line = line.replace(request.query.as_str(), "");
+    }
+    conn.out.err(line);
+}
+
+async fn fail_before_start(conn: &Conn, request: &Request, error: AppError) {
+    log_failure(conn, request, &error);
     request.event(conn, 502, "error", 0);
     conn.send_json(json!({
         "type": "http_response", "requestId": request.id, "status": 502, "statusText": "Bad Gateway",
         "headers": { "Content-Type": "text/plain" },
-        "body": format!("Error connecting to local service: {error}"),
+        "body": format!("Error connecting to local service: {}", error.said),
     }))
     .await;
 }
 
-async fn fail_mid_stream(conn: &Conn, request: &Request, error: &str, bytes: u64) {
-    conn.out.err(format!("❌ Error forwarding request: {error}"));
+async fn fail_mid_stream(conn: &Conn, request: &Request, error: AppError, bytes: u64) {
+    log_failure(conn, request, &error);
     request.event(conn, 0, "stream_error", bytes);
-    conn.send_json(json!({ "type": "http_response_error", "requestId": request.id, "error": error })).await;
+    conn.send_json(json!({ "type": "http_response_error", "requestId": request.id, "error": error.said })).await;
 }
 
 #[cfg(test)]
@@ -728,6 +774,31 @@ mod proxy_tests {
             .unwrap();
         let said = String::from_utf8_lossy(&child.stdout);
         assert!(said.contains("1 passed"), "{said}");
+    }
+
+    /// The app is down (crashed, restarting). A visitor, or anyone probing,
+    /// must not learn its internal address, and no log keeps the query
+    /// (password-reset tokens, OAuth codes).
+    #[tokio::test]
+    async fn an_app_that_is_down_gives_a_plain_502_and_logs_no_query() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let (conn, mut sent, mut lines) = testing::conn(port, &["stream", "binchunk", "gzip"]);
+        let mut message = request("/reset", json!({}));
+        message["query"] = json!("?token=SECRET123");
+        super::handle(conn, message).await;
+        let (answer, _) = answered(&mut sent);
+        assert_eq!(answer["status"], 502);
+        let body = answer["body"].as_str().unwrap();
+        assert_eq!(body, "Error connecting to local service: the app refused the connection");
+        let mut logged = String::new();
+        while let Ok(line) = lines.try_recv() {
+            logged.push_str(&line);
+        }
+        assert!(logged.contains("GET /reset"), "{logged}");
+        assert!(logged.contains("refused"), "{logged}");
+        assert!(!logged.contains("SECRET123"), "{logged}");
     }
 }
 

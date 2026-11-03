@@ -88,6 +88,11 @@ fn connect_within(conn: Arc<Conn>, message: &Value, limit: Duration) {
     tokio::spawn(relay(conn, ws_id, path, headers, rx, queued, abort, limit));
 }
 
+/// A path for the log: the query (tokens, often, on a WebSocket) left out.
+fn without_query(path: &str) -> &str {
+    path.split('?').next().unwrap_or(path)
+}
+
 /// Forget a visitor's socket, if the entry is still this one.
 fn forget(conn: &Conn, ws_id: &str, queued: &Arc<AtomicUsize>) {
     let mut sockets = conn.ws_conns.lock().unwrap();
@@ -153,7 +158,7 @@ async fn open_local(conn: &Conn, ws_id: &str, path: &str, headers: &Value) -> Re
     };
     let local = open(offered.as_deref()).await;
     if offered.is_some() && matches!(local, Err(TungsteniteError::Protocol(ProtocolError::SecWebSocketSubProtocolError(SubProtocolError::NoSubProtocol)))) {
-        conn.out.out(format!("🔁 WS {path} [{ws_id}]: the app ignores subprotocols; connecting again without one"));
+        conn.out.out(format!("🔁 WS {} [{ws_id}]: the app ignores subprotocols; connecting again without one", without_query(path)));
         return open(None).await;
     }
     local
@@ -193,7 +198,7 @@ async fn relay(
     let local = match opened {
         Some(Ok(ws)) => ws,
         Some(Err(error)) => {
-            conn.out.err(format!("❌ WS Error: {path} [{ws_id}]: {error}"));
+            conn.out.err(format!("❌ WS Error: {} [{ws_id}]: {error}", without_query(&path)));
             forget(&conn, &ws_id, &queued);
             conn.send_json(json!({ "type": "ws_error", "wsId": ws_id, "error": error })).await;
             return;
@@ -311,6 +316,12 @@ pub fn close(conn: &Arc<Conn>, message: &Value) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn logs_leave_the_query_out() {
+        assert_eq!(super::without_query("/cable?token=SECRET"), "/cable");
+        assert_eq!(super::without_query("/ws"), "/ws");
+    }
+
     #[test]
     fn close_codes() {
         assert_eq!(super::sendable(1000), 1000);
