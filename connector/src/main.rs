@@ -38,8 +38,8 @@ const STATS_EVERY: Duration = Duration::from_secs(30);
 /// an open file in this one process. The usual soft limit (1024) ran out at
 /// 1,000 WebSockets on staging ("Too many open files"), so raise it to the
 /// hard limit, as the jrok CLI's many processes never needed. Returns the
-/// limit now in force.
-fn raise_open_file_limit() -> u64 {
+/// limit now in force (rlim_t: 64 bits here, 32 on 32-bit targets).
+fn raise_open_file_limit() -> libc::rlim_t {
     // SAFETY: getrlimit/setrlimit only read and write the struct passed.
     unsafe {
         let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
@@ -49,10 +49,10 @@ fn raise_open_file_limit() -> u64 {
         if limit.rlim_cur < limit.rlim_max {
             let raised = libc::rlimit { rlim_cur: limit.rlim_max, rlim_max: limit.rlim_max };
             if libc::setrlimit(libc::RLIMIT_NOFILE, &raised) == 0 {
-                return raised.rlim_cur as u64;
+                return raised.rlim_cur;
             }
         }
-        limit.rlim_cur as u64
+        limit.rlim_cur
     }
 }
 
@@ -124,7 +124,7 @@ fn stats() -> serde_json::Value {
 /// Open and close tunnels as the worker asks; stop them all when it goes away.
 /// A ping is answered from this same loop, so a worker that gets no pong
 /// knows the connector is wedged; stats go out every `stats_every`.
-async fn control<R: AsyncBufRead + Unpin>(input: R, tx: mpsc::UnboundedSender<String>, open_files: u64, stats_every: Duration) {
+async fn control<R: AsyncBufRead + Unpin>(input: R, tx: mpsc::UnboundedSender<String>, open_files: libc::rlim_t, stats_every: Duration) {
     let _ = tx.send(serde_json::json!({ "ready": true, "version": VERSION, "maxOpenFiles": open_files }).to_string());
     let mut tunnels: HashMap<String, CancellationToken> = HashMap::new();
     let mut lines = input.lines();
