@@ -68,64 +68,95 @@ export function recordBandwidth(params: {
   return Promise.resolve();
 }
 
+type FlushMeta = { organizationId: string; tunnelId?: string; agentId?: string; hourKey: string };
+type Counts = { bytesIn: number; bytesOut: number; requests: number };
+
+// Counts a flush couldn't write, by key and hour: the next flush writes them.
+// They used to be dropped, so every MongoDB blip lost up to 30 s of each
+// tenant's traffic records.
+const unsaved = new Map<string, { meta: FlushMeta; counts: Counts }>();
+
+function addCounts(into: Map<string, { meta: FlushMeta; counts: Counts }>, meta: FlushMeta, key: string, counts: Counts): void {
+  const id = `${key}|${meta.hourKey}`;
+  const entry = into.get(id);
+  if (entry) {
+    entry.counts.bytesIn += counts.bytesIn;
+    entry.counts.bytesOut += counts.bytesOut;
+    entry.counts.requests += counts.requests;
+  } else {
+    into.set(id, { meta, counts: { ...counts } });
+  }
+}
+
 /**
  * Flush all accumulated bandwidth stats to MongoDB.
  * Called automatically every 30 seconds by the background interval.
+ * What can't be written is kept for the next flush (and the error rethrown).
  */
 export async function flushBandwidthToMongo(): Promise<void> {
-  if (pendingFlushMeta.size === 0) return;
+  if (pendingFlushMeta.size === 0 && unsaved.size === 0) return;
 
   const db = await getDatabase();
   const collection = db.collection(BANDWIDTH_COLLECTION);
 
-  // Snapshot and clear pending entries atomically
-  const entries = Array.from(pendingFlushMeta.entries());
+  // This window's counts, plus whatever earlier flushes couldn't write. The
+  // accumulators are reset so the next window starts fresh.
+  const batch = new Map(unsaved);
+  unsaved.clear();
+  for (const [key, meta] of pendingFlushMeta) {
+    const s = realtimeStats.get(key);
+    // Deleted after the snapshot (re-created on the next activity), so
+    // realtimeStats never piles up zero-value entries.
+    realtimeStats.delete(key);
+    if (s) addCounts(batch, meta, key, { bytesIn: s.bytesIn, bytesOut: s.bytesOut, requests: s.requests });
+  }
   pendingFlushMeta.clear();
 
-  // Snapshot current stats for each key and reset the accumulators so the
-  // next 30s window starts fresh (avoids double-counting on every flush).
-  const statsSnapshot = new Map<string, { bytesIn: number; bytesOut: number; requests: number }>();
-  for (const [key] of entries) {
-    const s = realtimeStats.get(key);
-    if (s) {
-      statsSnapshot.set(key, { bytesIn: s.bytesIn, bytesOut: s.bytesOut, requests: s.requests });
-      // Delete the entry entirely after snapshot — it gets re-created on next activity.
-      // This prevents realtimeStats from accumulating stale zero-value entries forever.
-      realtimeStats.delete(key);
-    }
-  }
-
-  const ops = entries.map(([key, meta]) => {
-    const stats = statsSnapshot.get(key);
-    if (!stats || (stats.bytesIn === 0 && stats.bytesOut === 0 && stats.requests === 0)) return null;
-    return {
-      updateOne: {
-        filter: {
-          organizationId: meta.organizationId,
-          tunnelId: meta.tunnelId,
-          periodKey: meta.hourKey,
-          period: "hour",
-        },
-        update: {
-          $inc: {
-            bytesIn: stats.bytesIn,
-            bytesOut: stats.bytesOut,
-            requests: stats.requests,
-          },
-          $set: {
-            agentId: meta.agentId,
-            timestamp: Date.now(),
-          },
-          $setOnInsert: { id: generateId() },
-        },
-        upsert: true,
+  const items = [...batch.entries()].filter(([, { counts }]) => counts.bytesIn !== 0 || counts.bytesOut !== 0 || counts.requests !== 0);
+  const ops = items.map(([, { meta, counts }]) => ({
+    updateOne: {
+      filter: {
+        organizationId: meta.organizationId,
+        tunnelId: meta.tunnelId,
+        periodKey: meta.hourKey,
+        period: "hour",
       },
-    };
-  }).filter(Boolean);
+      update: {
+        $inc: {
+          bytesIn: counts.bytesIn,
+          bytesOut: counts.bytesOut,
+          requests: counts.requests,
+        },
+        $set: {
+          agentId: meta.agentId,
+          timestamp: Date.now(),
+        },
+        $setOnInsert: { id: generateId() },
+      },
+      upsert: true,
+    },
+  }));
+  if (ops.length === 0) return;
 
-  if (ops.length > 0) {
+  try {
     await collection.bulkWrite(ops as any[], { ordered: false });
+  } catch (error: any) {
+    // Some writes of an unordered batch can fail alone: keep only those.
+    // Otherwise (MongoDB unreachable, ...) nothing was written: keep it all.
+    const failed: number[] = Array.isArray(error?.writeErrors) && error.writeErrors.length > 0
+      ? error.writeErrors.map((e: any) => e.index).filter((i: unknown) => typeof i === "number")
+      : items.map((_, i) => i);
+    for (const i of failed) {
+      const item = items[i];
+      if (item) addCounts(unsaved, item[1].meta, item[0].slice(0, item[0].lastIndexOf("|")), item[1].counts);
+    }
+    throw error;
   }
+}
+
+/** Usage counted but not yet written to MongoDB (tests). */
+export function unsavedBandwidthCount(): number {
+  return unsaved.size + pendingFlushMeta.size;
 }
 
 /**

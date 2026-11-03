@@ -282,6 +282,8 @@
 
       Restart=always
       RestartSec=5
+      # On SIGTERM jrok writes its usage counts (at most 5 s) before exiting.
+      TimeoutStopSec=20
 
       StandardOutput=journal
       StandardError=journal

@@ -41,6 +41,7 @@ import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils
 import { firstSubprotocol } from "./utils/wsSubprotocol";
 import { DRAIN_HEADER, isDraining } from "./utils/drain";
 import { maintenancePage } from "./utils/maintenancePage";
+import { shutdownHandler } from "./utils/shutdown";
 import {
   normalizeHostname,
   classifyHost,
@@ -2895,26 +2896,27 @@ async function startServer() {
 
     console.log("✅ Certificate sync enabled (reconcile on startup, every 5 minutes, and within 15 s of a new upload)");
 
-    // Graceful shutdown
-    process.on("SIGINT", async () => {
-      console.log("\n🛑 Shutting down...");
-
-      // Flush pending bandwidth stats before exit so no data is lost
-      await statsService.flushBandwidthToMongo().catch(() => {});
-
-      // Shutdown services
-      await crossServerService.shutdownCrossServerRouting();
-      securityService.shutdownSecurityService();
-      securitySync.stopSecuritySync();
-      edgeCacheRules.stopEdgeCacheRules();
-      monitoringService.shutdownMonitoringService();
-
-      // Cleanup TCP tunnels for this server
-      await tcpService.cleanupServerPorts();
-
-      await closeDatabase();
-      process.exit(0);
+    // Graceful shutdown: systemd's SIGTERM (deploys, restarts) and Ctrl-C's
+    // SIGINT both write the usage counted so far; only SIGINT leaves the
+    // cluster (utils/shutdown.ts).
+    const shutdown = shutdownHandler({
+      flush: () => statsService.flushBandwidthToMongo(),
+      stop: () => {
+        securityService.shutdownSecurityService();
+        securitySync.stopSecuritySync();
+        edgeCacheRules.stopEdgeCacheRules();
+        monitoringService.shutdownMonitoringService();
+      },
+      leave: async () => {
+        await crossServerService.shutdownCrossServerRouting();
+        // Cleanup TCP tunnels for this server
+        await tcpService.cleanupServerPorts();
+      },
+      closeDatabase,
+      exit: (code) => process.exit(code),
     });
+    process.on("SIGINT", () => void shutdown("SIGINT"));
+    process.on("SIGTERM", () => void shutdown("SIGTERM"));
   } catch (error) {
     console.error("❌ Failed to start server:", error);
     process.exit(1);
