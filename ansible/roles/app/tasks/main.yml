@@ -121,10 +121,13 @@
 # is `systemctl show`: any local process (nginx's www-data included) could
 # read the database password and the server key from them. Both services
 # load this file.
+# MONGODB_DB pins the database (jrok_db_name, default jrok): jrok otherwise
+# uses the one mongodb_uri names, and always used "jrok" before.
 - name: jrok secrets (root only)
   copy:
     content: |
       MONGODB_URI={{ mongodb_uri }}
+      MONGODB_DB={{ jrok_db_name | default('jrok') }}
       API_KEY={{ cert_sync_api_key }}
       JWT_SECRET={{ jwt_secret }}
       KOOMPI_CLIENT_SECRET={{ koompi_client_secret }}

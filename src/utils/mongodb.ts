@@ -37,6 +37,26 @@ export interface Collections {
 
 let collections: Collections;
 
+/**
+ * The database jrok uses: MONGODB_DB when set, else the one the URI names
+ * (mongodb://host/<name>), else "jrok".
+ *
+ * It used to be "jrok" whatever the URI said, so the test suite, pointed at
+ * .../jrok_test, emptied the certificates of the real "jrok" database on the
+ * same server. The edges set MONGODB_DB=jrok (Ansible), so a path in their URI
+ * can never move them to another database.
+ */
+export function databaseName(uri: string, override: string | undefined = process.env.MONGODB_DB): string {
+  if (override?.trim()) return override.trim();
+  // The driver's shape: scheme://[user[:password]@]hosts[/name][?options]
+  const path = /^mongodb(?:\+srv)?:\/\/(?:[^:@]*(?::[^@]*)?@)?[^/?@]*\/([^?]*)/.exec(uri)?.[1];
+  try {
+    return (path && decodeURIComponent(path)) || "jrok";
+  } catch {
+    return "jrok";
+  }
+}
+
 export async function connectDatabase(): Promise<void> {
   const mongoUri = process.env.MONGODB_URI || "mongodb://localhost:27017/jrok";
 
@@ -70,7 +90,7 @@ export async function connectDatabase(): Promise<void> {
 
   try {
     await client.connect();
-    db = client.db("jrok");
+    db = client.db(databaseName(mongoUri));
 
     // Initialize collections
     collections = {
@@ -108,7 +128,7 @@ export async function connectDatabase(): Promise<void> {
     await createIndexes();
     await createSaaSIndexes();
 
-    console.log("✅ Connected to MongoDB");
+    console.log(`✅ Connected to MongoDB (database ${db.databaseName})`);
   } catch (error) {
     console.error("❌ Failed to connect to MongoDB:", error);
     throw error;
@@ -418,6 +438,11 @@ export async function getDatabase(): Promise<Db> {
 
 export function getClient(): MongoClient | null {
   return client || null;
+}
+
+/** jrok's database (see databaseName), or null before connectDatabase(). */
+export function getDb(): Db | null {
+  return db || null;
 }
 
 export async function closeDatabase(): Promise<void> {

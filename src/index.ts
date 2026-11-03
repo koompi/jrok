@@ -2712,8 +2712,8 @@ async function startServer() {
         // Check sync queue (for VPS servers to see pending syncs)
         if (path === "/certificates/sync-queue" && method === "GET") {
           try {
-            const { getClient } = await import("./utils/mongodb");
-            const queue = getClient()?.db("jrok").collection("cert_sync_queue");
+            const { getDb } = await import("./utils/mongodb");
+            const queue = getDb()?.collection("cert_sync_queue");
             const pending = await queue?.find({ processed: false }).toArray() || [];
 
             return addCors(new Response(
@@ -2739,8 +2739,8 @@ async function startServer() {
           }
 
           try {
-            const { getClient } = await import("./utils/mongodb");
-            const queue = getClient()?.db("jrok").collection("cert_sync_queue");
+            const { getDb } = await import("./utils/mongodb");
+            const queue = getDb()?.collection("cert_sync_queue");
             await queue?.updateOne(
               { _id: decodeURIComponent(syncId) as any },
               { $set: { processed: true, processedAt: new Date() } }

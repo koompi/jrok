@@ -11,7 +11,8 @@
  * puts it back when they see it up. See checker.ts and decide.ts.
  *
  * Environment:
- *   MONGODB_URI                  the edges' MongoDB (votes and the writer lease)
+ *   MONGODB_URI                  the edges' MongoDB (votes and the writer lease);
+ *                                MONGODB_DB or the URI's path names the database, as for jrok
  *   DNS_HEALTH_EDGES             id=address,…  every edge, ids as their VPS_ID
  *   DNS_HEALTH_RECORDS           record names to keep healthy, comma-separated
  *   DNS_HEALTH_CHECK_HOST        name for TLS and Host on probes (a base domain)
@@ -30,6 +31,7 @@ import { CloudflareDns, cloudflareToken } from "./cloudflare";
 import { DnsHealthChecker } from "./checker";
 import { initTelegram, notifyEdgeDns } from "../services/notificationService";
 import { DRAIN_HEADER } from "../utils/drain";
+import { databaseName } from "../utils/mongodb";
 
 const env = process.env;
 const number = (name: string, fallback: number) => {
@@ -84,7 +86,7 @@ const checker = new DnsHealthChecker(
     leftoverAfterMs: number("DNS_HEALTH_LEFTOVER_AFTER_S", 300) * 1000,
     dryRun: env.DNS_HEALTH_DRY_RUN === "true",
   },
-  client.db("jrok"),
+  client.db(databaseName(env.MONGODB_URI)),
   new CloudflareDns(cloudflareToken(), { ttl: number("DNS_HEALTH_TTL", 60), zoneId: env.DNS_HEALTH_ZONE_ID }),
   probe,
   undefined,

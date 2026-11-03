@@ -1,5 +1,5 @@
 import * as db from "../utils/database";
-import { getClient } from "../utils/mongodb";
+import { getDb } from "../utils/mongodb";
 import * as notificationService from "./notificationService";
 import { matchBaseDomain } from "../utils/baseDomains";
 
@@ -73,8 +73,7 @@ function unwrapUpdateResult<T>(result: any): T | null {
  */
 export async function attemptBecomeLeader(serverId: string): Promise<boolean> {
   try {
-    const client = getClient();
-    const leases = client?.db("jrok").collection<LeaderLease>("leader_leases");
+    const leases = getDb()?.collection<LeaderLease>("leader_leases");
     if (!leases) {
       console.error("❌ Database connection not available");
       return false;
@@ -122,7 +121,7 @@ export async function attemptBecomeLeader(serverId: string): Promise<boolean> {
  */
 export async function refreshLeaderLease(serverId: string): Promise<boolean> {
   try {
-    const leases = getClient()?.db("jrok").collection<LeaderLease>("leader_leases");
+    const leases = getDb()?.collection<LeaderLease>("leader_leases");
     if (!leases) return false;
 
     const now = new Date();
@@ -159,7 +158,7 @@ export async function uploadCertificateToMongoDB(
   uploadedBy: string
 ): Promise<CertificateRecord> {
   try {
-    const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+    const certs = getDb()?.collection<CertificateRecord>("certificates");
     if (!certs) {
       throw new Error("Database connection not available");
     }
@@ -226,7 +225,7 @@ export async function uploadCertificateToMongoDB(
  */
 export async function downloadCertificateFromMongoDB(domain: string): Promise<CertificateRecord | null> {
   try {
-    const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+    const certs = getDb()?.collection<CertificateRecord>("certificates");
     if (!certs) {
       throw new Error("Database connection not available");
     }
@@ -251,7 +250,7 @@ export async function getCertificateStatus(domain: string): Promise<{
   lastUpdated: Date | null;
 } | null> {
   try {
-    const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+    const certs = getDb()?.collection<CertificateRecord>("certificates");
     if (!certs) return null;
 
     const cert = await certs.findOne({ _id: domain });
@@ -296,7 +295,7 @@ export async function listCertificates(): Promise<Array<{
   lastUpdated: Date;
 }>> {
   try {
-    const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+    const certs = getDb()?.collection<CertificateRecord>("certificates");
     if (!certs) return [];
 
     const certificates = await certs.find({}).toArray();
@@ -322,7 +321,7 @@ export async function listCertificates(): Promise<Array<{
  */
 async function notifyVpsServersToSync(domain: string, version: number): Promise<void> {
   try {
-    const syncQueue = getClient()?.db("jrok").collection("cert_sync_queue");
+    const syncQueue = getDb()?.collection("cert_sync_queue");
     if (!syncQueue) return;
 
     await syncQueue.insertOne({
@@ -673,7 +672,7 @@ export async function syncAllCertificatesToDisk(): Promise<ReconcileStats> {
   const stats: ReconcileStats = { synced: [], skipped: 0, failed: [], upgraded: [] };
 
   try {
-    const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+    const certs = getDb()?.collection<CertificateRecord>("certificates");
     if (!certs) return stats;
 
     // Metadata first. The PEM bodies are only fetched for domains that actually
@@ -782,7 +781,7 @@ let newestUploadSeen: Date | null = null;
  * The first look only notes where things stand: startup reconciles anyway.
  */
 export async function syncIfNewCertificates(): Promise<boolean> {
-  const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+  const certs = getDb()?.collection<CertificateRecord>("certificates");
   if (!certs) return false;
   const newest = await certs.find({}, { projection: { uploadedAt: 1 } }).sort({ uploadedAt: -1 }).limit(1).next();
   const at = newest?.uploadedAt;
@@ -804,13 +803,11 @@ export function resetNewCertificateWatch(): void {
  */
 export async function initializeCertificateSync(): Promise<void> {
   try {
-    const db_client = getClient();
-    if (!db_client) {
+    const db_instance = getDb();
+    if (!db_instance) {
       console.error("❌ Database not connected");
       return;
     }
-
-    const db_instance = db_client.db("jrok");
 
     // Create collections if they don't exist
     const collections = await db_instance.listCollections().toArray();
