@@ -46,12 +46,16 @@ pub fn connect(conn: Arc<Conn>, message: &Value) {
 
 /// The handshake to the app: the visitor's headers, and the subprotocol the
 /// server already told the visitor (its first choice, P32) when `offer`.
+/// Host is the visitor's too, as the CLI sends it: apps that only accept a
+/// same-origin WebSocket (gorilla/websocket, Rails' Action Cable, Spring)
+/// compare Origin with it, and refused every browser when it was the
+/// container's address.
 fn local_request(url: &str, headers: &Value, offer: Option<&str>) -> Result<Request, String> {
     let mut req = url.into_client_request().map_err(|e| e.to_string())?;
     if let Some(map) = headers.as_object() {
         for (name, value) in map {
             let lower = name.to_ascii_lowercase();
-            if lower == "host" || lower == "upgrade" || lower == "connection" || lower == "content-length" || lower.starts_with("sec-websocket-") {
+            if lower == "upgrade" || lower == "connection" || lower == "content-length" || lower.starts_with("sec-websocket-") {
                 continue;
             }
             if let (Some(v), Ok(n)) = (value.as_str(), HeaderName::from_bytes(lower.as_bytes())) {
@@ -186,9 +190,23 @@ mod subprotocol_tests {
         let req = super::local_request("ws://127.0.0.1:1/", &headers, Some("graphql-transport-ws")).unwrap();
         assert_eq!(req.headers()["sec-websocket-protocol"], "graphql-transport-ws");
         assert_eq!(req.headers()["cookie"], "session=abc");
-        assert_eq!(req.headers()["host"], "127.0.0.1:1");
+        assert_eq!(req.headers()["host"], "app.example");
 
         let again = super::local_request("ws://127.0.0.1:1/", &headers, None).unwrap();
         assert!(again.headers().get("sec-websocket-protocol").is_none());
+    }
+
+    /// What the app reads: the handshake carries the visitor's Host, not the
+    /// container's address (same-origin checks compare Origin with it).
+    #[test]
+    fn the_app_sees_the_visitors_host() {
+        let headers = json!({ "host": "app.koompi.app", "origin": "https://app.koompi.app", "x-forwarded-proto": "https" });
+        let req = super::local_request("ws://172.18.0.12:3000/cable", &headers, None).unwrap();
+        let (bytes, _) = tokio_tungstenite::tungstenite::handshake::client::generate_request(req).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with("GET /cable HTTP/1.1\r\n"), "{text}");
+        assert!(text.contains("\r\nHost: app.koompi.app\r\n"), "{text}");
+        assert!(!text.contains("172.18.0.12"), "{text}");
+        assert!(text.contains("\r\nOrigin: https://app.koompi.app\r\n"), "{text}");
     }
 }
