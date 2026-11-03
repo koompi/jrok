@@ -11,6 +11,7 @@ import { generateId } from "../utils/helpers";
 import { getCollections } from "../utils/mongodb";
 import * as net from "net";
 import * as securityService from "./securityService";
+import { bufferedBytes as agentBacklog } from "../utils/wsFlowControl";
 
 // =============================================================================
 // CONFIGURATION
@@ -61,6 +62,11 @@ export function tcpPublicHost(): string | null {
 // Public client -> agent. When the agent's WebSocket has this much queued, we
 // pause reading from the public socket; the kernel then shrinks its receive
 // window and the remote sender slows down on its own. Resumed on drain.
+// Measured with agentBacklog(): Bun's ServerWebSocket has getBufferedAmount()
+// and no bufferedAmount, so reading ws.bufferedAmount never paused anyone, and
+// past 16MB Bun silently dropped tcp_data (a hole in the customer's stream).
+// Agents that stop reading their link to push back rely on this pause; the
+// welcome advertises it as "tcp_pushback".
 const WS_HIGH_WATER_MARK = 8 * 1024 * 1024; // 8MB
 const WS_DRAIN_POLL_MS = 20;
 
@@ -522,7 +528,7 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
         clientSocket.destroy();
         return;
       }
-      if (ws.bufferedAmount < WS_HIGH_WATER_MARK) {
+      if (agentBacklog(ws) < WS_HIGH_WATER_MARK) {
         paused = false;
         clientSocket.resume();
         return;
@@ -566,7 +572,7 @@ export function startTcpServer(allocation: TcpPortAllocation, planTier?: string)
           data: data.toString('base64'),
         }));
 
-        if (!paused && ws.bufferedAmount >= WS_HIGH_WATER_MARK) {
+        if (!paused && agentBacklog(ws) >= WS_HIGH_WATER_MARK) {
           paused = true;
           clientSocket.pause();
           setTimeout(resumeWhenDrained, WS_DRAIN_POLL_MS);

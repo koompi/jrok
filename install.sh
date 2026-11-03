@@ -8,6 +8,35 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Install the jrok-connector binary $1 into $2, but only if it runs on this
+# machine (the right architecture, a new enough glibc): deploy workers use the
+# connector whenever they find one, and one that can't start would take every
+# app on the worker down. If it doesn't run, an installed one that doesn't run
+# either is removed too, so workers fall back to a jrok process per tunnel.
+install_connector() {
+    local built="$1" bin_dir="$2" version
+    if ! runs_connector "$built"; then
+        echo -e "${YELLOW}!${NC} jrok-connector was built but doesn't run on this machine:"
+        "$built" --version 2>&1 | head -n 3 | sed 's/^/    /' || true
+        echo "  Not installed: deploy workers use a jrok process per tunnel."
+        if [ -e "$bin_dir/jrok-connector" ] && ! runs_connector "$bin_dir/jrok-connector"; then
+            if [ -w "$bin_dir" ]; then rm -f "$bin_dir/jrok-connector"; else sudo rm -f "$bin_dir/jrok-connector"; fi
+            echo "  Removed $bin_dir/jrok-connector, which doesn't run either."
+        fi
+        return 0
+    fi
+    if [ -w "$bin_dir" ]; then install -m 755 "$built" "$bin_dir/jrok-connector"; else sudo install -m 755 "$built" "$bin_dir/jrok-connector"; fi
+    version=$("$bin_dir/jrok-connector" --version 2>/dev/null)
+    echo -e "${GREEN}✓${NC} $version in $bin_dir"
+}
+
+# True if $1 runs here and says it is jrok-connector.
+runs_connector() {
+    local version
+    version=$("$1" --version 2>/dev/null) || return 1
+    [[ "$version" == "jrok-connector "* ]]
+}
+
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                   Jrok CLI Installer                                  ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════════════╝${NC}"
@@ -52,7 +81,7 @@ PKG_FILE=$(npm pack --silent)
 echo -e "${YELLOW}→${NC} Installing globally..."
 npm install -g "$PKG_FILE" --silent
 
-# jrok-connector (connector/): one process carrying every tunnel on a KConsole
+# jrok-connector (connector/): one process carrying every tunnel on a KOOMPI Cloud
 # deploy-worker host, which uses it instead of a `jrok` process per tunnel when
 # it is on PATH. Built here, with cargo or else in Docker (every deploy worker
 # has it). JROK_CONNECTOR=skip leaves it out.
@@ -71,9 +100,7 @@ if [ "${JROK_CONNECTOR:-}" != "skip" ]; then
         docker rmi rust:1.93-slim-bullseye > /dev/null 2>&1 || true
     fi
     if [ -n "$BUILT" ]; then
-        BIN_DIR="$(npm prefix -g)/bin"
-        if [ -w "$BIN_DIR" ]; then install -m 755 "$BUILT" "$BIN_DIR/jrok-connector"; else sudo install -m 755 "$BUILT" "$BIN_DIR/jrok-connector"; fi
-        echo -e "${GREEN}✓${NC} $("$BIN_DIR/jrok-connector" --version) in $BIN_DIR"
+        install_connector "$BUILT" "$(npm prefix -g)/bin"
     else
         echo -e "${YELLOW}!${NC} jrok-connector not built (no cargo or Docker); deploy workers fall back to a jrok process per tunnel"
     fi
