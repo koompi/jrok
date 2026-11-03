@@ -117,6 +117,31 @@
     mode: '0755'
   tags: ["app", "dns-health"]
 
+# The certificate key (JROK_CERT_KEY, src/services/certificateSyncService.ts)
+# encrypts certificate private keys in MongoDB. Every edge must have the same
+# one, and once records are encrypted with it, dropping or changing it on an
+# edge leaves that edge unable to read new certificates and renewals.
+- name: Read this edge's secrets file (its certificate key)
+  slurp:
+    src: /etc/jrok/jrok.env
+  register: current_jrok_env
+  failed_when: false
+  no_log: true
+  tags: ["app", "dns-health"]
+
+- name: Keep this edge's certificate key (JROK_CERT_KEY)
+  assert:
+    that:
+      - current_cert_key | length == 0 or current_cert_key == cert_encryption_key
+    fail_msg: >-
+      {{ inventory_hostname }} has a JROK_CERT_KEY and this deploy would drop or change it, which would leave
+      it unable to read the certificates encrypted with it. Put the edges' key in the deploy environment
+      (JROK_CERT_KEY in ~/.config/jrok-production/secrets.env) and run the deploy again.
+    quiet: true
+  vars:
+    current_cert_key: "{{ ((current_jrok_env.content | default('') | b64decode).splitlines() | select('match', '^JROK_CERT_KEY=') | list + ['JROK_CERT_KEY='])[0][14:] }}"
+  tags: ["app", "dns-health"]
+
 # Secrets in a file only root can read. Unit files are world-readable, and so
 # is `systemctl show`: any local process (nginx's www-data included) could
 # read the database password and the server key from them. Both services
@@ -136,6 +161,9 @@
       {% endif %}
       {% if telegram_bot_token | length > 0 and telegram_chat_id | length > 0 %}
       TELEGRAM_BOT_TOKEN={{ telegram_bot_token }}
+      {% endif %}
+      {% if cert_encryption_key | length > 0 %}
+      JROK_CERT_KEY={{ cert_encryption_key }}
       {% endif %}
     dest: /etc/jrok/jrok.env
     owner: root
@@ -219,12 +247,11 @@
       {% if telegram_bot_token | length > 0 and telegram_chat_id | length > 0 %}
       Environment=TELEGRAM_CHAT_ID={{ telegram_chat_id }}
       {% endif %}
-      {% if server_key_sources is defined %}
-      # The server key (API_KEY) is accepted only from these and this machine
-      # (src/utils/serverKeySources.ts): server_key_sources (kconsole's
-      # addresses, comma-separated) plus every edge.
-      Environment=SERVER_KEY_SOURCES={{ ((server_key_sources | string).split(',') | map('trim') | select | list + (groups['jrok_servers'] | map('extract', hostvars, 'ansible_host') | list)) | unique | join(',') }}
-      {% endif %}
+      # The server key (API_KEY) is accepted only from this machine and the
+      # edges, plus server_key_sources (comma-separated; e.g. kconsole's
+      # addresses, if it calls with the server key rather than a jrok_ key):
+      # src/utils/serverKeySources.ts. A copy of the key is useless elsewhere.
+      Environment=SERVER_KEY_SOURCES={{ ((server_key_sources | default('') | string).split(',') | map('trim') | select | list + (groups['jrok_servers'] | map('extract', hostvars, 'ansible_host') | list)) | unique | join(',') }}
       {% if tcp_takeover_minutes is defined %}
       # How long an edge must be silent before its TCP tunnels move to another (default 10)
       Environment=TCP_TAKEOVER_MINUTES={{ tcp_takeover_minutes }}

@@ -35,7 +35,7 @@ import { allBaseDomains } from "./utils/baseDomains";
 import { fromTrustedProxy, getClientIp, setForwardedClientHeaders, trustedProxyHops, trustedProxyIps } from "./utils/clientIp";
 import { isFromPeer, stripPeerHeaders } from "./utils/peerLink";
 import * as acmeChallenge from "./services/acmeChallenge";
-import { serverKeyAllowedFrom } from "./utils/serverKeySources";
+import { serverKeyAllowedFrom, serverKeySources } from "./utils/serverKeySources";
 import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "./utils/wsFlowControl";
 import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
 import { firstSubprotocol } from "./utils/wsSubprotocol";
@@ -2798,6 +2798,9 @@ async function startServer() {
       console.warn("⚠️ ============================================================");
     }
     console.log(`🔐 Auth enabled with API key`);
+    if (serverKeySources().length === 0) {
+      console.warn("⚠️ SERVER_KEY_SOURCES is not set: the server key works from any address. Set it to the edges' (and any operator's) addresses.");
+    }
     console.log(`🔌 WebSocket agent endpoint: ws://localhost:${server.port}/ws/agent`);
 
     // Flush accumulated bandwidth stats to MongoDB every 30 seconds (batched writes)

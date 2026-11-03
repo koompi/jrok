@@ -51,6 +51,9 @@
     # Requests between edges carry JROK_PEER_KEY (`openssl rand -hex 32`, the
     # same on every edge), and jrok's port is then closed to the other edges.
     jrok_peer_key: "{{ lookup('env', 'JROK_PEER_KEY') }}"
+    # Encrypts certificate private keys in MongoDB (`openssl rand -hex 32`, the
+    # same on every edge, never changed once set). Unset: stored unencrypted.
+    cert_encryption_key: "{{ lookup('env', 'JROK_CERT_KEY') }}"
     jrok_peer_tls: "{{ groups['jrok_servers'] | length > 1 and groups['jrok_servers'] | map('extract', hostvars) | selectattr('forward_host', 'defined') | list | length == groups['jrok_servers'] | length }}"
     # The name nginx's fallback presents to every peer (TLS and Host). Every
     # edge answers to it; it needs no DNS record.
@@ -68,6 +71,16 @@
         fail_msg: "Every edge has a forward_host: set JROK_PEER_KEY (openssl rand -hex 32), the same for every edge"
         quiet: true
       when: jrok_peer_tls | bool
+      tags: ["always"]
+
+    - name: A certificate key, when given, is long enough
+      assert:
+        that:
+          - cert_encryption_key | length >= 32
+          - cert_encryption_key is match('^[A-Za-z0-9_+/=-]+$')
+        fail_msg: "JROK_CERT_KEY must be at least 32 characters (openssl rand -hex 32), the same for every edge"
+        quiet: true
+      when: cert_encryption_key | length > 0
       tags: ["always"]
 
     - name: Update apt cache

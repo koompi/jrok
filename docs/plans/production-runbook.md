@@ -43,6 +43,11 @@ The wildcard certificate (`tunnel.koompi.cloud`: `public.` and `tunnel.koompi.cl
 - **The renewing edge:** `cert_renewer` in the inventory, default the first edge (edge1). It renews 30 days before expiry. Its deploy hook uploads each renewal to MongoDB (`/var/log/certbot-sync.log`), and every other edge's jrok pulls it within 15 s and reloads nginx (staging: 9 s).
 - **The other edges:** a new edge takes a copy of the renewing edge's certificate when it is built, never one of its own. Edges 2 and 3 still have the copies they issued on 2026-11-01; they renew those only 10 days before expiry (`renew_before_expiry` in `/etc/letsencrypt/renewal/tunnel.koompi.cloud.conf`). That never happens while the renewing edge works, and keeps the certificate valid if it doesn't.
 - **Retiring the renewing edge:** set `cert_renewer` to another edge, run `scripts/deploy-production.sh certbot`, then remove it. Only an edge with its own renewal settings (edges 1–3 today) can renew; otherwise issue one there first with certbot.
+- **Private keys in MongoDB** are encrypted with `JROK_CERT_KEY` (AES-256-GCM) once it is in `~/.config/jrok-production/secrets.env`: `openssl rand -hex 32`, the same for every edge, kept safe and never changed. Each edge encrypts the older records when it starts. An edge without the key can't read new certificates (it keeps the ones it has and logs `can't be read on this server`), so the playbook refuses a deploy that would drop or change an edge's key. Add it only after every edge runs this code.
+
+## The server key
+
+The server key (`API_KEY`) works only from the edges themselves and from `server_key_sources` (inventory, comma-separated). Elsewhere it is refused and the edge logs `🚫 Server key presented from <ip>`. Operators use it on an edge: `ssh root@<edge>`, then `curl -H "X-Admin-Key: <key>" http://127.0.0.1:3000/…`. kconsole must call with a `jrok_` key (its `JROK_API_KEY`); if that is the server key, put kconsole's outgoing addresses in `server_key_sources`, or better, give it a `jrok_` key of KOOMPI Cloud's organization.
 
 ## Deploy
 
@@ -133,7 +138,7 @@ On 2026-11-01 the new edges were built first, and edge1's checker, still listing
 
 - **Settings:** see jrok's [scale-out plan](jrok-scale-out-plan.md), 3.6. `flood_exempt` in the inventory lists the deploy workers (116.212.132.113, 202.124.44.232): apps calling other apps through their public URLs must never be blocked. Add any new worker or monitor there and run `scripts/deploy-production.sh` (tag `app`).
 - **A block happening:** an edge logs `🛑 Flood blocked: <ip> …` (`journalctl -u jrok | grep "Flood blocked"`). With `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` set on the edges, a person gets the same message; not configured yet.
-- **List or lift blocks** with the server key, on any edge (the change reaches the others within 10 s):
+- **List or lift blocks** with the server key, on any edge itself (see "The server key"; the change reaches the others within 10 s):
   - list: `GET /security/blocked-ips`;
   - lift: `POST /security/unblock-ip` with `{"ip":"…"}`;
   - block by hand: `POST /security/block-ip` with `{"ip":"…","reason":"…","duration":3600}`.

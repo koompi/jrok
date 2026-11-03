@@ -377,3 +377,78 @@ test("two peer servers can both publish; neither blocks the other", async () => 
   expect(await readFile(join(CERT_DIR_ROOT, "a.customer.com/fullchain.pem"), "utf8")).toBe("FULL-A");
   expect(await readFile(join(CERT_DIR_ROOT, "b.customer.com/fullchain.pem"), "utf8")).toBe("FULL-B");
 });
+
+// =============================================================================
+// Private keys at rest (JROK_CERT_KEY)
+// =============================================================================
+// Anyone who could read MongoDB could read every certificate's private key.
+
+const CERT_KEY = "4f".repeat(32);
+function withCertKey<T>(key: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const saved = process.env.JROK_CERT_KEY;
+  if (key === undefined) delete process.env.JROK_CERT_KEY;
+  else process.env.JROK_CERT_KEY = key;
+  return fn().finally(() => {
+    if (saved === undefined) delete process.env.JROK_CERT_KEY;
+    else process.env.JROK_CERT_KEY = saved;
+  });
+}
+
+test("sealed private keys open only with the same key, for the same domain", () => {
+  const key = Buffer.alloc(32, 7);
+  const sealed = certSync.sealPrivateKey("a.customer.com", b64("PRIVATE"), key);
+  expect(sealed.startsWith("jrok-enc:v1:")).toBe(true);
+  expect(sealed).not.toContain(b64("PRIVATE"));
+  expect(certSync.openPrivateKey("a.customer.com", sealed, key)).toBe(b64("PRIVATE"));
+  expect(certSync.openPrivateKey("b.customer.com", sealed, key)).toBeNull();          // moved to another record
+  expect(certSync.openPrivateKey("a.customer.com", sealed, Buffer.alloc(32, 8))).toBeNull(); // another key
+  expect(certSync.openPrivateKey("a.customer.com", sealed, null)).toBeNull();          // no key here
+  // Records from before the key are read as they are; without a key nothing is sealed.
+  expect(certSync.openPrivateKey("a.customer.com", b64("OLD"), key)).toBe(b64("OLD"));
+  expect(certSync.sealPrivateKey("a.customer.com", b64("PRIVATE"), null)).toBe(b64("PRIVATE"));
+});
+
+test("with JROK_CERT_KEY the private key is stored encrypted, and reaches another server's disk as it was", async () => {
+  if (!mongoAvailable) return;
+  await withCertKey(CERT_KEY, async () => {
+    await certSync.uploadCertificateToMongoDB("sealed.customer.com", b64("C"), b64("CH"), b64("FULL"), b64("PRIVKEY-SEALED"), "server-a");
+    const raw = await getDb()!.collection("certificates").findOne({ _id: "sealed.customer.com" as any });
+    expect(String(raw!.privkey).startsWith("jrok-enc:v1:")).toBe(true);
+    expect(String(raw!.privkey)).not.toContain(b64("PRIVKEY-SEALED"));
+
+    const stats = await certSync.syncAllCertificatesToDisk();
+    expect(stats.synced).toEqual(["sealed.customer.com"]);
+    expect(await readFile(join(CERT_DIR_ROOT, "sealed.customer.com/privkey.pem"), "utf8")).toBe("PRIVKEY-SEALED");
+  });
+});
+
+test("a server without the key leaves an encrypted record alone and keeps the certificate it has", async () => {
+  if (!mongoAvailable) return;
+  await withCertKey(CERT_KEY, async () => {
+    await certSync.uploadCertificateToMongoDB("kept.customer.com", b64("C"), b64("CH"), b64("FULL-1"), b64("PK-1"), "server-a");
+    await certSync.syncAllCertificatesToDisk();
+    await certSync.uploadCertificateToMongoDB("kept.customer.com", b64("C"), b64("CH"), b64("FULL-2"), b64("PK-2"), "server-a");
+  });
+  await withCertKey(undefined, async () => {
+    const stats = await certSync.syncAllCertificatesToDisk();
+    expect(stats.synced).toEqual([]);
+  });
+  // Neither file was touched: a new fullchain with the old key would not load.
+  expect(await readFile(join(CERT_DIR_ROOT, "kept.customer.com/fullchain.pem"), "utf8")).toBe("FULL-1");
+  expect(await readFile(join(CERT_DIR_ROOT, "kept.customer.com/privkey.pem"), "utf8")).toBe("PK-1");
+});
+
+test("records stored before the key are encrypted once there is one, keeping their version", async () => {
+  if (!mongoAvailable) return;
+  const certs = getDb()!.collection("certificates");
+  await certs.insertOne(certDoc("legacy.customer.com", 4, "LEGACY") as any);
+  await withCertKey(CERT_KEY, async () => {
+    expect(await certSync.sealStoredPrivateKeys()).toBe(1);
+    expect(await certSync.sealStoredPrivateKeys()).toBe(0);
+    const raw = await certs.findOne({ _id: "legacy.customer.com" as any });
+    expect(String(raw!.privkey).startsWith("jrok-enc:v1:")).toBe(true);
+    expect(raw!.version).toBe(4);
+    const opened = await certSync.downloadCertificateFromMongoDB("legacy.customer.com");
+    expect(Buffer.from(opened!.privkey, "base64").toString()).toBe("privkey-LEGACY");
+  });
+});
