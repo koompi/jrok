@@ -2,6 +2,12 @@
 //! way the jrok CLI answers (cli/src/index.ts, handleHttpRequest): streamed
 //! when the server supports it, gzipped for the tunnel when the visitor
 //! accepts it, chunks as binary frames, and one `@jrok:req` event per request.
+//!
+//! The app is asked for gzip when the visitor and the server take it, else
+//! for no encoding, and its own gzip (a stored .gz: WhiteNoise, gzip_static)
+//! goes through as it is. A body of known size so keeps its length, which is
+//! what lets the edge cache it; anything else the app sends compressed is
+//! decoded, as Node's fetch does for the CLI.
 
 use crate::tunnel::Conn;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -16,7 +22,8 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 /// Not passed to the app. Host comes from the app's own address, as with
-/// Node's fetch (apps see `x-forwarded-host`).
+/// Node's fetch (apps see `x-forwarded-host`). Accept-Encoding is chosen
+/// here (`proxy`).
 const HOP_BY_HOP: &[&str] = &[
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "content-length", "host",
@@ -32,17 +39,24 @@ fn gzip_level() -> u32 {
     std::env::var("JROK_TUNNEL_GZIP_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 9)
 }
 
-fn client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .pool_idle_timeout(Duration::from_secs(30))
-            .pool_max_idle_per_host(32)
-            .tcp_nodelay(true)
-            .build()
-            .expect("HTTP client")
-    })
+/// The client for the app. `gzip_through`: the app's gzip goes through
+/// untouched, so this one doesn't decode gzip (br and deflate, which it never
+/// asks for, still are).
+fn client(gzip_through: bool) -> &'static reqwest::Client {
+    static DECODING: OnceLock<reqwest::Client> = OnceLock::new();
+    static GZIP_THROUGH: OnceLock<reqwest::Client> = OnceLock::new();
+    let cell = if gzip_through { &GZIP_THROUGH } else { &DECODING };
+    cell.get_or_init(|| build_client(gzip_through))
+}
+
+fn build_client(gzip_through: bool) -> reqwest::Client {
+    let builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .pool_idle_timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(32)
+        .tcp_nodelay(true);
+    let builder = if gzip_through { builder.no_gzip() } else { builder };
+    builder.build().expect("HTTP client")
 }
 
 /// Time to the app's response headers; streaming then lasts as long as the app does.
@@ -86,9 +100,26 @@ fn compressible(content_type: &str) -> bool {
     ct.starts_with("image/svg+xml") || ct.starts_with("font/ttf") || ct.starts_with("font/otf")
 }
 
+/// Gzip may cross the tunnel: the server takes it and it isn't turned off here.
+fn tunnel_gzip(conn: &Conn) -> bool {
+    !env_flag_off("JROK_TUNNEL_GZIP") && conn.has("gzip") && conn.has("stream")
+}
+
+/// What the app may compress with: gzip, which goes through the tunnel as
+/// it is, when the visitor and the server take it; otherwise none, so a body
+/// of known size keeps its length. Left to reqwest, it asked for gzip,
+/// deflate and br even for a visitor who accepts none of them.
+fn asked_encoding(tunnel_gzip: bool, visitor_accepts: &str) -> &'static str {
+    if tunnel_gzip && has_word(visitor_accepts, "gzip") {
+        "gzip"
+    } else {
+        "identity"
+    }
+}
+
 /// The CLI's shouldGzipResponse.
 fn should_gzip(conn: &Conn, method: &str, accept_encoding: &str, status: u16, headers: &reqwest::header::HeaderMap) -> bool {
-    if env_flag_off("JROK_TUNNEL_GZIP") || !conn.has("gzip") {
+    if !tunnel_gzip(conn) {
         return false;
     }
     if method == "HEAD" || status == 204 || status == 304 {
@@ -101,23 +132,14 @@ fn should_gzip(conn: &Conn, method: &str, accept_encoding: &str, status: u16, he
     if !compressible(get("content-type")) || has_word(get("cache-control"), "no-transform") {
         return false;
     }
+    // Still encoded (one reqwest can't decode): never compressed twice.
+    if !matches!(get("content-encoding").trim(), "" | "identity") {
+        return false;
+    }
     match get("content-length").parse::<u64>() {
         Ok(length) => length >= 1024,
         Err(_) => true,
     }
-}
-
-/// Only encodings this client can decode, so the body it hands on is always plain.
-fn decodable_accept_encoding(value: &str) -> Option<String> {
-    let kept: Vec<&str> = value
-        .split(',')
-        .map(str::trim)
-        .filter(|t| {
-            let name = t.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-            matches!(name.as_str(), "gzip" | "deflate" | "br" | "identity")
-        })
-        .collect();
-    (!kept.is_empty()).then(|| kept.join(", "))
 }
 
 fn capped_header(headers: &Value, name: &str) -> Option<String> {
@@ -185,21 +207,21 @@ async fn proxy(conn: &Arc<Conn>, request: &Request, message: &Value, abort: &Can
     let cfg = &conn.cfg;
     let url = format!("http://{}:{}{}{}", cfg.local_host, cfg.local_port, request.path, request.query);
     let method = reqwest::Method::from_bytes(request.method.as_bytes()).unwrap_or(reqwest::Method::GET);
-    let mut builder = client().request(method.clone(), &url);
+    let accept_encoding = request
+        .headers
+        .as_object()
+        .and_then(|h| h.iter().find(|(name, _)| name.eq_ignore_ascii_case("accept-encoding")))
+        .and_then(|(_, v)| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let asked = asked_encoding(tunnel_gzip(conn), &accept_encoding);
+    let mut builder = client(asked == "gzip").request(method.clone(), &url).header("accept-encoding", asked);
 
-    let mut accept_encoding = String::new();
     if let Some(headers) = request.headers.as_object() {
         for (name, value) in headers {
             let Some(value) = value.as_str() else { continue };
             let lower = name.to_ascii_lowercase();
-            if lower == "accept-encoding" {
-                accept_encoding = value.to_string();
-                if let Some(decodable) = decodable_accept_encoding(value) {
-                    builder = builder.header("accept-encoding", decodable);
-                }
-                continue;
-            }
-            if HOP_BY_HOP.contains(&lower.as_str()) {
+            if lower == "accept-encoding" || HOP_BY_HOP.contains(&lower.as_str()) {
                 continue;
             }
             if let (Ok(n), Ok(v)) = (
@@ -270,11 +292,17 @@ async fn proxy(conn: &Arc<Conn>, request: &Request, message: &Value, abort: &Can
         return;
     }
 
-    let gzip = should_gzip(conn, &request.method, &accept_encoding, status, response.headers());
+    // The app's own gzip, asked for: on as it is, length and all.
+    let app_gzip = asked == "gzip"
+        && response
+            .headers()
+            .get("content-encoding")
+            .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"gzip") || v.as_bytes().eq_ignore_ascii_case(b"x-gzip"));
+    let gzip = !app_gzip && should_gzip(conn, &request.method, &accept_encoding, status, response.headers());
     let known_length = response.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
     // No length: the app produces it as it goes; the server tells nginx not to hold it.
     let streamed_by_app = known_length.is_none() && request.method != "HEAD";
-    if gzip {
+    if gzip || app_gzip {
         headers.remove("content-length");
         headers.remove("content-encoding");
         headers.insert("content-encoding".into(), Value::String("gzip".into()));
@@ -291,7 +319,7 @@ async fn proxy(conn: &Arc<Conn>, request: &Request, message: &Value, abort: &Can
     if set_cookie.len() > 1 {
         start["setCookie"] = json!(set_cookie);
     }
-    if gzip {
+    if gzip || app_gzip {
         start["encoding"] = json!("gzip");
     }
     if streamed_by_app {
@@ -420,8 +448,180 @@ mod tests {
     }
 
     #[test]
-    fn only_decodable_encodings_are_asked_for() {
-        assert_eq!(decodable_accept_encoding("gzip, deflate, br, zstd").as_deref(), Some("gzip, deflate, br"));
-        assert_eq!(decodable_accept_encoding("zstd").as_deref(), None);
+    fn the_app_is_asked_for_gzip_or_for_nothing() {
+        assert_eq!(asked_encoding(true, "gzip, deflate, br, zstd"), "gzip");
+        assert_eq!(asked_encoding(true, "br;q=1, GZIP;q=0.5"), "gzip");
+        // Nothing the tunnel carries: no encoding, so the length survives.
+        assert_eq!(asked_encoding(true, "br, zstd"), "identity");
+        assert_eq!(asked_encoding(true, ""), "identity");
+        // The server can't take gzip (or JROK_TUNNEL_GZIP=false).
+        assert_eq!(asked_encoding(false, "gzip"), "identity");
     }
 }
+
+/// Requests through the proxy to real local apps (the findings' scenarios).
+#[cfg(test)]
+mod proxy_tests {
+    use crate::tunnel::{testing, Outbound};
+    use flate2::write::{GzEncoder, ZlibEncoder};
+    use flate2::Compression;
+    use serde_json::{json, Value};
+    use std::io::{Read, Write};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+    use tokio_tungstenite::tungstenite::Message;
+
+    /// An HTTP app: `answer` gets the request head and returns the whole
+    /// response. The heads it got come out of the receiver.
+    async fn app(answer: fn(&str) -> Vec<u8>) -> (u16, mpsc::UnboundedReceiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (heads_tx, heads) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let heads_tx = heads_tx.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") && matches!(s.read(&mut byte).await, Ok(1)) {
+                        head.push(byte[0]);
+                    }
+                    let head = head.iter().map(|&b| b as char).collect::<String>();
+                    let _ = s.write_all(&answer(&head)).await;
+                    let _ = heads_tx.send(head);
+                });
+            }
+        });
+        (port, heads)
+    }
+
+    fn response(head: &str, body: &[u8]) -> Vec<u8> {
+        let mut r = head.as_bytes().to_vec();
+        r.extend_from_slice(body);
+        r
+    }
+
+    fn script() -> Vec<u8> {
+        "console.log('hello from a hashed asset');\n".repeat(2_200).into_bytes()
+    }
+
+    fn gzipped(body: &[u8]) -> Vec<u8> {
+        let mut e = GzEncoder::new(Vec::new(), Compression::best());
+        e.write_all(body).unwrap();
+        e.finish().unwrap()
+    }
+
+    /// WhiteNoise, gzip_static, Caddy's precompressed: the stored .gz with its
+    /// length when the request accepts gzip, else the plain file.
+    fn precompressed(head: &str) -> Vec<u8> {
+        let wants_gzip = head.lines().any(|l| l.to_ascii_lowercase().starts_with("accept-encoding:") && l.to_ascii_lowercase().contains("gzip"));
+        let cache = "cache-control: public, max-age=31536000, immutable\r\ncontent-type: application/javascript\r\nvary: Accept-Encoding\r\nconnection: close\r\n";
+        if wants_gzip {
+            let gz = gzipped(&script());
+            response(&format!("HTTP/1.1 200 OK\r\n{cache}content-encoding: gzip\r\ncontent-length: {}\r\n\r\n", gz.len()), &gz)
+        } else {
+            response(&format!("HTTP/1.1 200 OK\r\n{cache}content-length: {}\r\n\r\n", script().len()), &script())
+        }
+    }
+
+    /// What reached the edge: the start message, and the body from its chunks.
+    fn answered(rx: &mut mpsc::UnboundedReceiver<Outbound>) -> (Value, Vec<u8>) {
+        let (mut start, mut body) = (Value::Null, Vec::new());
+        while let Ok(o) = rx.try_recv() {
+            match o.message {
+                Message::Text(t) => {
+                    let m: Value = serde_json::from_str(&t).unwrap();
+                    if m["type"] == "http_response_start" || m["type"] == "http_response" {
+                        start = m;
+                    }
+                }
+                Message::Binary(frame) => body.extend_from_slice(&frame[2 + frame[1] as usize..]),
+                _ => {}
+            }
+        }
+        (start, body)
+    }
+
+    fn request(path: &str, headers: Value) -> Value {
+        json!({ "type": "http_request", "requestId": "r1", "method": "GET", "path": path, "query": "", "headers": headers })
+    }
+
+    fn gunzip(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(bytes).read_to_end(&mut out).unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn an_apps_own_gzip_goes_through_as_it_is_and_keeps_its_length() {
+        let (port, mut heads) = app(precompressed).await;
+        let (conn, mut sent, _lines) = testing::conn(port, &["stream", "binchunk", "gzip"]);
+        super::handle(conn, request("/static/app.4f3a.js", json!({ "accept-encoding": "gzip, deflate, br, zstd" }))).await;
+        let head = heads.recv().await.unwrap().to_ascii_lowercase();
+        assert!(head.contains("\r\naccept-encoding: gzip\r\n"), "{head}");
+        let (start, body) = answered(&mut sent);
+        assert_eq!(start["encoding"], "gzip", "{start}");
+        // Not streamed: the edge keeps nginx buffering, so the edge cache can hold it.
+        assert!(start.get("streamed").is_none(), "{start}");
+        assert_eq!(start["headers"]["cache-control"], "public, max-age=31536000, immutable");
+        assert_eq!(body, gzipped(&script()), "the app's bytes, untouched");
+    }
+
+    #[tokio::test]
+    async fn a_visitor_without_gzip_gets_the_plain_file_with_its_length() {
+        let (port, mut heads) = app(precompressed).await;
+        let (conn, mut sent, _lines) = testing::conn(port, &["stream", "binchunk", "gzip"]);
+        super::handle(conn, request("/static/app.4f3a.js", json!({}))).await;
+        let head = heads.recv().await.unwrap().to_ascii_lowercase();
+        assert!(head.contains("\r\naccept-encoding: identity\r\n"), "{head}");
+        let (start, body) = answered(&mut sent);
+        assert!(start.get("streamed").is_none(), "{start}");
+        assert!(start.get("encoding").is_none(), "{start}");
+        assert_eq!(body, script());
+    }
+
+    /// An app that ignores Accept-Encoding: deflate, always.
+    fn always_deflate(_head: &str) -> Vec<u8> {
+        let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
+        e.write_all(&script()).unwrap();
+        let body = e.finish().unwrap();
+        response(&format!("HTTP/1.1 200 OK\r\ncontent-type: application/javascript\r\ncontent-encoding: deflate\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()), &body)
+    }
+
+    /// An app that ignores Accept-Encoding: gzip, always.
+    fn always_gzip(_head: &str) -> Vec<u8> {
+        let gz = gzipped(&script());
+        response(&format!("HTTP/1.1 200 OK\r\ncontent-type: application/javascript\r\ncontent-encoding: gzip\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", gz.len()), &gz)
+    }
+
+    #[tokio::test]
+    async fn an_encoding_nobody_asked_for_is_still_decoded() {
+        // Deflate to a gzip visitor: decoded, then gzipped for the tunnel.
+        let (port, _heads) = app(always_deflate).await;
+        let (conn, mut sent, _lines) = testing::conn(port, &["stream", "binchunk", "gzip"]);
+        super::handle(conn, request("/a.js", json!({ "accept-encoding": "gzip" }))).await;
+        let (start, body) = answered(&mut sent);
+        assert_eq!(start["encoding"], "gzip", "{start}");
+        assert_eq!(gunzip(&body), script());
+
+        // Gzip to a visitor who asked for none: decoded.
+        let (port, _heads) = app(always_gzip).await;
+        let (conn, mut sent, _lines) = testing::conn(port, &["stream", "binchunk", "gzip"]);
+        super::handle(conn, request("/a.js", json!({}))).await;
+        let (start, body) = answered(&mut sent);
+        assert!(start.get("encoding").is_none(), "{start}");
+        assert!(start["headers"].get("content-encoding").is_none(), "{start}");
+        assert_eq!(body, script());
+
+        // A server without the gzip feature: never gzip in the tunnel.
+        let (port, mut heads) = app(precompressed).await;
+        let (conn, mut sent, _lines) = testing::conn(port, &["stream", "binchunk"]);
+        super::handle(conn, request("/a.js", json!({ "accept-encoding": "gzip" }))).await;
+        assert!(heads.recv().await.unwrap().to_ascii_lowercase().contains("\r\naccept-encoding: identity\r\n"));
+        let (start, body) = answered(&mut sent);
+        assert!(start.get("encoding").is_none(), "{start}");
+        assert_eq!(body, script());
+    }
+}
+
