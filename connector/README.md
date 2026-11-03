@@ -1,6 +1,6 @@
 # jrok-connector
 
-One process per KConsole deploy-worker host carrying every jrok tunnel on it ([scale-out plan](../docs/plans/jrok-scale-out-plan.md), Phase 5). Without it, the worker runs one `jrok` CLI process per tunnel per edge, each a Node process of about 62 MB. In the connector, a tunnel is a connection: 300 tunnels took 24 MB.
+One process per KOOMPI Cloud deploy-worker host carrying every jrok tunnel on it ([scale-out plan](../docs/plans/jrok-scale-out-plan.md), Phase 5). Without it, the worker runs one `jrok` CLI process per tunnel per edge, each a Node process of about 62 MB. In the connector, a tunnel is a connection: 300 tunnels took 24 MB.
 
 Each tunnel speaks the same agent protocol as the CLI (binary frames, compression, streaming, WebSocket, TCP, `@jrok:req` events), so jrok servers need no change and the two can run side by side.
 
@@ -21,7 +21,7 @@ To build by hand, run `cargo build --release --locked`. The binary is `target/re
 
 ## In the deploy worker
 
-`worker/deploy/src/lib/jrokConnector.ts` (KConsole) uses the connector when it finds it: at `JROK_CONNECTOR_BIN`, else as `jrok-connector` on PATH. With `JROK_CONNECTOR=false`, the worker goes back to one `jrok` process per tunnel; that change only needs a worker restart.
+`worker/deploy/src/lib/jrokConnector.ts` (the KOOMPI Cloud deploy worker) uses the connector when it finds it: at `JROK_CONNECTOR_BIN`, else as `jrok-connector` on PATH. With `JROK_CONNECTOR=false`, the worker goes back to one `jrok` process per tunnel; that change only needs a worker restart.
 
 If the connector dies, every tunnel it carried reports an exit, and the worker's restart logic opens them again on a new connector. That took 9.7 s on staging.
 

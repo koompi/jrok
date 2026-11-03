@@ -81,7 +81,7 @@ PKG_FILE=$(npm pack --silent)
 echo -e "${YELLOW}→${NC} Installing globally..."
 npm install -g "$PKG_FILE" --silent
 
-# jrok-connector (connector/): one process carrying every tunnel on a KConsole
+# jrok-connector (connector/): one process carrying every tunnel on a KOOMPI Cloud
 # deploy-worker host, which uses it instead of a `jrok` process per tunnel when
 # it is on PATH. Built here, with cargo or else in Docker (every deploy worker
 # has it). JROK_CONNECTOR=skip leaves it out.
