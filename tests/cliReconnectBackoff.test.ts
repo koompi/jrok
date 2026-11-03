@@ -58,7 +58,7 @@ test("a server that refuses the tunnel gets it back ever more slowly", async () 
     },
   });
   try {
-    expect(await reconnectAttempts(server.port, 3)).toEqual([1, 2, 3]);
+    expect(await reconnectAttempts(Number(server.port), 3)).toEqual([1, 2, 3]);
   } finally {
     server.stop(true);
   }
