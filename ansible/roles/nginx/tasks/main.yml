@@ -31,6 +31,22 @@
     mode: '0700'
   tags: ["nginx"]
 
+# jrok keeps these (src/services/edgeCacheRules.ts): the hosts and addresses
+# the edge cache leaves to it. nginx.conf includes them, so they must exist
+# before it is written; jrok's content is never overwritten here.
+- name: Edge cache rules jrok keeps (empty until it writes them)
+  copy:
+    content: "# Written by jrok (src/services/edgeCacheRules.ts) whenever the rules change. Edits here are lost.\n"
+    dest: "{{ item }}"
+    force: no
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - /etc/nginx/jrok-cache-off.map
+    - /etc/nginx/jrok-blocked-ips.geo
+  tags: ["nginx"]
+
 - name: Edge-to-edge key for nginx's fallback to other edges (jrok_peer_tls)
   # Only the master process reads configuration, as root.
   copy:
@@ -166,6 +182,23 @@
             "~*(^|[ ,])(public|s-maxage=)" 0;
             default 1;
         }
+        # Requests the cache leaves to jrok, whose checks run only when it sees
+        # them: every host of an app with IP rules (an allowlist, a blocklist)
+        # or a suspension, and every address blocked by hand. They are never
+        # answered from the cache nor stored in it. jrok writes both files and
+        # reloads nginx when they change (src/services/edgeCacheRules.ts).
+        map $host $jrok_host_cache_off {
+            default 0;
+            include /etc/nginx/jrok-cache-off.map;
+        }
+        geo $jrok_ip_cache_off {
+            default 0;
+            include /etc/nginx/jrok-blocked-ips.geo;
+        }
+        map "$jrok_host_cache_off$jrok_ip_cache_off" $jrok_cache_off {
+            "00" 0;
+            default 1;
+        }
 
         # Security headers. A live preview (KOOMPI Cloud's Ask AI: live-<10 hex>)
         # is shown in a frame in the dashboard's chat, so the dashboard may frame
@@ -219,7 +252,17 @@
         # (staging). The burst lets a whole worker in at once; the rate still
         # bounds a flood of handshakes from one address.
         limit_req_zone $binary_remote_addr zone=agents:10m rate={{ jrok_agent_rate | default('20r/s') }};
-        limit_req_zone $binary_remote_addr zone=strict:10m rate=5r/s;
+        # jrok's certificate API (/certificates/ on a base domain itself), 5/s
+        # per address. On an app's own name the path is the app's: it used to
+        # match there too, and gave the app's visitors 503s. A new zone name
+        # because the old "strict" one had another key (see jrok_general).
+        map "$host:$uri" $jrok_strict_key {
+          default "";
+        {% for d in jrok_base_domains %}
+          "~^{{ d | regex_escape }}:/certificates/" $binary_remote_addr;
+        {% endfor %}
+        }
+        limit_req_zone $jrok_strict_key zone=jrok_strict:10m rate=5r/s;
 
         # Connections at once from one address (with HTTP/2, each request in
         # flight counts as one). One address can't use up the edge's
@@ -372,8 +415,10 @@
           ssl_session_cache shared:SSL:10m;
           ssl_session_timeout 10m;
           
-          # Rate limiting: jrok's own hosts only (see $jrok_limit_key)
+          # Rate limiting: jrok's own hosts only (see $jrok_limit_key), and its
+          # certificate API more strictly ($jrok_strict_key).
           limit_req zone=jrok_general burst=20 nodelay;
+          limit_req zone=jrok_strict burst=5 nodelay;
 
           # The agent endpoint: this edge's jrok only (see upstream jrok_agents).
           location = /ws/agent {
@@ -430,12 +475,13 @@
             proxy_set_header Connection $connection_upgrade;
 
             # Edge cache (see proxy_cache_path). While the app or its tunnel is
-            # down, cached files are still served (use_stale).
+            # down, cached files are still served (use_stale), except to what
+            # the cache leaves to jrok ($jrok_cache_off).
             proxy_cache jrok_cache;
             # v2: drops what v1 kept, HTML among it.
             proxy_cache_key v2$scheme$host$request_uri;
-            proxy_no_cache $jrok_not_shareable $jrok_is_html $http_authorization;
-            proxy_cache_bypass $http_authorization;
+            proxy_no_cache $jrok_not_shareable $jrok_is_html $http_authorization $jrok_cache_off;
+            proxy_cache_bypass $http_authorization $jrok_cache_off;
             # No proxy_cache_lock: it makes concurrent requests for one URL wait
             # (up to 5 s) to learn whether the first answer is cacheable, which
             # stalled busy uncacheable URLs on staging (p99 5.4 s).
@@ -449,25 +495,11 @@
             proxy_send_timeout 60s;
             proxy_read_timeout 3600s;
           }
-          
-          # Health check endpoint
-          location /health {
-            proxy_pass http://jrok/health;
-            access_log off;
-          }
-          
-          # API endpoints - stricter rate limiting
-          location /certificates/ {
-            limit_req zone=strict burst=5 nodelay;
-            proxy_pass http://jrok;
-            proxy_http_version 1.1;
-            
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_set_header Connection "";
-          }
+
+          # /health and /certificates/ have no location of their own: on an
+          # app's name they are the app's (an uptime monitor on its /health got
+          # jrok's answer while the app was down), and on a base domain itself
+          # jrok answers them through "/" above, with the Host it needs.
         }
         {% if jrok_peer_tls | bool %}
 

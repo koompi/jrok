@@ -67,6 +67,7 @@ const tunnels = () => (fakeCollections as any).tunnels as ReturnType<typeof fake
 /** Wipe this server's in-memory rules, as a different server that never saw the API call. */
 function becomeAnotherServer() {
   for (const ip of securityService.getBlockedIps().map((b) => b.ip)) securityService.unblockIp(ip);
+  for (const b of securityService.getAppBlocks()) securityService.unblockIpForApp(b.ip, b.app);
   const { organizations, domains } = securityService.getSuspensions();
   organizations.forEach((o) => securityService.unsuspendOrganization(o.organizationId));
   domains.forEach((d) => securityService.unsuspendDomain(d.domain));
@@ -163,5 +164,43 @@ describe("admin IP blocks and suspensions", () => {
     mongoDown = true;
     await expect(securitySync.syncSecurityRules()).rejects.toThrow();
     expect(securityService.checkSuspension(undefined, "kept-app").suspended).toBe(true);
+  });
+});
+
+describe("flood blocks", () => {
+  test("a flood block of one app reaches every server, for that app only, and so does lifting it", async () => {
+    await securitySync.setRule("block-ip-app", "192.0.2.80|shop", true, { reason: "Flood: over 3000 requests to shop in 10 s", durationSeconds: 600 });
+    expect(securityService.activeAppBlock("192.0.2.80", "shop")).not.toBeNull(); // at once, here
+
+    becomeAnotherServer();
+    await securitySync.syncSecurityRules();
+    expect(securityService.activeAppBlock("192.0.2.80", "shop")?.secondsLeft).toBeGreaterThan(590);
+    expect(securityService.activeAppBlock("192.0.2.80", "blog")).toBeNull();
+    expect(securityService.isIpBlocked("192.0.2.80")).toBe(false);
+
+    await securitySync.setRule("block-ip-app", "192.0.2.80|shop", false);
+    becomeAnotherServer();
+    await securitySync.syncSecurityRules();
+    expect(securityService.activeAppBlock("192.0.2.80", "shop")).toBeNull();
+  });
+
+  test("a block by hand whose reason starts with \"Flood:\" is still applied everywhere", async () => {
+    // What POST /security/block-ip saves for {"reason": "Flood: …"}.
+    const reason = securitySync.handBlockReason(`${"Flood:"} 50k requests a second from one host`);
+    await securitySync.setRule("block-ip", "192.0.2.83", true, { reason, durationSeconds: 600 });
+    expect(securityService.isIpBlocked("192.0.2.83")).toBe(true); // here, at once
+    becomeAnotherServer();
+    await securitySync.syncSecurityRules();
+    expect(securityService.isIpBlocked("192.0.2.83")).toBe(true); // and on the others
+    expect(securitySync.handBlockReason("Scraping")).toBe("Scraping");
+  });
+
+  test("an older edge's flood block of every app is not applied; a block by hand still is", async () => {
+    await securitySync.setRule("block-ip", "192.0.2.81", true, { reason: "Flood: over 3000 requests in 10 s", durationSeconds: 600 });
+    await securitySync.setRule("block-ip", "192.0.2.82", true, { reason: "Scraping", durationSeconds: 600 });
+    becomeAnotherServer();
+    await securitySync.syncSecurityRules();
+    expect(securityService.isIpBlocked("192.0.2.81")).toBe(false);
+    expect(securityService.isIpBlocked("192.0.2.82")).toBe(true);
   });
 });

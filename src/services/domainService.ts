@@ -8,6 +8,7 @@ import * as monitoringService from "./monitoringService";
 import { generateId, sanitizeDomainToSubdomain, generateShortSuffix } from "../utils/helpers";
 import { getTunnelByDomain } from "../utils/database";
 import dns from "dns/promises";
+import { randomBytes } from "crypto";
 import { writeFile, mkdir } from "fs/promises";
 import { nginxSitesPath, nginxConfigFileName, generateCustomDomainNginxConfig, ensureJrokUpstreamFile } from "../utils/nginxConfig";
 
@@ -15,9 +16,25 @@ import { nginxSitesPath, nginxConfigFileName, generateCustomDomainNginxConfig, e
 // New CNAME targets use the primary base domain; verification accepts any
 // configured base, so a customer who pointed their CNAME at the old name before
 // a rename stays verified instead of silently failing.
-import { primaryBaseDomain, matchBaseDomain } from "../utils/baseDomains";
+import { primaryBaseDomain, extractSubdomain } from "../utils/baseDomains";
 // NGINX_SITES_PATH and the custom-domain vhost template live in utils/nginxConfig
 // so certificateSyncService produces byte-identical configs on other servers.
+
+/**
+ * Does this CNAME record point at the target issued for this registration?
+ * Only that name counts: its label under the primary base domain or a legacy
+ * one, so a customer who set it up before a rename stays verified. Any name
+ * under a base domain used to count, so another organization could claim a
+ * hostname whose DNS was left pointing at us (a removed domain, or DNS set up
+ * before adding it) and get its certificate.
+ */
+export function cnameMatchesTarget(record: string, expectedTarget: string): boolean {
+  const actual = record.toLowerCase().replace(/\.$/, '');
+  const expected = expectedTarget.toLowerCase().replace(/\.$/, '');
+  if (actual === expected) return true;
+  const label = extractSubdomain(expected);
+  return label !== null && extractSubdomain(actual) === label;
+}
 
 /**
  * Verify that a domain's CNAME record points to the expected target
@@ -30,17 +47,9 @@ export async function verifyCname(domain: string, expectedTarget: string): Promi
     resolver.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
 
     const records = await resolver.resolveCname(domain);
-    const normalizedExpected = expectedTarget.toLowerCase().replace(/\.$/, '');
 
     for (const record of records) {
-      const normalizedRecord = record.toLowerCase().replace(/\.$/, '');
-      if (normalizedRecord === normalizedExpected) {
-        return { verified: true, actualCname: record };
-      }
-      // Also accept if pointing to ANY accepted base domain, or a subdomain of
-      // one — including a legacy name from before a rename.
-      if (matchBaseDomain(normalizedRecord) !== null) {
-        console.log(`[DNS] CNAME points to ${normalizedRecord} (suffix match), accepting as valid`);
+      if (cnameMatchesTarget(record, expectedTarget)) {
         return { verified: true, actualCname: record };
       }
     }
@@ -48,7 +57,7 @@ export async function verifyCname(domain: string, expectedTarget: string): Promi
     return {
       verified: false,
       actualCname: records[0] || undefined,
-      error: `CNAME points to "${records[0] || 'nothing'}" instead of "${expectedTarget}"`
+      error: `CNAME points to "${records[0] || 'nothing'}". Point it to "${expectedTarget}", the target issued for this domain`
     };
   } catch (error: any) {
     if (error.code === 'ENODATA' || error.code === 'ENOTFOUND') {
@@ -136,29 +145,29 @@ export function generateVerificationToken(): string {
 
 
 /**
+ * A CNAME target label for one registration: the base name and 8 random hex
+ * characters, cut to fit a DNS label (e.g. "jersen-app-3f9c01ab").
+ *
+ * It used to be the base name alone, taken from the domain itself, so the next
+ * registration of a hostname got the same target as a removed one, and the old
+ * owner's CNAME, left in place, passed the new owner's check.
+ */
+export function newTargetSubdomain(baseName: string, random: () => string = () => randomBytes(4).toString('hex')): string {
+  const base = baseName.slice(0, 54).replace(/-+$/, '') || 'domain';
+  return `${base}-${random()}`;
+}
+
+/**
  * Generate a unique subdomain for a custom domain
  * @param baseName - The base name to use (e.g., "jersen-app" from "jersen.app")
- * @returns A unique subdomain that doesn't conflict with existing tunnels
+ * @returns A new target label (see newTargetSubdomain) no tunnel uses
  */
 async function generateUniqueSubdomain(baseName: string): Promise<string> {
-  // First try the base name without suffix
-  const existingTunnel = await getTunnelByDomain(baseName);
-  if (!existingTunnel) {
-    return baseName;
-  }
-
-  // If taken, add random suffix
   for (let i = 0; i < 10; i++) {
-    const suffix = generateShortSuffix();
-    const newName = `${baseName}-${suffix}`;
-    const existing = await getTunnelByDomain(newName);
-    if (!existing) {
-      return newName;
-    }
+    const name = newTargetSubdomain(baseName);
+    if (!(await getTunnelByDomain(name))) return name;
   }
-
-  // Fallback: use timestamp
-  return `${baseName}-${Date.now().toString(36)}`;
+  return newTargetSubdomain(baseName, () => `${randomBytes(4).toString('hex')}${Date.now().toString(36)}`);
 }
 
 /**

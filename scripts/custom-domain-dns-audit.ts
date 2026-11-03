@@ -16,6 +16,7 @@
  */
 import { MongoClient } from "mongodb";
 import { Resolver } from "dns/promises";
+import { databaseName } from "../src/utils/mongodb";
 
 const edges = process.argv.slice(2);
 if (!process.env.MONGODB_URI || edges.length === 0) {
@@ -44,7 +45,7 @@ const client = new MongoClient(process.env.MONGODB_URI, { serverSelectionTimeout
 await client.connect();
 try {
   const domains = await client
-    .db("jrok")
+    .db(databaseName(process.env.MONGODB_URI))
     .collection("customDomains")
     .find({ active: { $ne: false } }, { projection: { domain: 1, cnameTarget: 1 } })
     .toArray();

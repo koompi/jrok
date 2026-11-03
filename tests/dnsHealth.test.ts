@@ -77,6 +77,66 @@ describe("verdicts", () => {
   });
 });
 
+describe("verdicts with regions (Cambodian edges joining Singapore's)", () => {
+  // Three Singapore edges, two Cambodian; every checker is on an edge.
+  const SG = ["s1", "s2", "s3"];
+  const KH = ["k1", "k2"];
+  const MIXED: Edge[] = [
+    ...SG.map((id, i) => ({ id, address: `192.0.2.${i + 1}`, region: "sg" })),
+    ...KH.map((id, i) => ({ id, address: `198.51.100.${i + 1}`, region: "kh" })),
+  ];
+  const regionOf = (id: string) => (SG.includes(id) ? "sg" : KH.includes(id) ? "kh" : "elsewhere");
+  /** Every checker's vote about every other edge; `sees(checker, edge)` says what it gets. */
+  const allVotes = (checkers: string[], sees: (checker: string, edge: string) => boolean) =>
+    checkers.flatMap((checker) => MIXED.filter((e) => e.id !== checker).map((e) => ({ checker, edge: e.id, healthy: sees(checker, e.id), region: regionOf(checker) })));
+  const everyone = [...SG, ...KH];
+
+  test("one region, as today: exactly the rule without regions", () => {
+    const today = verdicts(EDGES, [
+      { checker: "a", edge: "c", healthy: false, region: "default" },
+      { checker: "b", edge: "c", healthy: false },
+      { checker: "c", edge: "b", healthy: true },
+      { checker: "a", edge: "b", healthy: false },
+    ]);
+    expect(today.get("c")).toBe("down");
+    expect(today.get("b")).toBe("up");
+  });
+
+  test("Singapore and Cambodia cut off from each other: no edge leaves DNS", () => {
+    const cut = allVotes(everyone, (checker, edge) => regionOf(checker) === regionOf(edge));
+    const v = verdicts(MIXED, cut);
+    for (const edge of MIXED) expect(v.get(edge.id)).toBe("unknown");
+    // Before regions, the three Singapore checkers outvoted the two Cambodian ones.
+    expect(verdicts(MIXED.map(({ id, address }) => ({ id, address })), cut.map(({ region, ...vote }) => vote)).get("k1")).toBe("down");
+  });
+
+  test("the Cambodian data centre down (its checkers can't reach MongoDB): its edges leave", () => {
+    const v = verdicts(MIXED, allVotes(SG, (_checker, edge) => regionOf(edge) === "sg"));
+    expect(v.get("k1")).toBe("down");
+    expect(v.get("k2")).toBe("down");
+    expect(v.get("s1")).toBe("up");
+  });
+
+  test("one Cambodian edge down: it leaves, seen from both regions", () => {
+    const v = verdicts(MIXED, allVotes(everyone, (_checker, edge) => edge !== "k1"));
+    expect(v.get("k1")).toBe("down");
+    expect(v.get("k2")).toBe("up");
+  });
+
+  test("a region of two edges, cut off: its other edge alone keeps it in", () => {
+    const v = verdicts(MIXED, allVotes(everyone, (checker, edge) => regionOf(checker) === regionOf(edge) || edge.startsWith("s")));
+    expect(v.get("k1")).toBe("unknown");
+  });
+
+  test("a checker in a third place tells an outage from a cut", () => {
+    // Cambodia's upstream gone, but its checkers still reach MongoDB and see each other.
+    const inside = allVotes(everyone, (checker, edge) => regionOf(edge) === "sg" ? regionOf(checker) === "sg" : regionOf(checker) === "kh");
+    expect(verdicts(MIXED, inside).get("k1")).toBe("unknown");
+    const neutral = { checker: "x1", edge: "k1", healthy: false, region: "elsewhere" };
+    expect(verdicts(MIXED, [...inside, neutral]).get("k1")).toBe("down");
+  });
+});
+
 describe("what changes in a record", () => {
   const all = EDGES.map((e) => e.address);
 
@@ -124,6 +184,14 @@ test("DNS_HEALTH_EDGES: id=address pairs, anything else refused", () => {
   ]);
   expect(() => parseEdges("edge1=edge1.example.com")).toThrow();
   expect(() => parseEdges("159.223.71.81")).toThrow();
+});
+
+test("DNS_HEALTH_EDGES: a region after @", () => {
+  expect(parseEdges("pnh1=203.0.113.5@kh,edge2=2001:db8::2@sg")).toEqual([
+    { id: "pnh1", address: "203.0.113.5", region: "kh" },
+    { id: "edge2", address: "2001:db8::2", region: "sg" },
+  ]);
+  expect(() => parseEdges("pnh1=203.0.113.5@k h")).toThrow();
 });
 
 // ---------------------------------------------------------------------------
@@ -224,6 +292,19 @@ describe.skipIf(!MONGO)("checkers agreeing through MongoDB", () => {
     await rounds(3, [a, b]);
     expect(dns.addresses("app.test")).toHaveLength(3);
     expect(dns.changes).toEqual([]);
+  });
+
+  test("a checker without the Cloudflare token votes, and never takes the lease", async () => {
+    const dns = fakeDns();
+    const unreachable = new Set(["c"]);
+    const voter = checkerOn("a", dns, unreachable, { writer: false });
+    const writer = checkerOn("b", dns, unreachable);
+    await rounds(3, [voter, writer]); // the voter goes first: the lease is free each time
+    expect(dns.addresses("app.test")).toEqual(["192.0.2.1", "192.0.2.2"]); // its vote counted
+    expect(dns.changes.length).toBeGreaterThan(0);
+    expect(dns.changes.every((c) => c.startsWith("b "))).toBe(true);
+    const lease = await db!.collection("dnsHealthLease").findOne({ _id: "dns-writer" as any });
+    expect(lease?.holder).toBe("b");
   });
 
   test("when the writer stops, another checker takes over", async () => {

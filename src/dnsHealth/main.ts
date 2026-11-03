@@ -11,12 +11,15 @@
  * puts it back when they see it up. See checker.ts and decide.ts.
  *
  * Environment:
- *   MONGODB_URI                  the edges' MongoDB (votes and the writer lease)
- *   DNS_HEALTH_EDGES             id=address,…  every edge, ids as their VPS_ID
+ *   MONGODB_URI                  the edges' MongoDB (votes and the writer lease);
+ *                                MONGODB_DB or the URI's path names the database, as for jrok
+ *   DNS_HEALTH_EDGES             id=address[@region],…  every edge, ids as their VPS_ID
+ *   DNS_HEALTH_CHECKER_REGION    a checker that isn't an edge: its region (decide.ts)
  *   DNS_HEALTH_RECORDS           record names to keep healthy, comma-separated
  *   DNS_HEALTH_CHECK_HOST        name for TLS and Host on probes (a base domain)
  *   DNS_HEALTH_CHECKER_ID        default VPS_ID: never probes the edge with that id
- *   CLOUDFLARE_API_TOKEN, or CLOUDFLARE_API_TOKEN_FILE (certbot's cloudflare.ini)
+ *   CLOUDFLARE_API_TOKEN, or CLOUDFLARE_API_TOKEN_FILE (certbot's cloudflare.ini): writers only
+ *   DNS_HEALTH_WRITER=false      only vote, never change DNS (needs no token)
  *   DNS_HEALTH_ZONE_ID           optional; else found from the record names
  *   DNS_HEALTH_DRY_RUN=true      log what would change, change nothing
  *   DNS_HEALTH_INTERVAL_MS 10000, DNS_HEALTH_FAIL_AFTER 3, DNS_HEALTH_RECOVER_AFTER 3, DNS_HEALTH_TTL 60
@@ -27,9 +30,10 @@ import { MongoClient } from "mongodb";
 import { hostname } from "os";
 import { parseEdges, type Edge } from "./decide";
 import { CloudflareDns, cloudflareToken } from "./cloudflare";
-import { DnsHealthChecker } from "./checker";
+import { DnsHealthChecker, type DnsClient } from "./checker";
 import { initTelegram, notifyEdgeDns } from "../services/notificationService";
 import { DRAIN_HEADER } from "../utils/drain";
+import { databaseName } from "../utils/mongodb";
 
 const env = process.env;
 const number = (name: string, fallback: number) => {
@@ -72,6 +76,21 @@ initTelegram();
 const client = new MongoClient(env.MONGODB_URI, { serverSelectionTimeoutMS: 5_000 });
 await client.connect();
 
+// Only the writers hold the Cloudflare token, which can change the whole zone
+// (Ansible: dns_health_writers); the other checkers vote. A writer whose token
+// is missing votes too, rather than stopping (and restarting every 5 s).
+let writer = env.DNS_HEALTH_WRITER !== "false";
+let dns: DnsClient | null = null;
+if (writer) {
+  try {
+    dns = new CloudflareDns(cloudflareToken(), { ttl: number("DNS_HEALTH_TTL", 60), zoneId: env.DNS_HEALTH_ZONE_ID });
+  } catch (error: any) {
+    console.error(`[dns-health] no Cloudflare token (${error?.message ?? error}): this checker only votes`);
+    writer = false;
+  }
+}
+const voteOnly = async (): Promise<never> => { throw new Error("this checker only votes"); };
+
 const checker = new DnsHealthChecker(
   {
     checkerId: (env.DNS_HEALTH_CHECKER_ID || env.VPS_ID || hostname()).trim(),
@@ -83,9 +102,11 @@ const checker = new DnsHealthChecker(
     leaseMs: 3 * intervalMs,
     leftoverAfterMs: number("DNS_HEALTH_LEFTOVER_AFTER_S", 300) * 1000,
     dryRun: env.DNS_HEALTH_DRY_RUN === "true",
+    writer,
+    region: env.DNS_HEALTH_CHECKER_REGION?.trim() || undefined,
   },
-  client.db("jrok"),
-  new CloudflareDns(cloudflareToken(), { ttl: number("DNS_HEALTH_TTL", 60), zoneId: env.DNS_HEALTH_ZONE_ID }),
+  client.db(databaseName(env.MONGODB_URI)),
+  dns ?? { addressRecords: voteOnly, addAddress: voteOnly, removeRecord: voteOnly },
   probe,
   undefined,
   (notice) => {
@@ -98,7 +119,7 @@ const checker = new DnsHealthChecker(
 
 console.log(
   `[dns-health] ${edges.length} edges, records ${records.join(", ")}, every ${intervalMs / 1000} s` +
-    (env.DNS_HEALTH_DRY_RUN === "true" ? " (dry run)" : "")
+    (writer ? "" : ", votes only") + (env.DNS_HEALTH_DRY_RUN === "true" ? " (dry run)" : "")
 );
 
 // One cycle at a time; an error (MongoDB, Cloudflare) skips the cycle and

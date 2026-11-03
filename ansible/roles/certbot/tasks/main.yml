@@ -16,6 +16,9 @@
     mode: '0700'
   tags: ["certbot"]
 
+# Only on the edges that need it (jrok_cloudflare_holders: the renewing edge
+# and the DNS writers): the token can change the whole zone. The app role
+# removes it from the others once their DNS checker no longer reads it.
 - name: Create Cloudflare credentials file
   copy:
     content: |
@@ -23,6 +26,7 @@
       dns_cloudflare_api_token={{ cloudflare_token }}
     dest: /etc/letsencrypt/secrets/cloudflare.ini
     mode: '0600'
+  when: inventory_hostname in jrok_cloudflare_holders
   tags: ["certbot"]
 
 
@@ -95,7 +99,8 @@
   # renewal from MongoDB within minutes. An edge that issued its own copy
   # (before this rule, or a copy of /etc/letsencrypt) renews it only 10 days
   # before expiry: never while the renewing edge works, and in time if it
-  # doesn't. Certbot keeps this line when it renews.
+  # doesn't, provided it holds the Cloudflare token (a DNS writer). Certbot
+  # keeps this line when it renews.
   lineinfile:
     path: "/etc/letsencrypt/renewal/{{ jrok_ssl_cert_name }}.conf"
     regexp: '^\s*renew_before_expiry\s*='

@@ -45,12 +45,22 @@
     # certificates a week for the same names, so the others don't issue their
     # own: they take a copy and then follow MongoDB (roles/certbot).
     jrok_cert_renewer: "{{ cert_renewer | default(groups['jrok_servers'][0]) }}"
+    # Who may change DNS (health-checked DNS, src/dnsHealth): dns_health_writers,
+    # comma-separated inventory names; default the renewing edge and one more,
+    # so either can fail. The other edges' checkers only vote.
+    jrok_dns_writers: "{{ (dns_health_writers | default('')).split(',') | map('trim') | select | list or ([jrok_cert_renewer] + (groups['jrok_servers'] | reject('equalto', jrok_cert_renewer) | list)[:1]) }}"
+    # Certbot's Cloudflare token can change the whole koompi.cloud zone, the
+    # dashboard's records too: only the renewing edge and the DNS writers keep it.
+    jrok_cloudflare_holders: "{{ ([jrok_cert_renewer] + jrok_dns_writers) | unique }}"
     # Edges reach each other over HTTPS (P10, src/utils/peerLink.ts) once every
     # edge has a forward_host: its own name, an A record for that edge alone and
     # covered by the wildcard certificate (e.g. "edge-a.public.koompi.cloud").
     # Requests between edges carry JROK_PEER_KEY (`openssl rand -hex 32`, the
     # same on every edge), and jrok's port is then closed to the other edges.
     jrok_peer_key: "{{ lookup('env', 'JROK_PEER_KEY') }}"
+    # Encrypts certificate private keys in MongoDB (`openssl rand -hex 32`, the
+    # same on every edge, never changed once set). Unset: stored unencrypted.
+    cert_encryption_key: "{{ lookup('env', 'JROK_CERT_KEY') }}"
     jrok_peer_tls: "{{ groups['jrok_servers'] | length > 1 and groups['jrok_servers'] | map('extract', hostvars) | selectattr('forward_host', 'defined') | list | length == groups['jrok_servers'] | length }}"
     # The name nginx's fallback presents to every peer (TLS and Host). Every
     # edge answers to it; it needs no DNS record.
@@ -68,6 +78,16 @@
         fail_msg: "Every edge has a forward_host: set JROK_PEER_KEY (openssl rand -hex 32), the same for every edge"
         quiet: true
       when: jrok_peer_tls | bool
+      tags: ["always"]
+
+    - name: A certificate key, when given, is long enough
+      assert:
+        that:
+          - cert_encryption_key | length >= 32
+          - cert_encryption_key is match('^[A-Za-z0-9_+/=-]+$')
+        fail_msg: "JROK_CERT_KEY must be at least 32 characters (openssl rand -hex 32), the same for every edge"
+        quiet: true
+      when: cert_encryption_key | length > 0
       tags: ["always"]
 
     - name: Update apt cache

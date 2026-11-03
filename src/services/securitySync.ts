@@ -9,7 +9,7 @@
  *
  * Every server now re-reads what changed every SYNC_INTERVAL_MS:
  * - per-tunnel IP rules, from `tunnels` (ipSecurityChangedAt);
- * - admin IP blocks and suspensions, from `securityRules`.
+ * - admin IP blocks, flood blocks (per app) and suspensions, from `securityRules`.
  * Change times come from MongoDB's clock ($currentDate), never a server's.
  *
  * Automatic abuse blocks (securityService.detectAbuse) stay local on purpose:
@@ -20,15 +20,17 @@
  */
 import { getCollections } from "../utils/mongodb";
 import * as securityService from "./securityService";
+import { FLOOD_REASON_PREFIX } from "./floodGuard";
 
-export type SecurityRuleKind = "block-ip" | "suspend-org" | "suspend-domain";
+/** block-ip-app: an address blocked for one app, keyed `${address}|${app}` (the flood guard's). */
+export type SecurityRuleKind = "block-ip" | "block-ip-app" | "suspend-org" | "suspend-domain";
 
 interface SecurityRule {
   kind: SecurityRuleKind;
   key: string;
   active: boolean;
   reason?: string;
-  expiresAt?: number; // block-ip only
+  expiresAt?: number; // block-ip and block-ip-app only
   updatedAt: Date;
 }
 
@@ -41,20 +43,39 @@ let lastTunnelChange: Date | null = null;
 let lastRuleChange: Date | null = null;
 let syncTimer: Timer | null = null;
 let syncing = false;
+let loaded = false;
+
+/** True once a sync has read every shared rule (the first one reads them all). */
+export function securityRulesLoaded(): boolean {
+  return loaded;
+}
 // Version (updatedAt) of each rule last applied here, so the overlap doesn't
 // re-apply (and re-log) the same rule on every sync.
 const appliedVersions = new Map<string, number>();
 
 function applyRule(rule: SecurityRule): void {
+  const inForce = rule.active && (rule.expiresAt ?? 0) > Date.now();
+  const seconds = Math.ceil(((rule.expiresAt ?? 0) - Date.now()) / 1000);
   switch (rule.kind) {
     case "block-ip":
-      if (rule.active && (rule.expiresAt ?? 0) > Date.now()) {
-        const seconds = Math.ceil(((rule.expiresAt ?? 0) - Date.now()) / 1000);
+      // Flood blocks of every app (jrok before per-app blocks, or an edge not
+      // yet updated) are not applied: they shut shared addresses out of all of
+      // KOOMPI Cloud for up to a day. The flood guard blocks per app now.
+      if (inForce && !(rule.reason || "").startsWith(FLOOD_REASON_PREFIX)) {
         securityService.blockIp(rule.key, rule.reason || "Blocked", seconds);
       } else {
         securityService.unblockIp(rule.key);
       }
       break;
+    case "block-ip-app": {
+      const split = rule.key.indexOf("|");
+      if (split <= 0) break;
+      const address = rule.key.slice(0, split);
+      const app = rule.key.slice(split + 1);
+      if (inForce) securityService.blockIpForApp(address, app, rule.reason || "Blocked", seconds);
+      else securityService.unblockIpForApp(address, app);
+      break;
+    }
     case "suspend-org":
       if (rule.active) securityService.suspendOrganization(rule.key, rule.reason);
       else securityService.unsuspendOrganization(rule.key);
@@ -64,6 +85,17 @@ function applyRule(rule: SecurityRule): void {
       else securityService.unsuspendDomain(rule.key);
       break;
   }
+}
+
+/**
+ * The reason a block by hand (POST /security/block-ip) is saved with. A
+ * block-ip rule whose reason starts with "Flood:" is taken for an older edge's
+ * flood block of every app and not applied (applyRule), so a hand block given
+ * such a reason ("Flood: 50k requests a second") was saved, reported as done,
+ * and enforced nowhere.
+ */
+export function handBlockReason(reason: string): string {
+  return reason.startsWith(FLOOD_REASON_PREFIX) ? `By hand: ${reason}` : reason;
 }
 
 /**
@@ -78,7 +110,7 @@ export async function setRule(
   options: { reason?: string; durationSeconds?: number } = {}
 ): Promise<void> {
   const rule: Omit<SecurityRule, "updatedAt"> = { kind, key, active, reason: options.reason };
-  if (kind === "block-ip") rule.expiresAt = Date.now() + (options.durationSeconds ?? 3600) * 1000;
+  if (kind === "block-ip" || kind === "block-ip-app") rule.expiresAt = Date.now() + (options.durationSeconds ?? 3600) * 1000;
 
   applyRule({ ...rule, updatedAt: new Date() });
   await getCollections().securityRules.updateOne(
@@ -117,6 +149,7 @@ export async function syncSecurityRules(): Promise<{ tunnels: number; rules: num
     }
     lastRuleChange = newest(lastRuleChange, rule.updatedAt);
   }
+  loaded = true;
 
   return { tunnels: tunnels.length, rules: rules.length };
 }
@@ -153,5 +186,6 @@ export function stopSecuritySync(): void {
 export function resetSecuritySync(): void {
   lastTunnelChange = null;
   lastRuleChange = null;
+  loaded = false;
   appliedVersions.clear();
 }

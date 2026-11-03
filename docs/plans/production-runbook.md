@@ -34,6 +34,8 @@ The two new droplets carry the DigitalOcean tag `jrok-production`.
   Agents of the old worker code don't know `tcp_port_elsewhere`, so the names they connect through must not change until the workers are updated.
 - **One edge each:** `edge-sgp1/2/3.public.koompi.cloud` (used between edges) and `sgp2/3.private.koompi.cloud` (TCP).
 - **`jrok-edges.koompi.cloud`:** every healthy edge, kept by `jrok-dns-health` like the app records. Deploy workers read their edge list from it (`JROK_EDGES_DNS`), so edges come and go without touching a worker. Nobody connects to this name.
+- **Who changes DNS:** every edge's checker votes; only the writers (`dns_health_writers` in the inventory, default the renewing edge and the next one) may take the lease and change records. Certbot's Cloudflare token can change the whole `koompi.cloud` zone, so only the renewing edge and the writers keep `/etc/letsencrypt/secrets/cloudflare.ini`; a deploy (`app` or `dns-health`) removes it from the others once their checker only votes. Keep at least two writers on different edges. `scripts/deploy-production.sh` reads the token from `JROK_SECRETS_FROM` (default edge1, the renewing edge): if the renewing edge changes, point it at an edge that still holds the token.
+- **Regions:** with `dns_region` set on edges (e.g. `sg`, `kh`), each region's checkers give one view of an edge, and an edge leaves DNS only when most regions see it down. A cut between two regions then leaves DNS as it is (logged: `looks down from … and up from …`) instead of the larger region taking the other's edges out. A region that is really down usually can't reach MongoDB, so the others decide; a checker in a third place (the same program elsewhere, with `DNS_HEALTH_CHECKER_REGION`) settles it when it can. Unset everywhere (today): one region, as before.
 - **Custom domains** pointed at 152.42.241.139 by an A record reach edge1 only. `scripts/custom-domain-dns-audit.ts` lists them.
 
 ## Certificates
@@ -43,6 +45,11 @@ The wildcard certificate (`tunnel.koompi.cloud`: `public.` and `tunnel.koompi.cl
 - **The renewing edge:** `cert_renewer` in the inventory, default the first edge (edge1). It renews 30 days before expiry. Its deploy hook uploads each renewal to MongoDB (`/var/log/certbot-sync.log`), and every other edge's jrok pulls it within 15 s and reloads nginx (staging: 9 s).
 - **The other edges:** a new edge takes a copy of the renewing edge's certificate when it is built, never one of its own. Edges 2 and 3 still have the copies they issued on 2026-11-01; they renew those only 10 days before expiry (`renew_before_expiry` in `/etc/letsencrypt/renewal/tunnel.koompi.cloud.conf`). That never happens while the renewing edge works, and keeps the certificate valid if it doesn't.
 - **Retiring the renewing edge:** set `cert_renewer` to another edge, run `scripts/deploy-production.sh certbot`, then remove it. Only an edge with its own renewal settings (edges 1–3 today) can renew; otherwise issue one there first with certbot.
+- **Private keys in MongoDB** are encrypted with `JROK_CERT_KEY` (AES-256-GCM) once it is in `~/.config/jrok-production/secrets.env`: `openssl rand -hex 32`, the same for every edge, kept safe and never changed. Each edge encrypts the older records when it starts. An edge without the key can't read new certificates (it keeps the ones it has and logs `can't be read on this server`), so the playbook refuses a deploy that would drop or change an edge's key. Add it only after every edge runs this code.
+
+## The server key
+
+The server key (`API_KEY`) works only from the edges themselves and from `server_key_sources` (inventory, comma-separated). Elsewhere it is refused and the edge logs `🚫 Server key presented from <ip>`. Operators use it on an edge: `ssh root@<edge>`, then `curl -H "X-Admin-Key: <key>" http://127.0.0.1:3000/…`. kconsole must call with a `jrok_` key (its `JROK_API_KEY`); if that is the server key, put kconsole's outgoing addresses in `server_key_sources`, or better, give it a `jrok_` key of KOOMPI Cloud's organization.
 
 ## Deploy
 
@@ -132,12 +139,21 @@ On 2026-11-01 the new edges were built first, and edge1's checker, still listing
 ## Floods
 
 - **Settings:** see jrok's [scale-out plan](jrok-scale-out-plan.md), 3.6. `flood_exempt` in the inventory lists the deploy workers (116.212.132.113, 202.124.44.232): apps calling other apps through their public URLs must never be blocked. Add any new worker or monitor there and run `scripts/deploy-production.sh` (tag `app`).
+- **What is refused:** an address (an IPv6 /64 counts as one) sending one app more than 3,000 requests in 10 s gets 429 from that app for the rest of those 10 s (`🚦 … the rest of this window refused`). Doing it again within the hour blocks it from that app on every edge: 10 minutes, doubling each time, at most an hour. Its other apps are never refused. An address asking one edge for more than 500 different names in 10 s (names at random, each a MongoDB lookup) is refused every app on that edge for 10 minutes.
 - **A block happening:** an edge logs `🛑 Flood blocked: <ip> …` (`journalctl -u jrok | grep "Flood blocked"`). With `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` set on the edges, a person gets the same message; not configured yet.
-- **List or lift blocks** with the server key, on any edge (the change reaches the others within 10 s):
-  - list: `GET /security/blocked-ips`;
-  - lift: `POST /security/unblock-ip` with `{"ip":"…"}`;
+- **List or lift blocks** with the server key, on any edge itself (see "The server key"; the change reaches the others within 10 s):
+  - list: `GET /security/blocked-ips`: `blockedIps` (by hand, every app) and `appBlocks` (floods, one app each);
+  - lift: `POST /security/unblock-ip` with `{"ip":"…"}` (every block of that address), or `{"ip":"…","app":"…"}` (that app's);
   - block by hand: `POST /security/block-ip` with `{"ip":"…","reason":"…","duration":3600}`.
-- **One app busy:** its visitors get 503 with `X-Jrok-App-Busy`, and jrok logs `🚦 <app>: N requests already waiting`. The app itself is too slow for its traffic: more replicas, or a look at the app.
+- **One app busy:** its visitors get 503 with `X-Jrok-App-Busy`, and jrok logs `🚦 <app>: N requests already waiting`. The app itself is too slow for its traffic: more replicas, or a look at the app. Once half of its 1,000 waiting slots are taken, one address may hold at most 100 of them; beyond that, that address alone gets 429 (`🚦 <app>: <ip> has N of its M waiting requests`).
+
+## Edge cache
+
+nginx keeps what an app marks shareable (`public` or `s-maxage`, never HTML) and serves it without asking jrok. So jrok tells nginx what to leave to it:
+- **Hosts** of an app with IP rules (an allowlist, or a blocklist with addresses) or a suspension: `/etc/nginx/jrok-cache-off.map`.
+- **Addresses blocked by hand** (`POST /security/block-ip`): `/etc/nginx/jrok-blocked-ips.geo`. Flood blocks are not listed: they protect the apps and tunnels, which cached files don't touch.
+
+Their requests are never answered from the cache nor stored in it, so jrok's checks see each one. jrok rewrites both files and reloads nginx within about 20 s of a change reaching the edge, at most once every 15 s. If nginx refuses them, it puts the old ones back and logs `❌ nginx refused the edge cache rules`; a change logs `🧊 Edge cache rules updated`. If nginx accepts them but the reload itself fails (nginx stopped), jrok logs `❌ Edge cache rules written, but nginx was not reloaded` and tries again every minute: until then nginx still serves the old rules, so look at `systemctl status nginx`. Don't edit them by hand: jrok overwrites them.
 
 ## Checks
 

@@ -30,7 +30,8 @@ beforeAll(async () => {
   mongo = await import("../src/utils/mongodb");
   await mongo.connectDatabase();
   client = await MongoClient.connect(URI);
-  db = client.db("jrok");
+  // The database jrok itself just connected to (the URI's, else "jrok").
+  db = client.db(mongo.getDb()!.databaseName);
 });
 
 afterAll(async () => {

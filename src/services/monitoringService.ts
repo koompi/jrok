@@ -10,7 +10,7 @@
  * - System health metrics
  */
 
-import { getClient, getCollections } from "../utils/mongodb";
+import { getDb, getCollections } from "../utils/mongodb";
 import { PROXY_MODE } from "../config/proxyMode";
 import os from "os";
 
@@ -481,7 +481,7 @@ export function addLog(
 
 async function storeLogToDb(log: SystemLog): Promise<void> {
   try {
-    const db = getClient()?.db("jrok");
+    const db = getDb();
     if (!db) return;
 
     await db.collection("system_logs").insertOne({
@@ -576,7 +576,7 @@ export interface SystemConfig {
  */
 export async function getSystemConfig(): Promise<SystemConfig> {
   try {
-    const db = getClient()?.db("jrok");
+    const db = getDb();
     if (!db) throw new Error("Database not connected");
 
     const config = await db.collection("system_config").findOne({ configId: "main" });
@@ -625,7 +625,7 @@ export async function getSystemConfig(): Promise<SystemConfig> {
  */
 export async function updateSystemConfig(updates: Partial<SystemConfig>): Promise<SystemConfig> {
   try {
-    const db = getClient()?.db("jrok");
+    const db = getDb();
     if (!db) throw new Error("Database not connected");
 
     await db.collection("system_config").updateOne(
@@ -685,7 +685,7 @@ export function initMonitoringService(
 
 async function createMonitoringIndexes(): Promise<void> {
   try {
-    const db = getClient()?.db("jrok");
+    const db = getDb();
     if (!db) return;
 
     // System logs indexes

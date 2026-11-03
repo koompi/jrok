@@ -1,7 +1,8 @@
 import * as db from "../utils/database";
-import { getClient } from "../utils/mongodb";
+import { getDb } from "../utils/mongodb";
 import * as notificationService from "./notificationService";
 import { matchBaseDomain } from "../utils/baseDomains";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
 
 /**
  * MongoDB-based certificate sync service
@@ -31,6 +32,86 @@ interface CertificateRecord {
   uploadedBy: string;
   version: number;
   status: "valid" | "expired" | "expiring";
+}
+
+// =============================================================================
+// PRIVATE KEYS AT REST
+// =============================================================================
+// Anyone who could read MongoDB (its URI is on every edge, the DNS checkers and
+// the deploy machine) could read every customer's certificate private key and
+// the platform wildcard's. With JROK_CERT_KEY set (the same on every edge, at
+// least 32 characters: `openssl rand -hex 32`; Ansible puts it in
+// /etc/jrok/jrok.env), each private key is stored encrypted: AES-256-GCM, bound
+// to its domain so a record's key can't be moved to another. Records stored
+// before (base64 PEM) are still read, and encrypted at startup.
+
+const SEALED_PREFIX = "jrok-enc:v1:";
+
+let shortKeyWarned = false;
+
+/** The key private keys are encrypted with, or null when JROK_CERT_KEY is unset (or too short). */
+function certificateKey(): Buffer | null {
+  const secret = process.env.JROK_CERT_KEY?.trim();
+  if (!secret) return null;
+  if (secret.length < 32) {
+    if (!shortKeyWarned) console.error("❌ JROK_CERT_KEY is shorter than 32 characters: certificate private keys are NOT encrypted. Use `openssl rand -hex 32`.");
+    shortKeyWarned = true;
+    return null;
+  }
+  return createHash("sha256").update(secret).digest();
+}
+
+/** Is this stored private key encrypted? */
+export function isSealedPrivateKey(stored: unknown): boolean {
+  return typeof stored === "string" && stored.startsWith(SEALED_PREFIX);
+}
+
+/** A private key (base64 PEM) as it is stored: encrypted when there is a key. */
+export function sealPrivateKey(domain: string, privkeyBase64: string, key: Buffer | null = certificateKey()): string {
+  if (!key || isSealedPrivateKey(privkeyBase64)) return privkeyBase64;
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(Buffer.from(domain));
+  const sealed = Buffer.concat([cipher.update(Buffer.from(privkeyBase64, "base64")), cipher.final()]);
+  return SEALED_PREFIX + Buffer.concat([iv, cipher.getAuthTag(), sealed]).toString("base64");
+}
+
+/** A stored private key as base64 PEM; null when it is encrypted and this server can't open it. */
+export function openPrivateKey(domain: string, stored: string, key: Buffer | null = certificateKey()): string | null {
+  if (!isSealedPrivateKey(stored)) return stored;
+  if (!key) return null;
+  try {
+    const raw = Buffer.from(stored.slice(SEALED_PREFIX.length), "base64");
+    const decipher = createDecipheriv("aes-256-gcm", key, raw.subarray(0, 12));
+    decipher.setAAD(Buffer.from(domain));
+    decipher.setAuthTag(raw.subarray(12, 28));
+    return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("base64");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Encrypt every private key still stored as plain base64 (records from before
+ * JROK_CERT_KEY, or from an edge without it). Each record is changed only if
+ * nobody changed it meanwhile; its version stays, so no edge pulls it again.
+ */
+export async function sealStoredPrivateKeys(): Promise<number> {
+  const key = certificateKey();
+  const certs = getDb()?.collection<CertificateRecord>("certificates");
+  if (!key || !certs) return 0;
+  let sealed = 0;
+  const plain = await certs.find({ privkey: { $not: /^jrok-enc:v1:/ } }, { projection: { privkey: 1 } }).toArray();
+  for (const record of plain) {
+    if (typeof record.privkey !== "string" || !record.privkey) continue;
+    const result = await certs.updateOne(
+      { _id: record._id, privkey: record.privkey },
+      { $set: { privkey: sealPrivateKey(record._id, record.privkey, key) } }
+    );
+    sealed += result.modifiedCount;
+  }
+  if (sealed > 0) console.log(`🔐 Encrypted ${sealed} certificate private key(s) stored in MongoDB`);
+  return sealed;
 }
 
 /**
@@ -73,8 +154,7 @@ function unwrapUpdateResult<T>(result: any): T | null {
  */
 export async function attemptBecomeLeader(serverId: string): Promise<boolean> {
   try {
-    const client = getClient();
-    const leases = client?.db("jrok").collection<LeaderLease>("leader_leases");
+    const leases = getDb()?.collection<LeaderLease>("leader_leases");
     if (!leases) {
       console.error("❌ Database connection not available");
       return false;
@@ -122,7 +202,7 @@ export async function attemptBecomeLeader(serverId: string): Promise<boolean> {
  */
 export async function refreshLeaderLease(serverId: string): Promise<boolean> {
   try {
-    const leases = getClient()?.db("jrok").collection<LeaderLease>("leader_leases");
+    const leases = getDb()?.collection<LeaderLease>("leader_leases");
     if (!leases) return false;
 
     const now = new Date();
@@ -159,7 +239,7 @@ export async function uploadCertificateToMongoDB(
   uploadedBy: string
 ): Promise<CertificateRecord> {
   try {
-    const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+    const certs = getDb()?.collection<CertificateRecord>("certificates");
     if (!certs) {
       throw new Error("Database connection not available");
     }
@@ -182,7 +262,7 @@ export async function uploadCertificateToMongoDB(
       cert: certPem,
       chain: chainPem,
       fullchain: fullchainPem,
-      privkey: privkeyPem,
+      privkey: sealPrivateKey(domain, privkeyPem),
       expiry,
       uploadedBy,
       status: calculateCertStatus(expiry)
@@ -214,7 +294,7 @@ export async function uploadCertificateToMongoDB(
     // Notify all VPS servers to sync
     await notifyVpsServersToSync(domain, saved.version);
 
-    return saved;
+    return { ...saved, privkey: privkeyPem };
   } catch (error) {
     console.error(`❌ Failed to upload certificate for ${domain}:`, error);
     throw error;
@@ -226,13 +306,23 @@ export async function uploadCertificateToMongoDB(
  */
 export async function downloadCertificateFromMongoDB(domain: string): Promise<CertificateRecord | null> {
   try {
-    const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+    const certs = getDb()?.collection<CertificateRecord>("certificates");
     if (!certs) {
       throw new Error("Database connection not available");
     }
 
     const cert = await certs.findOne({ _id: domain });
-    return cert || null;
+    if (!cert) return null;
+    // Callers get the private key as base64 PEM, whichever way it is stored.
+    const privkey = typeof cert.privkey === "string" ? openPrivateKey(cert._id, cert.privkey) : null;
+    if (privkey === null) {
+      console.error(
+        `❌ ${domain}: its private key in MongoDB can't be read on this server (JROK_CERT_KEY missing or not the other edges'); ` +
+        `the certificate on disk is kept. Set the same JROK_CERT_KEY on every edge.`
+      );
+      return null;
+    }
+    return { ...cert, privkey };
   } catch (error) {
     console.error(`❌ Failed to download certificate for ${domain}:`, error);
     return null;
@@ -251,7 +341,7 @@ export async function getCertificateStatus(domain: string): Promise<{
   lastUpdated: Date | null;
 } | null> {
   try {
-    const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+    const certs = getDb()?.collection<CertificateRecord>("certificates");
     if (!certs) return null;
 
     const cert = await certs.findOne({ _id: domain });
@@ -296,7 +386,7 @@ export async function listCertificates(): Promise<Array<{
   lastUpdated: Date;
 }>> {
   try {
-    const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+    const certs = getDb()?.collection<CertificateRecord>("certificates");
     if (!certs) return [];
 
     const certificates = await certs.find({}).toArray();
@@ -322,7 +412,7 @@ export async function listCertificates(): Promise<Array<{
  */
 async function notifyVpsServersToSync(domain: string, version: number): Promise<void> {
   try {
-    const syncQueue = getClient()?.db("jrok").collection("cert_sync_queue");
+    const syncQueue = getDb()?.collection("cert_sync_queue");
     if (!syncQueue) return;
 
     await syncQueue.insertOne({
@@ -620,7 +710,7 @@ async function refreshUpstreamFile(changes: ConfigChanges, options: { create?: b
   if (update !== null) await writeConfigFile(changes, upstreamPath, update);
 }
 
-type NginxReloadResult = "reloaded" | "test-failed" | "reload-failed" | "unavailable";
+export type NginxReloadResult = "reloaded" | "test-failed" | "reload-failed" | "unavailable";
 
 /**
  * Validate and reload nginx. Does not reload when the config fails `nginx -t`,
@@ -629,7 +719,7 @@ type NginxReloadResult = "reloaded" | "test-failed" | "reload-failed" | "unavail
  * NGINX_BIN, when set, replaces both `nginx -t` and the reload (as
  * `$NGINX_BIN -s reload`, skipping systemctl) — tests point it at a stand-in.
  */
-async function testAndReloadNginx(): Promise<NginxReloadResult> {
+export async function testAndReloadNginx(): Promise<NginxReloadResult> {
   const nginxBin = process.env.NGINX_BIN;
 
   try {
@@ -673,7 +763,7 @@ export async function syncAllCertificatesToDisk(): Promise<ReconcileStats> {
   const stats: ReconcileStats = { synced: [], skipped: 0, failed: [], upgraded: [] };
 
   try {
-    const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+    const certs = getDb()?.collection<CertificateRecord>("certificates");
     if (!certs) return stats;
 
     // Metadata first. The PEM bodies are only fetched for domains that actually
@@ -782,7 +872,7 @@ let newestUploadSeen: Date | null = null;
  * The first look only notes where things stand: startup reconciles anyway.
  */
 export async function syncIfNewCertificates(): Promise<boolean> {
-  const certs = getClient()?.db("jrok").collection<CertificateRecord>("certificates");
+  const certs = getDb()?.collection<CertificateRecord>("certificates");
   if (!certs) return false;
   const newest = await certs.find({}, { projection: { uploadedAt: 1 } }).sort({ uploadedAt: -1 }).limit(1).next();
   const at = newest?.uploadedAt;
@@ -804,13 +894,11 @@ export function resetNewCertificateWatch(): void {
  */
 export async function initializeCertificateSync(): Promise<void> {
   try {
-    const db_client = getClient();
-    if (!db_client) {
+    const db_instance = getDb();
+    if (!db_instance) {
       console.error("❌ Database not connected");
       return;
     }
-
-    const db_instance = db_client.db("jrok");
 
     // Create collections if they don't exist
     const collections = await db_instance.listCollections().toArray();
@@ -842,6 +930,12 @@ export async function initializeCertificateSync(): Promise<void> {
 
     const queue = db_instance.collection("cert_sync_queue");
     await queue.createIndex({ createdAt: 1 }, { expireAfterSeconds: 86400 });
+
+    if (certificateKey()) {
+      await sealStoredPrivateKeys();
+    } else {
+      console.warn("⚠️ JROK_CERT_KEY is not set: certificate private keys are stored in MongoDB unencrypted");
+    }
 
     console.log("✅ Certificate sync infrastructure initialized");
   } catch (error) {

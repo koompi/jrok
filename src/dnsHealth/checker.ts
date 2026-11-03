@@ -9,10 +9,12 @@ import type { Db } from "mongodb";
 import {
   type Edge,
   type ProbeState,
+  DEFAULT_REGION,
   INITIAL_PROBE_STATE,
   leftoverAddresses,
   nextProbeState,
   planRecord,
+  regionViews,
   verdicts,
 } from "./decide";
 import type { AddressRecord } from "./cloudflare";
@@ -35,6 +37,14 @@ export interface DnsHealthConfig {
    */
   leftoverAfterMs: number;
   dryRun: boolean;
+  /**
+   * May this checker change DNS? False: it only votes, and needs no Cloudflare
+   * token (which can change the whole zone): only the writers hold one.
+   * Default true.
+   */
+  writer?: boolean;
+  /** This checker's region (decide.ts); default its edge's, else DEFAULT_REGION. */
+  region?: string;
 }
 
 /** Changes worth telling a person about (Telegram in main.ts). */
@@ -56,6 +66,8 @@ export class DnsHealthChecker {
   private allDown = false;
   /** "record address" → when this writer first saw it as a leftover. */
   private leftoverSince = new Map<string, number>();
+  /** Edges the regions disagree about, as last logged. */
+  private splits = new Set<string>();
 
   constructor(
     private config: DnsHealthConfig,
@@ -68,13 +80,14 @@ export class DnsHealthChecker {
 
   async cycle(): Promise<void> {
     await this.vote();
-    if (await this.holdLease()) await this.applyDns();
+    if (this.config.writer !== false && await this.holdLease()) await this.applyDns();
     else this.leftoverSince.clear();
   }
 
   /** Probe every other edge and record what this checker sees. */
   private async vote(): Promise<void> {
     const { checkerId, edges, failAfter, recoverAfter } = this.config;
+    const region = this.config.region || edges.find((edge) => edge.id === checkerId)?.region || DEFAULT_REGION;
     const others = edges.filter((edge) => edge.id !== checkerId);
     const results = await Promise.all(others.map((edge) => this.probe(edge).catch(() => false)));
 
@@ -86,7 +99,7 @@ export class DnsHealthChecker {
       return {
         updateOne: {
           filter: { _id: `${checkerId}:${edge.id}` as any },
-          update: [{ $set: { checker: checkerId, edge: edge.id, address: edge.address, healthy: next.healthy, at: "$$NOW" } }],
+          update: [{ $set: { checker: checkerId, region, edge: edge.id, address: edge.address, healthy: next.healthy, at: "$$NOW" } }],
           upsert: true,
         },
       };
@@ -131,8 +144,24 @@ export class DnsHealthChecker {
       .collection("dnsHealthVotes")
       .find({ $expr: { $gte: ["$at", { $subtract: ["$$NOW", maxVoteAgeMs] }] } })
       .toArray();
-    const verdict = verdicts(edges, votes.map((v) => ({ checker: v.checker, edge: v.edge, healthy: v.healthy, address: v.address })));
+    const current = votes.map((v) => ({ checker: v.checker, edge: v.edge, healthy: v.healthy, address: v.address, region: v.region }));
+    const verdict = verdicts(edges, current);
     const probed = new Set<string>(votes.map((v) => v.address).filter(Boolean));
+
+    // Regions that disagree evenly (a cut between them, or a region that is
+    // down but still reaches MongoDB): DNS is left as it is. Logged when it
+    // starts and ends.
+    for (const edge of edges) {
+      const views = [...regionViews(edge, current)];
+      const split = verdict.get(edge.id) === "unknown" && views.length > 1;
+      if (split && !this.splits.has(edge.id)) {
+        const by = (v: "up" | "down") => views.filter(([, view]) => view === v).map(([r]) => r).join(", ");
+        this.log(`${edge.id} (${edge.address}) looks down from ${by("down")} and up from ${by("up")}: left as it is (a cut between regions?)`);
+        this.splits.add(edge.id);
+      } else if (!split && this.splits.delete(edge.id)) {
+        this.log(`${edge.id} (${edge.address}): the regions agree again`);
+      }
+    }
 
     // Every edge down at once is more likely the checkers' own trouble than
     // the edges'; the records are left alone (planRecord), and a person told.

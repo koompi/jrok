@@ -18,20 +18,21 @@ process.env.NGINX_BIN = NGINX_OK;
 
 // These tests need a real MongoDB: the bugs covered here (driver v6 result
 // shapes, a $set/$inc path conflict) only reproduce against the server, never
-// against a mock. Point MONGODB_TEST_URI at a throwaway instance; the suite
-// skips itself when none is reachable so `bun test` still passes without one.
-// serverSelectionTimeoutMS keeps the "no MongoDB here" case to ~2s instead of
-// the 30s default, so skipping is fast on a machine without one.
-const TEST_URI =
-  process.env.MONGODB_TEST_URI ||
-  "mongodb://127.0.0.1:27017/jrok_test?serverSelectionTimeoutMS=2000";
-process.env.MONGODB_URI = TEST_URI;
+// against a mock. They empty whole collections, so they run only against a
+// database named jrok_test… (tests/helpers/testMongo.ts: MONGODB_TEST_URI, else
+// MONGODB_URI, else jrok-test-mongo on 127.0.0.1:27018); the suite skips itself
+// otherwise, or when none is reachable, so `bun test` still passes without one.
+const target = testMongo();
+const TEST_URI = "uri" in target ? target.uri : "";
+delete process.env.MONGODB_DB; // the URI names the database
+if (TEST_URI) process.env.MONGODB_URI = TEST_URI;
 process.env.CERT_LIVE_PATH = CERT_DIR_ROOT;
 process.env.NGINX_SITES_PATH = NGINX_DIR;
 process.env.BASE_DOMAIN = "tunnel.koompi.cloud";
 process.env.JWT_SECRET = "test-secret-not-used";
 
-import { connectDatabase, getClient, closeDatabase } from "../src/utils/mongodb";
+import { connectDatabase, getDb, closeDatabase } from "../src/utils/mongodb";
+import { testMongo } from "./helpers/testMongo";
 import * as certSync from "../src/services/certificateSyncService";
 
 const b64 = (s: string) => Buffer.from(s).toString("base64");
@@ -49,12 +50,16 @@ function certDoc(domain: string, version: number, body = "BODY") {
 let mongoAvailable = false;
 
 beforeAll(async () => {
+  if (!("uri" in target)) {
+    console.warn(`\n\u23ed\ufe0f  Skipping certificate sync tests: ${target.skip}\n`);
+    return;
+  }
   try {
     await connectDatabase();
-    await getClient()!.db("jrok").command({ ping: 1 });
+    await getDb()!.command({ ping: 1 });
     mongoAvailable = true;
   } catch {
-    console.warn(`\n\u23ed\ufe0f  Skipping certificate sync tests: no MongoDB at ${TEST_URI}\n   Start one with: docker run -d --rm -p 27017:27017 mongo:7\n`);
+    console.warn(`\n\u23ed\ufe0f  Skipping certificate sync tests: no MongoDB for ${target.db}\n   Start one with: docker run -d --rm -p 127.0.0.1:27018:27017 --name jrok-test-mongo mongo:7\n`);
   }
 }, 30000);
 
@@ -62,7 +67,7 @@ afterAll(async () => { if (mongoAvailable) await closeDatabase(); });
 
 beforeEach(async () => {
   if (!mongoAvailable) return;
-  await getClient()!.db("jrok").collection("certificates").deleteMany({});
+  await getDb()!.collection("certificates").deleteMany({});
   // Each test starts from a bare server: empty cert store, empty nginx dir.
   const { rm } = await import("fs/promises");
   await rm(CERT_DIR_ROOT, { recursive: true, force: true });
@@ -75,7 +80,7 @@ const exists = async (p: string) => { try { await access(p); return true; } catc
 
 test("fresh server pulls every certificate, regardless of age", async () => {
   if (!mongoAvailable) return;
-  const certs = getClient()!.db("jrok").collection("certificates");
+  const certs = getDb()!.collection("certificates");
   // An old custom domain: the exact case the 24h TTL queue used to miss.
   await certs.insertOne({ ...certDoc("shop.customer.com", 3), uploadedAt: new Date(Date.now() - 400 * 86400000) } as any);
   await certs.insertOne(certDoc("tunnel.koompi.cloud", 1) as any);
@@ -90,7 +95,7 @@ test("fresh server pulls every certificate, regardless of age", async () => {
 
 test("custom domains get an nginx vhost; our own base domain does not", async () => {
   if (!mongoAvailable) return;
-  const certs = getClient()!.db("jrok").collection("certificates");
+  const certs = getDb()!.collection("certificates");
   await certs.insertOne(certDoc("shop.customer.com", 1) as any);
   await certs.insertOne(certDoc("abc.tunnel.koompi.cloud", 1) as any);
 
@@ -121,7 +126,7 @@ test("a certificate another server uploads is pulled at the next check, not the 
 
 test("second run is a no-op (idempotent)", async () => {
   if (!mongoAvailable) return;
-  const certs = getClient()!.db("jrok").collection("certificates");
+  const certs = getDb()!.collection("certificates");
   await certs.insertOne(certDoc("shop.customer.com", 1) as any);
 
   const first = await certSync.syncAllCertificatesToDisk();
@@ -134,7 +139,7 @@ test("second run is a no-op (idempotent)", async () => {
 
 test("a newer version in MongoDB is pulled down", async () => {
   if (!mongoAvailable) return;
-  const certs = getClient()!.db("jrok").collection("certificates");
+  const certs = getDb()!.collection("certificates");
   await certs.insertOne(certDoc("shop.customer.com", 1, "OLD") as any);
   await certSync.syncAllCertificatesToDisk();
 
@@ -147,7 +152,7 @@ test("a newer version in MongoDB is pulled down", async () => {
 
 test("an older version in MongoDB never overwrites a newer local cert", async () => {
   if (!mongoAvailable) return;
-  const certs = getClient()!.db("jrok").collection("certificates");
+  const certs = getDb()!.collection("certificates");
   await certs.insertOne(certDoc("shop.customer.com", 5, "CURRENT") as any);
   await certSync.syncAllCertificatesToDisk();
 
@@ -166,7 +171,7 @@ test("a locally-issued cert with no marker is not blindly overwritten", async ()
   // certbot issued this locally: real files, no .jrok-sync-version marker.
   await writeFile(join(dir, "fullchain.pem"), "LOCALLY-ISSUED-CERT");
 
-  const certs = getClient()!.db("jrok").collection("certificates");
+  const certs = getDb()!.collection("certificates");
   await certs.insertOne(certDoc("local.customer.com", 1, "FROM-DB") as any);
 
   const stats = await certSync.syncAllCertificatesToDisk();
@@ -182,7 +187,7 @@ test("an existing nginx vhost is never clobbered", async () => {
   const confPath = join(NGINX_DIR, "tuned_customer_com.conf");
   await writeFile(confPath, "# hand-tuned by an operator\n");
 
-  const certs = getClient()!.db("jrok").collection("certificates");
+  const certs = getDb()!.collection("certificates");
   await certs.insertOne(certDoc("tuned.customer.com", 1) as any);
 
   await certSync.syncAllCertificatesToDisk();
@@ -202,7 +207,7 @@ async function writeV1Vhost(domain: string, fixture = "v1-vhost.conf"): Promise<
 test("an unedited vhost from an older template is upgraded, with the shared upstream", async () => {
   if (!mongoAvailable) return;
   await writeV1Vhost("shop.customer.com");
-  const certs = getClient()!.db("jrok").collection("certificates");
+  const certs = getDb()!.collection("certificates");
   await certs.insertOne(certDoc("shop.customer.com", 1) as any);
 
   const stats = await certSync.syncAllCertificatesToDisk();
@@ -220,7 +225,7 @@ test("an unedited vhost from an older template is upgraded, with the shared upst
 test("a vhost an operator pointed elsewhere is never upgraded", async () => {
   if (!mongoAvailable) return;
   const original = await writeV1Vhost("own.customer.com", "v1-vhost-hand-edited.conf");
-  const certs = getClient()!.db("jrok").collection("certificates");
+  const certs = getDb()!.collection("certificates");
   await certs.insertOne(certDoc("own.customer.com", 1) as any);
 
   const stats = await certSync.syncAllCertificatesToDisk();
@@ -232,7 +237,7 @@ test("a vhost an operator pointed elsewhere is never upgraded", async () => {
 test("when nginx -t rejects the result, every config file the run wrote is put back", async () => {
   if (!mongoAvailable) return;
   const original = await writeV1Vhost("shop.customer.com");
-  const certs = getClient()!.db("jrok").collection("certificates");
+  const certs = getDb()!.collection("certificates");
   await certs.insertOne(certDoc("shop.customer.com", 1) as any);
   await certs.insertOne(certDoc("new.customer.com", 1) as any); // no vhost yet: one gets created
 
@@ -251,7 +256,7 @@ test("when nginx -t rejects the result, every config file the run wrote is put b
 
 test("a vhost is created even when the certificate is already current", async () => {
   if (!mongoAvailable) return;
-  const certs = getClient()!.db("jrok").collection("certificates");
+  const certs = getDb()!.collection("certificates");
   await certs.insertOne(certDoc("late.customer.com", 1) as any);
   await certSync.syncAllCertificatesToDisk();
 
@@ -266,7 +271,7 @@ test("a vhost is created even when the certificate is already current", async ()
 
 test("a malformed domain name is skipped, and does not stop the batch", async () => {
   if (!mongoAvailable) return;
-  const certs = getClient()!.db("jrok").collection("certificates");
+  const certs = getDb()!.collection("certificates");
   await certs.insertOne({ ...certDoc("x", 1), _id: "../../etc/passwd", domain: "../../etc/passwd" } as any);
   await certs.insertOne(certDoc("good.customer.com", 1) as any);
 
@@ -293,7 +298,7 @@ test("reconcile survives MongoDB being unreachable", async () => {
 
 test("leader election succeeds (findOneAndUpdate result shape)", async () => {
   if (!mongoAvailable) return;
-  await getClient()!.db("jrok").collection("leader_leases").deleteMany({});
+  await getDb()!.collection("leader_leases").deleteMany({});
 
   expect(await certSync.attemptBecomeLeader("server-a")).toBe(true);
   // A second server must NOT win while the first holds an unexpired lease.
@@ -305,8 +310,8 @@ test("leader election succeeds (findOneAndUpdate result shape)", async () => {
 
 test("uploading a certificate round-trips and increments version", async () => {
   if (!mongoAvailable) return;
-  await getClient()!.db("jrok").collection("certificates").deleteMany({});
-  await getClient()!.db("jrok").collection("cert_sync_queue").deleteMany({});
+  await getDb()!.collection("certificates").deleteMany({});
+  await getDb()!.collection("cert_sync_queue").deleteMany({});
 
   // NOTE: despite the `...Pem` parameter names, this function stores its
   // arguments verbatim and every real caller passes BASE64 (domainService
@@ -330,8 +335,8 @@ test("uploading a certificate round-trips and increments version", async () => {
 
 test("an uploaded certificate reaches a second server's disk", async () => {
   if (!mongoAvailable) return;
-  await getClient()!.db("jrok").collection("certificates").deleteMany({});
-  await getClient()!.db("jrok").collection("cert_sync_queue").deleteMany({});
+  await getDb()!.collection("certificates").deleteMany({});
+  await getDb()!.collection("cert_sync_queue").deleteMany({});
 
   // Server A issues and uploads.
   await certSync.uploadCertificateToMongoDB(
@@ -348,8 +353,8 @@ test("an uploaded certificate reaches a second server's disk", async () => {
 
 test("two peer servers can both publish; neither blocks the other", async () => {
   if (!mongoAvailable) return;
-  await getClient()!.db("jrok").collection("certificates").deleteMany({});
-  await getClient()!.db("jrok").collection("cert_sync_queue").deleteMany({});
+  await getDb()!.collection("certificates").deleteMany({});
+  await getDb()!.collection("cert_sync_queue").deleteMany({});
 
   // Server A registers one customer domain, server B registers another at the
   // same time. Uploads used to be gated on a 30s leader lease, so whichever
@@ -371,4 +376,79 @@ test("two peer servers can both publish; neither blocks the other", async () => 
   expect(stats.synced.sort()).toEqual(["a.customer.com", "b.customer.com"]);
   expect(await readFile(join(CERT_DIR_ROOT, "a.customer.com/fullchain.pem"), "utf8")).toBe("FULL-A");
   expect(await readFile(join(CERT_DIR_ROOT, "b.customer.com/fullchain.pem"), "utf8")).toBe("FULL-B");
+});
+
+// =============================================================================
+// Private keys at rest (JROK_CERT_KEY)
+// =============================================================================
+// Anyone who could read MongoDB could read every certificate's private key.
+
+const CERT_KEY = "4f".repeat(32);
+function withCertKey<T>(key: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const saved = process.env.JROK_CERT_KEY;
+  if (key === undefined) delete process.env.JROK_CERT_KEY;
+  else process.env.JROK_CERT_KEY = key;
+  return fn().finally(() => {
+    if (saved === undefined) delete process.env.JROK_CERT_KEY;
+    else process.env.JROK_CERT_KEY = saved;
+  });
+}
+
+test("sealed private keys open only with the same key, for the same domain", () => {
+  const key = Buffer.alloc(32, 7);
+  const sealed = certSync.sealPrivateKey("a.customer.com", b64("PRIVATE"), key);
+  expect(sealed.startsWith("jrok-enc:v1:")).toBe(true);
+  expect(sealed).not.toContain(b64("PRIVATE"));
+  expect(certSync.openPrivateKey("a.customer.com", sealed, key)).toBe(b64("PRIVATE"));
+  expect(certSync.openPrivateKey("b.customer.com", sealed, key)).toBeNull();          // moved to another record
+  expect(certSync.openPrivateKey("a.customer.com", sealed, Buffer.alloc(32, 8))).toBeNull(); // another key
+  expect(certSync.openPrivateKey("a.customer.com", sealed, null)).toBeNull();          // no key here
+  // Records from before the key are read as they are; without a key nothing is sealed.
+  expect(certSync.openPrivateKey("a.customer.com", b64("OLD"), key)).toBe(b64("OLD"));
+  expect(certSync.sealPrivateKey("a.customer.com", b64("PRIVATE"), null)).toBe(b64("PRIVATE"));
+});
+
+test("with JROK_CERT_KEY the private key is stored encrypted, and reaches another server's disk as it was", async () => {
+  if (!mongoAvailable) return;
+  await withCertKey(CERT_KEY, async () => {
+    await certSync.uploadCertificateToMongoDB("sealed.customer.com", b64("C"), b64("CH"), b64("FULL"), b64("PRIVKEY-SEALED"), "server-a");
+    const raw = await getDb()!.collection("certificates").findOne({ _id: "sealed.customer.com" as any });
+    expect(String(raw!.privkey).startsWith("jrok-enc:v1:")).toBe(true);
+    expect(String(raw!.privkey)).not.toContain(b64("PRIVKEY-SEALED"));
+
+    const stats = await certSync.syncAllCertificatesToDisk();
+    expect(stats.synced).toEqual(["sealed.customer.com"]);
+    expect(await readFile(join(CERT_DIR_ROOT, "sealed.customer.com/privkey.pem"), "utf8")).toBe("PRIVKEY-SEALED");
+  });
+});
+
+test("a server without the key leaves an encrypted record alone and keeps the certificate it has", async () => {
+  if (!mongoAvailable) return;
+  await withCertKey(CERT_KEY, async () => {
+    await certSync.uploadCertificateToMongoDB("kept.customer.com", b64("C"), b64("CH"), b64("FULL-1"), b64("PK-1"), "server-a");
+    await certSync.syncAllCertificatesToDisk();
+    await certSync.uploadCertificateToMongoDB("kept.customer.com", b64("C"), b64("CH"), b64("FULL-2"), b64("PK-2"), "server-a");
+  });
+  await withCertKey(undefined, async () => {
+    const stats = await certSync.syncAllCertificatesToDisk();
+    expect(stats.synced).toEqual([]);
+  });
+  // Neither file was touched: a new fullchain with the old key would not load.
+  expect(await readFile(join(CERT_DIR_ROOT, "kept.customer.com/fullchain.pem"), "utf8")).toBe("FULL-1");
+  expect(await readFile(join(CERT_DIR_ROOT, "kept.customer.com/privkey.pem"), "utf8")).toBe("PK-1");
+});
+
+test("records stored before the key are encrypted once there is one, keeping their version", async () => {
+  if (!mongoAvailable) return;
+  const certs = getDb()!.collection("certificates");
+  await certs.insertOne(certDoc("legacy.customer.com", 4, "LEGACY") as any);
+  await withCertKey(CERT_KEY, async () => {
+    expect(await certSync.sealStoredPrivateKeys()).toBe(1);
+    expect(await certSync.sealStoredPrivateKeys()).toBe(0);
+    const raw = await certs.findOne({ _id: "legacy.customer.com" as any });
+    expect(String(raw!.privkey).startsWith("jrok-enc:v1:")).toBe(true);
+    expect(raw!.version).toBe(4);
+    const opened = await certSync.downloadCertificateFromMongoDB("legacy.customer.com");
+    expect(Buffer.from(opened!.privkey, "base64").toString()).toBe("privkey-LEGACY");
+  });
 });

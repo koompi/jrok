@@ -16,6 +16,7 @@ import * as wsProxyService from "./services/wsProxyService";
 import * as tcpService from "./services/tcpService";
 import * as securityService from "./services/securityService";
 import * as securitySync from "./services/securitySync";
+import * as edgeCacheRules from "./services/edgeCacheRules";
 import { decodeFrame, FRAME_RESPONSE_CHUNK } from "./utils/tunnelFrames";
 import * as crossServerService from "./services/crossServerService";
 import * as certSyncService from "./services/certificateSyncService";
@@ -25,7 +26,7 @@ import { connectDatabase, closeDatabase, createDistributedStateIndexes, cleanupS
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { purgeExpiredCaches } from "./utils/database";
 import { initTelegram, notifyOperators } from "./services/notificationService";
-import { FloodGuard, floodGuardOptionsFromEnv, blockedResponse, appBusyResponse } from "./services/floodGuard";
+import { FloodGuard, floodGuardOptionsFromEnv, blockedResponse, appBusyResponse, addressBusyResponse, floodKey } from "./services/floodGuard";
 import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
 import * as planLimitService from "./services/planLimitService";
@@ -34,12 +35,13 @@ import { allBaseDomains } from "./utils/baseDomains";
 import { fromTrustedProxy, getClientIp, setForwardedClientHeaders, trustedProxyHops, trustedProxyIps } from "./utils/clientIp";
 import { isFromPeer, stripPeerHeaders } from "./utils/peerLink";
 import * as acmeChallenge from "./services/acmeChallenge";
-import { serverKeyAllowedFrom } from "./utils/serverKeySources";
+import { serverKeyAllowedFrom, serverKeySources } from "./utils/serverKeySources";
 import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "./utils/wsFlowControl";
 import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
 import { firstSubprotocol } from "./utils/wsSubprotocol";
 import { DRAIN_HEADER, isDraining } from "./utils/drain";
 import { maintenancePage } from "./utils/maintenancePage";
+import { shutdownHandler } from "./utils/shutdown";
 import {
   normalizeHostname,
   classifyHost,
@@ -235,13 +237,14 @@ async function handleWebSocketTunnel(
   return new Response("Failed to upgrade WebSocket connection", { status: 400 });
 }
 
-// Flood protection for app traffic (services/floodGuard.ts). A flooding
-// address is blocked here at once and saved for the other edges.
+// Flood protection for app traffic (services/floodGuard.ts). An address
+// flooding an app again is blocked for that app here at once, and saved for
+// the other edges.
 const floodGuard = new FloodGuard({
   ...floodGuardOptionsFromEnv(),
-  block: (ip, reason, seconds) => {
-    securitySync.setRule("block-ip", ip, true, { reason, durationSeconds: seconds }).catch((error) =>
-      console.error(`⚠️ Flood block of ${ip} holds on this edge only (not saved for the others):`, error?.message || error));
+  block: (address, app, reason, seconds) => {
+    securitySync.setRule("block-ip-app", `${address}|${app}`, true, { reason, durationSeconds: seconds }).catch((error) =>
+      console.error(`⚠️ Flood block of ${address} for ${app} holds on this edge only (not saved for the others):`, error?.message || error));
   },
   notify: (message) => { notifyOperators(message).catch(() => {}); },
   log: (message) => console.warn(message),
@@ -307,14 +310,17 @@ function answerAgentsPendingRequests(agentId: string): void {
 /**
  * A request for the app, sent to its agent; resolves when the app starts
  * answering. At most APP_MAX_WAITING of an app's requests wait at once
- * (services/floodGuard.ts): beyond that, that app alone is answered 503.
+ * (services/floodGuard.ts): beyond that, that app alone is answered 503; and
+ * once it is half full, one address beyond its share is answered 429.
  */
 async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string, clientIp?: string): Promise<Response> {
-  if (!floodGuard.startWaiting(agent.domain)) return appBusyResponse();
+  const waiting = floodGuard.startWaiting(agent.domain, clientIp);
+  if (waiting === "app") return appBusyResponse();
+  if (waiting === "address") return addressBusyResponse();
   try {
     return await sendRequestToAgent(req, agentWs, agent, tunnelId, clientIp);
   } finally {
-    floodGuard.stopWaiting(agent.domain);
+    floodGuard.stopWaiting(agent.domain, clientIp);
   }
 }
 
@@ -630,6 +636,8 @@ async function startServer() {
 
     // Keep IP rules, admin IP blocks and suspensions the same on every server
     await securitySync.startSecuritySync();
+    // ...and keep the edge cache from answering past them (nginx's cache-off files).
+    edgeCacheRules.startEdgeCacheRules();
 
     // Initialize cross-server routing
     crossServerService.initCrossServerRouting();
@@ -1256,10 +1264,11 @@ async function startServer() {
           tunnelDomain = hostRoute.name;
         } else if (hostRoute.kind === "custom-candidate") {
           // Not one of ours by name — might be a registered custom domain.
+          // Answered from memory (utils/database.ts), so a MongoDB outage
+          // doesn't take custom domains down.
           try {
-            const { getCustomDomainByName } = await import("./utils/database");
-            const customDomain = await getCustomDomainByName(hostname);
-            if (customDomain && customDomain.active) {
+            const { isActiveCustomDomain } = await import("./utils/database");
+            if (await isActiveCustomDomain(hostname)) {
               tunnelDomain = hostname;
               isCustomDomainRequest = true;
             }
@@ -1326,16 +1335,14 @@ async function startServer() {
         if (tunnelDomain) {
           const subdomain = tunnelDomain; // For backward compatibility with existing code
 
-          // Flood protection (services/floodGuard.ts): a blocked address is
-          // refused before any routing work, and one sending far more than any
-          // person would is blocked on every edge. A request another edge
+          // Flood protection (services/floodGuard.ts): a blocked address (for
+          // this app, or by hand for every app) is refused before any routing
+          // work, and so is a flood of this app. A request another edge
           // forwarded here was counted there.
-          const block = securityService.activeBlock(clientIp);
+          const block = securityService.activeBlock(clientIp) ?? securityService.activeAppBlock(floodKey(clientIp), subdomain);
           if (block) return blockedResponse(block);
-          if (floodGuard.count(clientIp, subdomain, isFromPeer(req.headers))) {
-            const now = securityService.activeBlock(clientIp);
-            if (now) return blockedResponse(now);
-          }
+          const flood = floodGuard.count(clientIp, subdomain, isFromPeer(req.headers));
+          if (flood) return blockedResponse(flood);
 
           // Check if agent is on this server or needs cross-server routing
           const routeResult = await crossServerService.findServerForDomain(subdomain);
@@ -2120,13 +2127,9 @@ async function startServer() {
 
         // Get security stats (requires admin auth)
         if (path === "/security/stats" && method === "GET") {
-          const authContext = await authenticateRequest(req);
-          if (!authContext || authContext.user?.role !== 'super_admin') {
-            return addCors(new Response(
-              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
-              { status: 401, headers: { "Content-Type": "application/json" } }
-            ));
-          }
+          // A super admin, or the server key (operators on an edge).
+          const authError = await requireServerKeyOrSuperAdmin(req);
+          if (authError) return addCors(authError);
           const stats = securityService.getSecurityStats();
           return addCors(new Response(
             JSON.stringify({ success: true, stats }),
@@ -2136,16 +2139,12 @@ async function startServer() {
 
         // Get blocked IPs (requires admin auth)
         if (path === "/security/blocked-ips" && method === "GET") {
-          const authContext = await authenticateRequest(req);
-          if (!authContext || authContext.user?.role !== 'super_admin') {
-            return addCors(new Response(
-              JSON.stringify({ success: false, message: "Unauthorized - Admin access required" }),
-              { status: 401, headers: { "Content-Type": "application/json" } }
-            ));
-          }
-          const blockedIps = securityService.getBlockedIps();
+          // A super admin, or the server key (operators on an edge).
+          const authError = await requireServerKeyOrSuperAdmin(req);
+          if (authError) return addCors(authError);
+          // blockedIps: every app (by hand); appBlocks: one app each (floods).
           return addCors(new Response(
-            JSON.stringify({ success: true, blockedIps }),
+            JSON.stringify({ success: true, blockedIps: securityService.getBlockedIps(), appBlocks: securityService.getAppBlocks() }),
             { status: 200, headers: { "Content-Type": "application/json" } }
           ));
         }
@@ -2162,7 +2161,9 @@ async function startServer() {
               { status: 400, headers: { "Content-Type": "application/json" } }
             ));
           }
-          const saveError = await saveSharedRule("block-ip", body.ip, true, { reason: body.reason, durationSeconds: body.duration || 3600 });
+          // handBlockReason: a reason starting "Flood:" would be taken for an
+          // older edge's flood block and applied nowhere.
+          const saveError = await saveSharedRule("block-ip", body.ip, true, { reason: securitySync.handBlockReason(body.reason), durationSeconds: body.duration || 3600 });
           if (saveError) return addCors(saveError);
           return addCors(new Response(
             JSON.stringify({ success: true, message: `IP ${body.ip} blocked` }),
@@ -2175,14 +2176,22 @@ async function startServer() {
           // A super admin, or the server key (X-Admin-Key) as for suspensions.
           const authError = await requireAdminOrServerKey(req);
           if (authError) return addCors(authError);
-          const body = await req.json() as { ip: string };
+          const body = await req.json() as { ip: string; app?: string };
           if (!body.ip) {
             return addCors(new Response(
               JSON.stringify({ success: false, message: "Missing ip" }),
               { status: 400, headers: { "Content-Type": "application/json" } }
             ));
           }
-          const saveError = await saveSharedRule("block-ip", body.ip, false);
+          // With "app", that app's flood block only; else the address's block
+          // and every flood block it has (an IPv6 one is by /64).
+          const address = floodKey(body.ip);
+          const appBlocks = securityService.getAppBlocks().filter((b) => b.ip === address && (!body.app || b.app === body.app));
+          for (const appBlock of appBlocks) {
+            const appError = await saveSharedRule("block-ip-app", `${appBlock.ip}|${appBlock.app}`, false);
+            if (appError) return addCors(appError);
+          }
+          const saveError = body.app ? null : await saveSharedRule("block-ip", body.ip, false);
           if (saveError) return addCors(saveError);
           return addCors(new Response(
             JSON.stringify({ success: true, message: `IP ${body.ip} unblocked` }),
@@ -2712,8 +2721,8 @@ async function startServer() {
         // Check sync queue (for VPS servers to see pending syncs)
         if (path === "/certificates/sync-queue" && method === "GET") {
           try {
-            const { getClient } = await import("./utils/mongodb");
-            const queue = getClient()?.db("jrok").collection("cert_sync_queue");
+            const { getDb } = await import("./utils/mongodb");
+            const queue = getDb()?.collection("cert_sync_queue");
             const pending = await queue?.find({ processed: false }).toArray() || [];
 
             return addCors(new Response(
@@ -2739,8 +2748,8 @@ async function startServer() {
           }
 
           try {
-            const { getClient } = await import("./utils/mongodb");
-            const queue = getClient()?.db("jrok").collection("cert_sync_queue");
+            const { getDb } = await import("./utils/mongodb");
+            const queue = getDb()?.collection("cert_sync_queue");
             await queue?.updateOne(
               { _id: decodeURIComponent(syncId) as any },
               { $set: { processed: true, processedAt: new Date() } }
@@ -2795,6 +2804,9 @@ async function startServer() {
       console.warn("⚠️ ============================================================");
     }
     console.log(`🔐 Auth enabled with API key`);
+    if (serverKeySources().length === 0) {
+      console.warn("⚠️ SERVER_KEY_SOURCES is not set: the server key works from any address. Set it to the edges' (and any operator's) addresses.");
+    }
     console.log(`🔌 WebSocket agent endpoint: ws://localhost:${server.port}/ws/agent`);
 
     // Flush accumulated bandwidth stats to MongoDB every 30 seconds (batched writes)
@@ -2889,25 +2901,27 @@ async function startServer() {
 
     console.log("✅ Certificate sync enabled (reconcile on startup, every 5 minutes, and within 15 s of a new upload)");
 
-    // Graceful shutdown
-    process.on("SIGINT", async () => {
-      console.log("\n🛑 Shutting down...");
-
-      // Flush pending bandwidth stats before exit so no data is lost
-      await statsService.flushBandwidthToMongo().catch(() => {});
-
-      // Shutdown services
-      await crossServerService.shutdownCrossServerRouting();
-      securityService.shutdownSecurityService();
-      securitySync.stopSecuritySync();
-      monitoringService.shutdownMonitoringService();
-
-      // Cleanup TCP tunnels for this server
-      await tcpService.cleanupServerPorts();
-
-      await closeDatabase();
-      process.exit(0);
+    // Graceful shutdown: systemd's SIGTERM (deploys, restarts) and Ctrl-C's
+    // SIGINT both write the usage counted so far; only SIGINT leaves the
+    // cluster (utils/shutdown.ts).
+    const shutdown = shutdownHandler({
+      flush: () => statsService.flushBandwidthToMongo(),
+      stop: () => {
+        securityService.shutdownSecurityService();
+        securitySync.stopSecuritySync();
+        edgeCacheRules.stopEdgeCacheRules();
+        monitoringService.shutdownMonitoringService();
+      },
+      leave: async () => {
+        await crossServerService.shutdownCrossServerRouting();
+        // Cleanup TCP tunnels for this server
+        await tcpService.cleanupServerPorts();
+      },
+      closeDatabase,
+      exit: (code) => process.exit(code),
     });
+    process.on("SIGINT", () => void shutdown("SIGINT"));
+    process.on("SIGTERM", () => void shutdown("SIGTERM"));
   } catch (error) {
     console.error("❌ Failed to start server:", error);
     process.exit(1);

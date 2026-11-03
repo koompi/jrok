@@ -1,47 +1,83 @@
 import { describe, expect, test } from "bun:test";
-import { FloodGuard, FLOOD_REASON_PREFIX, blockedResponse } from "../src/services/floodGuard";
+import { FloodGuard, FLOOD_REASON_PREFIX, blockedResponse, floodKey } from "../src/services/floodGuard";
 
 function guard(overrides: Partial<ConstructorParameters<typeof FloodGuard>[0]> = {}) {
   let clock = 1_000_000;
-  const blocks: Array<{ ip: string; reason: string; seconds: number }> = [];
+  const blocks: Array<{ address: string; app: string; reason: string; seconds: number }> = [];
   const notes: string[] = [];
   const g = new FloodGuard({
     enabled: true,
     requests: 100,
     windowMs: 10_000,
     blockMs: 600_000,
-    maxBlockMs: 86_400_000,
+    maxBlockMs: 3_600_000,
+    repeatMs: 3_600_000,
+    names: 50,
     exempt: ["198.51.100.7", "203.0.113.0/24"],
     appMaxWaiting: 3,
     now: () => clock,
-    block: (ip, reason, seconds) => blocks.push({ ip, reason, seconds }),
+    block: (address, app, reason, seconds) => blocks.push({ address, app, reason, seconds }),
     notify: (m) => notes.push(m),
     ...overrides,
   });
   return { g, blocks, notes, advance: (ms: number) => (clock += ms) };
 }
 
+/** Send n requests; how many were refused. */
 const send = (g: FloodGuard, ip: string, n: number, app = "app", forwarded = false) => {
-  let blocked = false;
-  for (let i = 0; i < n; i++) blocked = g.count(ip, app, forwarded) || blocked;
-  return blocked;
+  let refused = 0;
+  for (let i = 0; i < n; i++) if (g.count(ip, app, forwarded)) refused++;
+  return refused;
 };
 
-describe("blocking floods", () => {
-  test("up to the threshold in the window is fine; one more blocks the address, once", () => {
-    const { g, blocks, notes } = guard();
-    expect(send(g, "192.0.2.1", 100)).toBe(false);
+describe("one address flooding one app", () => {
+  test("up to the threshold is fine; beyond it the rest of the window is refused, and nothing is blocked yet", () => {
+    const { g, blocks, notes, advance } = guard();
+    expect(send(g, "192.0.2.1", 100)).toBe(0);
+    const refusal = g.count("192.0.2.1", "app", false);
+    expect(refusal?.reason.startsWith(FLOOD_REASON_PREFIX)).toBe(true);
+    expect(refusal?.secondsLeft).toBeLessThanOrEqual(10);
+    expect(send(g, "192.0.2.1", 50)).toBe(50);
     expect(blocks).toEqual([]);
-    expect(send(g, "192.0.2.1", 1, "shop")).toBe(true);
-    expect(blocks).toEqual([{ ip: "192.0.2.1", reason: `${FLOOD_REASON_PREFIX} over 100 requests in 10 s`, seconds: 600 }]);
-    expect(notes[0]).toContain("192.0.2.1");
-    expect(notes[0]).toContain("<code>app</code>"); // the app it hit most
+    expect(notes).toEqual([]);
+    advance(10_000);
+    expect(send(g, "192.0.2.1", 100)).toBe(0); // the next window is open again
   });
 
-  test("the same rate spread over more than a window is never blocked", () => {
+  test("3,001 requests to app A never refuse the same address on app B", () => {
+    const { g } = guard({ requests: 3000 });
+    send(g, "192.0.2.10", 3001, "app-a");
+    expect(g.count("192.0.2.10", "app-b", false)).toBeNull();
+    expect(send(g, "192.0.2.10", 500, "app-b")).toBe(0);
+  });
+
+  test("flooding the same app again within the hour blocks it, for that app only, on every edge", () => {
+    const { g, blocks, notes, advance } = guard();
+    send(g, "192.0.2.2", 101, "shop");
+    advance(10_000);
+    expect(send(g, "192.0.2.2", 101, "shop")).toBe(1);
+    expect(blocks).toEqual([{ address: "192.0.2.2", app: "shop", reason: `${FLOOD_REASON_PREFIX} over 100 requests to shop in 10 s`, seconds: 600 }]);
+    expect(notes[0]).toContain("<code>shop</code>");
+    expect(notes[0]).toContain("other apps are served");
+    expect(g.count("192.0.2.2", "blog", false)).toBeNull();
+  });
+
+  test("each further flood within the hour doubles the block, up to an hour; an hour later it starts over", () => {
+    const { g, blocks, advance } = guard();
+    for (let i = 0; i < 6; i++) {
+      send(g, "192.0.2.4", 101);
+      advance(10_000);
+    }
+    expect(blocks.map((b) => b.seconds)).toEqual([600, 1200, 2400, 3600, 3600]);
+    advance(3_600_000);
+    send(g, "192.0.2.4", 101);
+    expect(blocks).toHaveLength(5); // a first flood again: refused for the window, not blocked
+  });
+
+  test("the same rate spread over more than a window is never refused", () => {
     const { g, blocks, advance } = guard();
     for (let s = 0; s < 6; s++) {
-      expect(send(g, "192.0.2.2", 90)).toBe(false);
+      expect(send(g, "192.0.2.3", 90)).toBe(0);
       advance(10_000);
     }
     expect(blocks).toEqual([]);
@@ -49,46 +85,108 @@ describe("blocking floods", () => {
 
   test("addresses are counted apart (a page load from many people is fine)", () => {
     const { g, blocks } = guard();
-    for (let i = 1; i <= 50; i++) send(g, `192.0.2.${i}`, 60);
+    for (let i = 1; i <= 50; i++) expect(send(g, `192.0.2.${i}`, 60)).toBe(0);
     expect(blocks).toEqual([]);
+  });
+
+  test("an IPv6 /64 counts as one address", () => {
+    expect(floodKey("2001:db8:1:2:aaaa::1")).toBe("2001:db8:1:2::/64");
+    expect(floodKey("[2001:DB8:1:2::bbbb]")).toBe("2001:db8:1:2::/64");
+    expect(floodKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(floodKey("::ffff:192.0.2.9")).toBe("192.0.2.9");
+    const { g } = guard();
+    send(g, "2001:db8:1:2::1", 60);
+    expect(send(g, "2001:db8:1:2::2", 60)).toBe(20);
+    expect(send(g, "2001:db8:1:3::1", 60)).toBe(0);
   });
 
   test("exempt, private, unknown and forwarded requests are never counted", () => {
     const { g, blocks } = guard();
-    send(g, "198.51.100.7", 500);
-    send(g, "203.0.113.99", 500);
-    send(g, "10.130.0.15", 500);
-    send(g, "127.0.0.1", 500);
-    send(g, "unknown", 500);
-    send(g, "192.0.2.3", 500, "app", true);
+    expect(send(g, "198.51.100.7", 500)).toBe(0);
+    expect(send(g, "203.0.113.99", 500)).toBe(0);
+    expect(send(g, "10.130.0.15", 500)).toBe(0);
+    expect(send(g, "127.0.0.1", 500)).toBe(0);
+    expect(send(g, "unknown", 500)).toBe(0);
+    expect(send(g, "192.0.2.5", 500, "app", true)).toBe(0);
     expect(blocks).toEqual([]);
   });
 
-  test("an address that comes back the same day is blocked twice as long each time, up to the cap", () => {
-    const { g, blocks, advance } = guard({ maxBlockMs: 2_000_000 });
-    for (let i = 0; i < 3; i++) {
-      send(g, "192.0.2.4", 101);
-      advance(700_000);
-    }
-    expect(blocks.map((b) => b.seconds)).toEqual([600, 1200, 2000]);
-  });
-
-  test("off: nothing is counted or blocked", () => {
+  test("off: nothing is counted or refused", () => {
     const { g, blocks } = guard({ enabled: false });
-    send(g, "192.0.2.5", 1000);
+    expect(send(g, "192.0.2.6", 1000)).toBe(0);
     expect(blocks).toEqual([]);
+  });
+});
+
+describe("one address asking for names at random", () => {
+  test("over the limit of different names, it is refused every app on this edge alone", () => {
+    const { g, blocks, notes, advance } = guard();
+    for (let i = 0; i < 50; i++) expect(g.count("192.0.2.7", `random-${i}`, false)).toBeNull();
+    expect(g.count("192.0.2.7", "random-50", false)?.secondsLeft).toBe(600);
+    expect(g.count("192.0.2.7", "real-app", false)).not.toBeNull();
+    expect(blocks).toEqual([]); // not saved for the other edges
+    expect(notes[0]).toContain("this edge");
+    advance(600_000);
+    expect(g.count("192.0.2.7", "real-app", false)).toBeNull();
+  });
+
+  test("a crowd behind one address using a few apps a lot is not that", () => {
+    const { g } = guard();
+    for (let i = 0; i < 90; i++) for (const app of ["exam", "school-site", "live-0123456789"]) g.count("192.0.2.8", app, false);
+    expect(g.count("192.0.2.8", "exam", false)).toBeNull();
   });
 });
 
 describe("one app can't take an edge over", () => {
   test("at most appMaxWaiting of an app's requests wait; other apps are unaffected", () => {
     const { g } = guard();
-    expect([g.startWaiting("busy"), g.startWaiting("busy"), g.startWaiting("busy")]).toEqual([true, true, true]);
-    expect(g.startWaiting("busy")).toBe(false);
-    expect(g.startWaiting("other")).toBe(true);
+    expect([g.startWaiting("busy"), g.startWaiting("busy"), g.startWaiting("busy")]).toEqual(["ok", "ok", "ok"]);
+    expect(g.startWaiting("busy")).toBe("app");
+    expect(g.startWaiting("other")).toBe("ok");
     g.stopWaiting("busy");
-    expect(g.startWaiting("busy")).toBe(true);
+    expect(g.startWaiting("busy")).toBe("ok");
     expect(g.waitingFor("busy")).toBe(3);
+  });
+});
+
+describe("one address can't take an app's waiting slots", () => {
+  // 1000 slots: from 500 waiting on, one address may have 100.
+  const wait = (g: FloodGuard, ip: string, n: number) => {
+    const results: string[] = [];
+    for (let i = 0; i < n; i++) results.push(g.startWaiting("slow-report", ip));
+    return results;
+  };
+
+  test("once the app is half full, an address with its share waiting is refused, and another still gets in", () => {
+    const { g } = guard({ appMaxWaiting: 1000 });
+    expect(wait(g, "192.0.2.20", 500).every((r) => r === "ok")).toBe(true); // nobody else: no share below half
+    expect(g.startWaiting("slow-report", "192.0.2.20")).toBe("address");
+    expect(g.startWaiting("slow-report", "192.0.2.21")).toBe("ok");
+    expect(g.startWaiting("other-app", "192.0.2.20")).toBe("ok");
+    // As its requests are answered, it gets slots again.
+    for (let i = 0; i < 401; i++) g.stopWaiting("slow-report", "192.0.2.20");
+    expect(g.startWaiting("slow-report", "192.0.2.20")).toBe("ok");
+  });
+
+  test("many people behind one address are not refused while the app keeps up", () => {
+    const { g } = guard({ appMaxWaiting: 1000 });
+    expect(wait(g, "192.0.2.22", 499).every((r) => r === "ok")).toBe(true);
+  });
+
+  test("an address with many waiting can't keep the others out: they fill the app to its cap", () => {
+    const { g } = guard({ appMaxWaiting: 1000 });
+    wait(g, "192.0.2.23", 600);
+    let others = 0;
+    for (let i = 0; i < 1000; i++) if (g.startWaiting("slow-report", `198.18.${Math.floor(i / 99)}.${i % 99}`) === "ok") others++;
+    expect(others).toBe(500); // what the first address left
+    expect(g.startWaiting("slow-report", "192.0.2.24")).toBe("app");
+  });
+
+  test("exempt and private addresses have no share", () => {
+    const { g } = guard({ appMaxWaiting: 1000 });
+    wait(g, "192.0.2.25", 500);
+    expect(wait(g, "198.51.100.7", 200).every((r) => r === "ok")).toBe(true);
+    expect(wait(g, "10.0.0.9", 200).every((r) => r === "ok")).toBe(true);
   });
 });
 

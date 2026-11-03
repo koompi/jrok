@@ -978,6 +978,28 @@ export function getTunnelIpSecurity(tunnelId: string): TunnelIpSecurity {
 }
 
 /**
+ * Every key (tunnel id or domain) whose IP rules turn someone away: an
+ * allowlist (an empty one refuses everybody), or a blocklist with addresses.
+ * The edge cache leaves these apps to jrok (services/edgeCacheRules.ts).
+ */
+export function ipRestrictedKeys(): string[] {
+  const keys: string[] = [];
+  for (const [key, security] of ipSecurityCache) {
+    if (security.mode === 'allowlist' || (security.mode === 'blocklist' && (security.blockedIps?.length ?? 0) > 0)) {
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
+let ipSecurityLoaded = false;
+
+/** True once loadIpSecurityFromDb has read every tunnel's rules. */
+export function ipSecurityLoadedFromDb(): boolean {
+  return ipSecurityLoaded;
+}
+
+/**
  * In force at once on this server, under that key only, saved nowhere: for
  * rules an agent brought, until its tunnel record exists (P33).
  */
@@ -1150,6 +1172,7 @@ export async function loadIpSecurityFromDb(): Promise<void> {
     for (const tunnel of tunnels) {
       applyTunnelIpSecurity(tunnel);
     }
+    ipSecurityLoaded = true;
 
     console.log(`📋 Loaded IP security settings for ${ipSecurityCache.size} tunnels from DB`);
   } catch (error) {
@@ -1194,6 +1217,45 @@ export function activeBlock(ip: string): { reason: string; secondsLeft: number }
     return null;
   }
   return { reason: blocked.reason, secondsLeft: Math.ceil(left / 1000) };
+}
+
+// An address blocked for one app only: the flood guard's blocks
+// (services/floodGuard.ts), keyed `${address}|${app}`. The address keeps every
+// other app.
+const appBlocks = new Map<string, BlockedIp & { app: string }>();
+
+export function blockIpForApp(address: string, app: string, reason: string, durationSeconds: number): void {
+  const now = Date.now();
+  appBlocks.set(`${address}|${app}`, { ip: address, app, reason, blockedAt: now, expiresAt: now + durationSeconds * 1000 });
+  console.log(`🚫 Blocked ${address} for ${app} for ${durationSeconds}s: ${reason}`);
+}
+
+export function unblockIpForApp(address: string, app: string): void {
+  if (appBlocks.delete(`${address}|${app}`)) console.log(`✅ Unblocked ${address} for ${app}`);
+}
+
+/** The block on `address` for `app` in force now, or null. */
+export function activeAppBlock(address: string, app: string): { reason: string; secondsLeft: number } | null {
+  const key = `${address}|${app}`;
+  const blocked = appBlocks.get(key);
+  if (!blocked) return null;
+  const left = blocked.expiresAt - Date.now();
+  if (left <= 0) {
+    appBlocks.delete(key);
+    return null;
+  }
+  return { reason: blocked.reason, secondsLeft: Math.ceil(left / 1000) };
+}
+
+/** Every per-app block in force. */
+export function getAppBlocks(): Array<BlockedIp & { app: string }> {
+  const now = Date.now();
+  const result: Array<BlockedIp & { app: string }> = [];
+  for (const [key, entry] of appBlocks) {
+    if (entry.expiresAt > now) result.push(entry);
+    else appBlocks.delete(key);
+  }
+  return result;
 }
 
 export function isIpBlocked(ip: string): boolean {

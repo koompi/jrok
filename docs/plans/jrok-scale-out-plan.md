@@ -408,6 +408,8 @@ A third run was disturbed by a deploy and is left out. So capacity adds up with 
   - shared through securitySync, so the other edges apply it within 10 s;
   - refused with 429 before any routing work, with an alert to Telegram.
 
+  **Changed 2026-11-03 (audit jrok-edge#3):** that shut a school or carrier address out of every app on every edge. Counting is now per address (IPv6 by /64) and per app: over 3,000 requests to one app in 10 s refuses the rest of that window for that app only; a second flood within the hour blocks the address for that app on every edge, 10 minutes doubling up to an hour. An address asking one edge for over 500 different names in 10 s is refused there only (every app, 10 minutes). Flood blocks of every app saved by older edges are no longer applied.
+
   Never blocked: `flood_exempt` (production: the deploy workers' addresses), private addresses, and requests forwarded between edges. Agents and jrok's API are never counted.
 - **One app's flood:** at most 1,000 of an app's requests wait at once for it to start answering (per edge, `app_max_waiting`). Beyond that, that app alone gets 503 (`X-Jrok-App-Busy`), and every other app is served normally.
 - **Connection floods:** nginx caps simultaneous connections per address at 1,000 (with HTTP/2, each request in flight counts) and answers 429 beyond that. Agents and other edges are not counted.

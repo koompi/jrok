@@ -7,6 +7,18 @@
  * when most checkers that can see it say it is down, and comes back when most
  * say it is up. A checker never judges its own edge: a machine can't tell
  * whether the internet reaches it.
+ *
+ * Checkers are grouped by region (DNS_HEALTH_EDGES id=address@region; the
+ * default region when none is given). Each region's checkers give one view
+ * of an edge, as above, and the edge leaves when most regions say it is down.
+ * With every edge in one region (today's Singapore edges) that is exactly the
+ * rule above. With two regions, a cut between them is not taken for an outage:
+ * the region that can't reach the other outvoted it by numbers (three
+ * Singapore checkers would take both Cambodian edges out, though Cambodian
+ * visitors still reach them). A split between regions leaves the edge as it
+ * is. A region that is really down usually can't reach MongoDB either, so its
+ * votes go stale and the other regions decide; a checker in a third place
+ * tells the two apart when they can't.
  */
 
 export interface Edge {
@@ -14,6 +26,8 @@ export interface Edge {
   id: string;
   /** The address visitors reach it on: an IPv4 (A record) or IPv6 (AAAA) address. */
   address: string;
+  /** Where it is (DNS_HEALTH_EDGES id=address@region); DEFAULT_REGION when not given. */
+  region?: string;
 }
 
 export interface Vote {
@@ -22,7 +36,11 @@ export interface Vote {
   healthy: boolean;
   /** The address the checker probed (absent from checkers older than this field). */
   address?: string;
+  /** The checker's region (absent from checkers older than this field: the default region). */
+  region?: string;
 }
+
+export const DEFAULT_REGION = "default";
 
 export type Verdict = "up" | "down" | "unknown";
 
@@ -48,26 +66,43 @@ export function nextProbeState(
 }
 
 /**
- * Each edge's verdict from the checkers' current votes: "down" only when more
- * checkers say down than up, so one checker on a bad network path can't take a
- * healthy edge out. "unknown" when no other checker voted (left as it is).
- * Only votes about the edge's own address count.
+ * Each region's view of an edge: "down" when more of its checkers say down
+ * than up, so one checker on a bad network path can't take a healthy edge
+ * out; else "up". Only votes about the edge's own address count, and never
+ * the edge's own checker's.
+ */
+export function regionViews(edge: Edge, votes: Vote[]): Map<string, "up" | "down"> {
+  const tally = new Map<string, { up: number; down: number }>();
+  for (const vote of votes) {
+    if (vote.edge !== edge.id || vote.checker === edge.id) continue;
+    // A checker that knows this edge by another address probed another
+    // machine: an edge replaced under the same id, with the checkers'
+    // settings not all updated yet.
+    if (vote.address !== undefined && vote.address !== edge.address) continue;
+    const region = vote.region || DEFAULT_REGION;
+    const t = tally.get(region) ?? { up: 0, down: 0 };
+    if (vote.healthy) t.up++;
+    else t.down++;
+    tally.set(region, t);
+  }
+  return new Map([...tally].map(([region, t]) => [region, t.down > t.up ? "down" : "up"]));
+}
+
+/**
+ * Each edge's verdict from the checkers' current votes: "down" when most
+ * regions see it down, "up" when most see it up. "unknown" (left as it is)
+ * when no other checker voted, or the regions are split evenly.
  */
 export function verdicts(edges: Edge[], votes: Vote[]): Map<string, Verdict> {
   const result = new Map<string, Verdict>();
   for (const edge of edges) {
     let up = 0;
     let down = 0;
-    for (const vote of votes) {
-      if (vote.edge !== edge.id || vote.checker === edge.id) continue;
-      // A checker that knows this edge by another address probed another
-      // machine: an edge replaced under the same id, with the checkers'
-      // settings not all updated yet.
-      if (vote.address !== undefined && vote.address !== edge.address) continue;
-      if (vote.healthy) up++;
-      else down++;
+    for (const view of regionViews(edge, votes).values()) {
+      if (view === "down") down++;
+      else up++;
     }
-    result.set(edge.id, up + down === 0 ? "unknown" : down > up ? "down" : "up");
+    result.set(edge.id, down > up ? "down" : up > down ? "up" : "unknown");
   }
   return result;
 }
@@ -118,17 +153,20 @@ export function leftoverAddresses(
   return [...new Set(records.filter((r) => r.managed && !known.has(r.content) && !probed.has(r.content)).map((r) => r.content))];
 }
 
-/** "id=address,id=address" (DNS_HEALTH_EDGES) as edges; malformed entries are refused. */
+/** "id=address[@region],…" (DNS_HEALTH_EDGES) as edges; malformed entries are refused. */
 export function parseEdges(raw: string | undefined): Edge[] {
   const edges: Edge[] = [];
   for (const entry of (raw || "").split(",").map((s) => s.trim()).filter(Boolean)) {
     const eq = entry.indexOf("=");
     const id = entry.slice(0, eq).trim();
-    const address = entry.slice(eq + 1).trim();
-    if (eq <= 0 || !/^[A-Za-z0-9._-]+$/.test(id) || !isIpAddress(address)) {
-      throw new Error(`DNS_HEALTH_EDGES: "${entry}" is not id=ip-address`);
+    const rest = entry.slice(eq + 1).trim();
+    const at = rest.lastIndexOf("@");
+    const address = (at === -1 ? rest : rest.slice(0, at)).trim();
+    const region = at === -1 ? undefined : rest.slice(at + 1).trim();
+    if (eq <= 0 || !/^[A-Za-z0-9._-]+$/.test(id) || !isIpAddress(address) || (region !== undefined && !/^[A-Za-z0-9._-]+$/.test(region))) {
+      throw new Error(`DNS_HEALTH_EDGES: "${entry}" is not id=ip-address or id=ip-address@region`);
     }
-    edges.push({ id, address });
+    edges.push(region === undefined ? { id, address } : { id, address, region });
   }
   return edges;
 }

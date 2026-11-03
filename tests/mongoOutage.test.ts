@@ -96,6 +96,7 @@ mock.module("../src/utils/mongodb", () => ({
 const agentService = await import("../src/services/agentService");
 const agentGroupService = await import("../src/services/agentGroupService");
 const crossServer = await import("../src/services/crossServerService");
+const database = await import("../src/utils/database");
 
 const openSocket = () => ({ readyState: 1, send: () => 1, close: () => {} }) as any;
 const settle = () => new Promise((r) => setTimeout(r, 20));
@@ -192,6 +193,43 @@ describe("MongoDB unreachable", () => {
     setSystemTime(new Date(Date.now() + 60_000)); // peer's heartbeat would look 60 s old
     const during = await crossServer.findServerForDomain("remote-app");
     expect(during.targetServer?.serverId).toBe("peer-r1");
+  });
+});
+
+describe("custom domains, MongoDB unreachable", () => {
+  test("a custom domain keeps being routed after every cache has expired, with one query for all of them", async () => {
+    database.resetActiveCustomDomains();
+    coll("customDomains").docs.push(
+      { domain: "shop.example.com", active: true },
+      { domain: "Blog.Example.org", active: true },
+      { domain: "pending.example.net", active: false },
+    );
+    const finds = () => ops.filter((op) => op === "customDomains.find").length;
+    const before = finds();
+    expect(await database.isActiveCustomDomain("shop.example.com")).toBe(true);
+    expect(await database.isActiveCustomDomain("blog.example.org")).toBe(true);
+    expect(await database.isActiveCustomDomain("pending.example.net")).toBe(false);
+    for (let i = 0; i < 50; i++) await database.isActiveCustomDomain(`scanner-${i}.example`);
+    expect(finds() - before).toBe(1);
+
+    mongoDown = true;
+    setSystemTime(new Date(Date.now() + 10 * 60_000)); // every TTL long gone
+    const started = performance.now();
+    expect(await database.isActiveCustomDomain("shop.example.com")).toBe(true);
+    expect(await database.isActiveCustomDomain("unknown.example")).toBe(false);
+    await settle(); // the reload in the background fails; what is known stays
+    expect(await database.isActiveCustomDomain("blog.example.org")).toBe(true);
+    expect(performance.now() - started).toBeLessThan(1_000); // never waited on MongoDB
+  });
+
+  test("a domain this server activates or deletes is routed, or not, at once", async () => {
+    database.resetActiveCustomDomains();
+    coll("customDomains").docs.push({ domain: "new.example.com", active: false });
+    expect(await database.isActiveCustomDomain("new.example.com")).toBe(false);
+    await database.updateCustomDomainByName("new.example.com", { active: true });
+    expect(await database.isActiveCustomDomain("new.example.com")).toBe(true);
+    await database.deleteCustomDomainByName("new.example.com");
+    expect(await database.isActiveCustomDomain("new.example.com")).toBe(false);
   });
 });
 

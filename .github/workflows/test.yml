@@ -1,0 +1,64 @@
+# Every push and pull request: the server's tests (bun test, with a throwaway
+# MongoDB), the connector's (cargo test, clippy), and the Ansible nginx role on
+# nginx 1.18 (scripts/nginx-check-role.sh). Needs no secrets.
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    runs-on: ubuntu-24.04
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      # A database named jrok_test… (tests/helpers/testMongo.ts). MONGODB_TEST_URI
+      # also turns on the tests that need MongoDB (startupCleanup, dnsHealth).
+      MONGODB_URI: mongodb://127.0.0.1:27017/jrok_test_ci
+      MONGODB_TEST_URI: mongodb://127.0.0.1:27017/jrok_test_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # What the edges run (bun_version in the Ansible app role).
+          bun-version: 1.3.4
+      - run: bun install --frozen-lockfile
+      - run: bun test
+
+  connector:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: connector
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: connector
+      - run: cargo test --locked
+      # Warnings fail the job, but two: rlim_t's width differs by platform, so
+      # its casts stay (unnecessary_cast), and field_reassign_with_default is style.
+      - run: cargo clippy --all-targets --locked -- -D warnings -A clippy::unnecessary_cast -A clippy::field_reassign_with_default
+
+  nginx-role:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.4
+      - run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends python3-jinja2 python3-yaml
+      - run: scripts/nginx-check-role.sh

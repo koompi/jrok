@@ -265,7 +265,8 @@ export async function handleDeleteDomain(domain: string, authContext: AuthContex
     return new Response(
       JSON.stringify({
         success: true,
-        message: "Domain deleted successfully",
+        // Left in place, a CNAME keeps sending the domain's visitors to the edges.
+        message: `Domain deleted. Remove its CNAME or TXT record for ${domain} at your DNS provider too.`,
       } as DomainResponse),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );

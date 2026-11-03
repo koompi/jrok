@@ -9,7 +9,7 @@
 # installs): the code and the playbook, never the working tree. The inventory is ansible/inventory.production.ini
 # (not committed). Secrets are read from the first production edge's
 # jrok.service, certbot and GeoIP files at run time, so they are kept in one
-# place and never printed; JROK_PEER_KEY (and Telegram, when set) come from
+# place and never printed; JROK_PEER_KEY (and Telegram and JROK_CERT_KEY, when set) come from
 # ~/.config/jrok-production/secrets.env. The playbook runs one edge at a time
 # and stops if an edge's agents don't come back (P26).
 set -euo pipefail
@@ -36,7 +36,9 @@ export DASHBOARD_URL; DASHBOARD_URL=$(unit DASHBOARD_URL)
 export CLOUDFLARE_TOKEN; CLOUDFLARE_TOKEN=$($SSH "root@$SOURCE" 'sed -n "s/^dns_cloudflare_api_token *= *//p" /etc/letsencrypt/secrets/cloudflare.ini')
 export MAXMIND_ACCOUNT_ID; MAXMIND_ACCOUNT_ID=$($SSH "root@$SOURCE" 'sed -n "s/^AccountID *//p" /etc/GeoIP.conf')
 export MAXMIND_LICENSE_KEY; MAXMIND_LICENSE_KEY=$($SSH "root@$SOURCE" 'sed -n "s/^LicenseKey *//p" /etc/GeoIP.conf')
-export JROK_PEER_KEY TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}" TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+# JROK_CERT_KEY (certificate private keys encrypted in MongoDB) is optional
+# here; once the edges have one, the playbook refuses a deploy without it.
+export JROK_PEER_KEY TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}" TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}" JROK_CERT_KEY="${JROK_CERT_KEY:-}"
 for v in MONGODB_URI CERT_SYNC_API_KEY JWT_SECRET DASHBOARD_URL CLOUDFLARE_TOKEN JROK_PEER_KEY; do
   [ -n "${!v}" ] || { echo "could not read $v" >&2; exit 1; }
 done
@@ -72,7 +74,7 @@ uvx --from ansible ansible-playbook -i "$INVENTORY_PATH" playbook.yml --tags "$T
   ${JROK_LIMIT:+--limit "$JROK_LIMIT"} ${JROK_ANSIBLE_ARGS:-} | tee -a "$LOG" | \
   { grep -E '^(PLAY RECAP|TASK \[app : (Check application health|Show application status))|fatal|FAILED|ok=|"msg": "✅|agents connected|agents came back' || true; } || status=$?
 if [ "$LOG" != /dev/null ]; then
-  for v in MONGODB_URI CERT_SYNC_API_KEY JWT_SECRET KOOMPI_CLIENT_SECRET CLOUDFLARE_TOKEN MAXMIND_LICENSE_KEY JROK_PEER_KEY TELEGRAM_BOT_TOKEN; do
+  for v in MONGODB_URI CERT_SYNC_API_KEY JWT_SECRET KOOMPI_CLIENT_SECRET CLOUDFLARE_TOKEN MAXMIND_LICENSE_KEY JROK_PEER_KEY TELEGRAM_BOT_TOKEN JROK_CERT_KEY; do
     if [ -n "${!v}" ]; then SECRET="${!v}" perl -pi -e 's/\Q$ENV{SECRET}\E/<redacted>/g' "$LOG"; fi
   done
 fi
