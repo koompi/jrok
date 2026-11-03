@@ -16,6 +16,7 @@ import * as wsProxyService from "./services/wsProxyService";
 import * as tcpService from "./services/tcpService";
 import * as securityService from "./services/securityService";
 import * as securitySync from "./services/securitySync";
+import * as edgeCacheRules from "./services/edgeCacheRules";
 import { decodeFrame, FRAME_RESPONSE_CHUNK } from "./utils/tunnelFrames";
 import * as crossServerService from "./services/crossServerService";
 import * as certSyncService from "./services/certificateSyncService";
@@ -630,6 +631,8 @@ async function startServer() {
 
     // Keep IP rules, admin IP blocks and suspensions the same on every server
     await securitySync.startSecuritySync();
+    // ...and keep the edge cache from answering past them (nginx's cache-off files).
+    edgeCacheRules.startEdgeCacheRules();
 
     // Initialize cross-server routing
     crossServerService.initCrossServerRouting();
@@ -2900,6 +2903,7 @@ async function startServer() {
       await crossServerService.shutdownCrossServerRouting();
       securityService.shutdownSecurityService();
       securitySync.stopSecuritySync();
+      edgeCacheRules.stopEdgeCacheRules();
       monitoringService.shutdownMonitoringService();
 
       // Cleanup TCP tunnels for this server

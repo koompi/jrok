@@ -167,7 +167,7 @@ export function nginxConfigFileName(domain: string): string {
 // its version, edit the new one, bump CUSTOM_DOMAIN_VHOST_VERSION.
 
 /** Version written by generateCustomDomainNginxConfig. */
-export const CUSTOM_DOMAIN_VHOST_VERSION = 4;
+export const CUSTOM_DOMAIN_VHOST_VERSION = 5;
 
 const VHOST_VERSION_MARKER = "# jrok-vhost-template:";
 
@@ -292,6 +292,14 @@ export function generateCustomDomainNginxConfig(domain: string, certPath: string
   return VHOST_RENDERERS[currentVhostVersion()]!(domain, certPath);
 }
 
+function nginxConf(): string {
+  try {
+    return readFileSync(process.env.NGINX_CONF_PATH || "/etc/nginx/nginx.conf", "utf8");
+  } catch {
+    return "";
+  }
+}
+
 /**
  * Does nginx.conf define the edge cache (the `jrok_cache` zone and the
  * `$jrok_not_shareable` map, from the Ansible nginx role)? Template v3 uses
@@ -299,17 +307,47 @@ export function generateCustomDomainNginxConfig(domain: string, certPath: string
  * would accept, stays current. NGINX_CONF_PATH overrides the location.
  */
 export function edgeCacheAvailable(): boolean {
-  try {
-    const conf = readFileSync(process.env.NGINX_CONF_PATH || "/etc/nginx/nginx.conf", "utf8");
-    return conf.includes("keys_zone=jrok_cache") && conf.includes("$jrok_not_shareable");
-  } catch {
-    return false;
-  }
+  const conf = nginxConf();
+  return conf.includes("keys_zone=jrok_cache") && conf.includes("$jrok_not_shareable");
 }
 
-/** The template version this server writes: 4 with the edge cache (Ansible's nginx.conf), else 2. */
+/**
+ * The template version this server writes: 5 where nginx.conf also defines
+ * `$jrok_is_html` and `$jrok_cache_off` (v5 uses them; nginx refuses unknown
+ * variables), 4 with the edge cache alone, else 2.
+ */
 export function currentVhostVersion(): number {
-  return edgeCacheAvailable() ? CUSTOM_DOMAIN_VHOST_VERSION : 2;
+  const conf = nginxConf();
+  if (!conf.includes("keys_zone=jrok_cache") || !conf.includes("$jrok_not_shareable")) return 2;
+  return conf.includes("$jrok_is_html") && conf.includes("$jrok_cache_off") ? CUSTOM_DOMAIN_VHOST_VERSION : 4;
+}
+
+/**
+ * Template v5: v4, with the edge cache keeping no HTML (the rule 906d99f gave
+ * the base domains: after a redeploy, the old page and the old files it names
+ * kept showing) and leaving to jrok every request whose app has IP rules or a
+ * suspension, or whose address is blocked by hand ($jrok_cache_off, kept by
+ * services/edgeCacheRules.ts): cached responses used to skip those checks.
+ * The new key drops what v3 and v4 kept, HTML among it.
+ */
+function generateCustomDomainNginxConfigV5(domain: string, certPath: string): string {
+  return generateCustomDomainNginxConfigV4(domain, certPath)
+    .replace(`${VHOST_VERSION_MARKER} 4\n`, `${VHOST_VERSION_MARKER} 5\n`)
+    .replace(`        # Edge cache: only responses the app marks public / s-maxage, keyed by
+        # host, never with Authorization; served while the app is down.
+        proxy_cache jrok_cache;
+        proxy_cache_key $scheme$host$request_uri;
+        proxy_no_cache $jrok_not_shareable $http_authorization;
+        proxy_cache_bypass $http_authorization;
+`, `        # Edge cache: only responses the app marks public / s-maxage, keyed by
+        # host; never HTML, nor with Authorization, nor what the cache leaves to
+        # jrok ($jrok_cache_off: IP rules, suspensions, addresses blocked by
+        # hand); served while the app is down.
+        proxy_cache jrok_cache;
+        proxy_cache_key v2$scheme$host$request_uri;
+        proxy_no_cache $jrok_not_shareable $jrok_is_html $http_authorization $jrok_cache_off;
+        proxy_cache_bypass $http_authorization $jrok_cache_off;
+`);
 }
 
 /**
@@ -495,4 +533,5 @@ const VHOST_RENDERERS: Record<number, (domain: string, certPath: string) => stri
   2: generateCustomDomainNginxConfigV2,
   3: generateCustomDomainNginxConfigV3,
   4: generateCustomDomainNginxConfigV4,
+  5: generateCustomDomainNginxConfigV5,
 };

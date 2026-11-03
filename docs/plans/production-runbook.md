@@ -139,6 +139,14 @@ On 2026-11-01 the new edges were built first, and edge1's checker, still listing
   - block by hand: `POST /security/block-ip` with `{"ip":"…","reason":"…","duration":3600}`.
 - **One app busy:** its visitors get 503 with `X-Jrok-App-Busy`, and jrok logs `🚦 <app>: N requests already waiting`. The app itself is too slow for its traffic: more replicas, or a look at the app.
 
+## Edge cache
+
+nginx keeps what an app marks shareable (`public` or `s-maxage`, never HTML) and serves it without asking jrok. So jrok tells nginx what to leave to it:
+- **Hosts** of an app with IP rules (an allowlist, or a blocklist with addresses) or a suspension: `/etc/nginx/jrok-cache-off.map`.
+- **Addresses blocked by hand** (`POST /security/block-ip`): `/etc/nginx/jrok-blocked-ips.geo`. Flood blocks are not listed: they protect the apps and tunnels, which cached files don't touch.
+
+Their requests are never answered from the cache nor stored in it, so jrok's checks see each one. jrok rewrites both files and reloads nginx within about 20 s of a change reaching the edge, at most once every 15 s. If nginx refuses them, it puts the old ones back and logs `❌ nginx refused the edge cache rules`; a change logs `🧊 Edge cache rules updated`. Don't edit them by hand: jrok overwrites them.
+
 ## Checks
 
 ```bash

@@ -978,6 +978,28 @@ export function getTunnelIpSecurity(tunnelId: string): TunnelIpSecurity {
 }
 
 /**
+ * Every key (tunnel id or domain) whose IP rules turn someone away: an
+ * allowlist (an empty one refuses everybody), or a blocklist with addresses.
+ * The edge cache leaves these apps to jrok (services/edgeCacheRules.ts).
+ */
+export function ipRestrictedKeys(): string[] {
+  const keys: string[] = [];
+  for (const [key, security] of ipSecurityCache) {
+    if (security.mode === 'allowlist' || (security.mode === 'blocklist' && (security.blockedIps?.length ?? 0) > 0)) {
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
+let ipSecurityLoaded = false;
+
+/** True once loadIpSecurityFromDb has read every tunnel's rules. */
+export function ipSecurityLoadedFromDb(): boolean {
+  return ipSecurityLoaded;
+}
+
+/**
  * In force at once on this server, under that key only, saved nowhere: for
  * rules an agent brought, until its tunnel record exists (P33).
  */
@@ -1150,6 +1172,7 @@ export async function loadIpSecurityFromDb(): Promise<void> {
     for (const tunnel of tunnels) {
       applyTunnelIpSecurity(tunnel);
     }
+    ipSecurityLoaded = true;
 
     console.log(`📋 Loaded IP security settings for ${ipSecurityCache.size} tunnels from DB`);
   } catch (error) {

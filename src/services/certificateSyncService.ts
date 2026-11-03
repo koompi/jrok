@@ -619,7 +619,7 @@ async function refreshUpstreamFile(changes: ConfigChanges, options: { create?: b
   if (update !== null) await writeConfigFile(changes, upstreamPath, update);
 }
 
-type NginxReloadResult = "reloaded" | "test-failed" | "reload-failed" | "unavailable";
+export type NginxReloadResult = "reloaded" | "test-failed" | "reload-failed" | "unavailable";
 
 /**
  * Validate and reload nginx. Does not reload when the config fails `nginx -t`,
@@ -628,7 +628,7 @@ type NginxReloadResult = "reloaded" | "test-failed" | "reload-failed" | "unavail
  * NGINX_BIN, when set, replaces both `nginx -t` and the reload (as
  * `$NGINX_BIN -s reload`, skipping systemctl) — tests point it at a stand-in.
  */
-async function testAndReloadNginx(): Promise<NginxReloadResult> {
+export async function testAndReloadNginx(): Promise<NginxReloadResult> {
   const nginxBin = process.env.NGINX_BIN;
 
   try {

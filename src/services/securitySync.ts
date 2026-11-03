@@ -41,6 +41,12 @@ let lastTunnelChange: Date | null = null;
 let lastRuleChange: Date | null = null;
 let syncTimer: Timer | null = null;
 let syncing = false;
+let loaded = false;
+
+/** True once a sync has read every shared rule (the first one reads them all). */
+export function securityRulesLoaded(): boolean {
+  return loaded;
+}
 // Version (updatedAt) of each rule last applied here, so the overlap doesn't
 // re-apply (and re-log) the same rule on every sync.
 const appliedVersions = new Map<string, number>();
@@ -117,6 +123,7 @@ export async function syncSecurityRules(): Promise<{ tunnels: number; rules: num
     }
     lastRuleChange = newest(lastRuleChange, rule.updatedAt);
   }
+  loaded = true;
 
   return { tunnels: tunnels.length, rules: rules.length };
 }
@@ -153,5 +160,6 @@ export function stopSecuritySync(): void {
 export function resetSecuritySync(): void {
   lastTunnelChange = null;
   lastRuleChange = null;
+  loaded = false;
   appliedVersions.clear();
 }

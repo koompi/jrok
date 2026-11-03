@@ -32,8 +32,10 @@ function fixture(name: string, domain = DOMAIN, certDir = CERT_DIR): string {
     .replaceAll("{{DOMAIN}}", domain);
 }
 
-// Templates v3 and later are written only where nginx.conf defines the edge cache.
+// Templates v3 and later are written only where nginx.conf defines the edge
+// cache; v5 only where it also defines $jrok_is_html and $jrok_cache_off.
 const WITH_EDGE_CACHE = join(import.meta.dir, "fixtures/nginx/nginx-with-edge-cache.conf");
+const WITH_EDGE_CACHE_RULES = join(import.meta.dir, "fixtures/nginx/nginx-with-edge-cache-rules.conf");
 function withNginxConf<T>(path: string, fn: () => T): T {
   const saved = process.env.NGINX_CONF_PATH;
   process.env.NGINX_CONF_PATH = path;
@@ -44,7 +46,7 @@ function withNginxConf<T>(path: string, fn: () => T): T {
 }
 
 describe("current template", () => {
-  const vhost = withNginxConf(WITH_EDGE_CACHE, () => generateCustomDomainNginxConfig(DOMAIN, CERT_DIR));
+  const vhost = withNginxConf(WITH_EDGE_CACHE_RULES, () => generateCustomDomainNginxConfig(DOMAIN, CERT_DIR));
 
   test("is versioned", () => {
     expect(vhostTemplateVersion(vhost)).toBe(CUSTOM_DOMAIN_VHOST_VERSION);
@@ -63,14 +65,31 @@ describe("current template", () => {
   test("is recognised as unedited despite a different timestamp, and needs no upgrade", () => {
     const later = vhost.replace(/^# Generated: .*$/m, "# Generated: 2030-01-01T00:00:00.000Z");
     expect(isUnmodifiedGeneratedVhost(later, DOMAIN, CERT_DIR)).toBe(true);
-    withNginxConf(WITH_EDGE_CACHE, () => expect(vhostNeedsUpgrade(later, DOMAIN, CERT_DIR)).toBe(false));
+    withNginxConf(WITH_EDGE_CACHE_RULES, () => expect(vhostNeedsUpgrade(later, DOMAIN, CERT_DIR)).toBe(false));
   });
 
   test("uses the edge cache, keyed by host, never for Authorization", () => {
     expect(vhost).toContain("proxy_cache jrok_cache;");
-    expect(vhost).toContain("proxy_cache_key $scheme$host$request_uri;");
-    expect(vhost).toContain("proxy_no_cache $jrok_not_shareable $http_authorization;");
+    expect(vhost).toContain("proxy_cache_key v2$scheme$host$request_uri;");
+    expect(vhost).toMatch(/proxy_no_cache \$jrok_not_shareable .*\$http_authorization/);
+    expect(vhost).toMatch(/proxy_cache_bypass \$http_authorization/);
     expect(vhost).not.toContain("proxy_cache_lock");
+  });
+
+  test("keeps no HTML in the edge cache, as the base domains don't (906d99f)", () => {
+    expect(vhost).toMatch(/proxy_no_cache [^;]*\$jrok_is_html[^;]*;/);
+  });
+
+  test("leaves to jrok what has IP rules, a suspension or a blocked address: neither served from the cache nor stored", () => {
+    expect(vhost).toMatch(/proxy_no_cache [^;]*\$jrok_cache_off[^;]*;/);
+    expect(vhost).toMatch(/proxy_cache_bypass [^;]*\$jrok_cache_off[^;]*;/);
+  });
+
+  test("a new cache key, so what v3 and v4 kept (HTML among it) is never served again", () => {
+    for (const version of [3, 4]) {
+      expect(renderVhostTemplate(version, DOMAIN, CERT_DIR)).toContain("proxy_cache_key $scheme$host$request_uri;");
+    }
+    expect(vhost).not.toContain("proxy_cache_key $scheme$host$request_uri;");
   });
 
   test("certificate challenges on port 80 go to jrok, marked; HTTPS clears the marker", () => {
@@ -82,11 +101,24 @@ describe("current template", () => {
     expect(https).toContain('proxy_set_header X-Jrok-Acme-Challenge "";');
   });
 
-  test("unedited v3 vhosts upgrade to it; edited ones don't", () => {
-    const v3 = renderVhostTemplate(3, DOMAIN, CERT_DIR);
-    expect(withNginxConf(WITH_EDGE_CACHE, () => vhostNeedsUpgrade(v3, DOMAIN, CERT_DIR))).toBe(true);
-    const edited = v3.replace("proxy_read_timeout 3600s;", "proxy_read_timeout 7200s;");
-    expect(withNginxConf(WITH_EDGE_CACHE, () => vhostNeedsUpgrade(edited, DOMAIN, CERT_DIR))).toBe(false);
+  test("unedited v3 and v4 vhosts upgrade to it; edited ones don't", () => {
+    for (const version of [3, 4]) {
+      const older = renderVhostTemplate(version, DOMAIN, CERT_DIR);
+      expect(withNginxConf(WITH_EDGE_CACHE_RULES, () => vhostNeedsUpgrade(older, DOMAIN, CERT_DIR))).toBe(true);
+      const edited = older.replace("proxy_read_timeout 3600s;", "proxy_read_timeout 7200s;");
+      expect(withNginxConf(WITH_EDGE_CACHE_RULES, () => vhostNeedsUpgrade(edited, DOMAIN, CERT_DIR))).toBe(false);
+    }
+  });
+});
+
+describe("an edge whose nginx.conf predates the cache-off rules", () => {
+  // v5 there would name variables nginx doesn't know: nginx -t fails, and
+  // reconcile would roll it back on every run.
+  test("keeps writing v4, and its v4 vhosts stay", () => {
+    const vhost = withNginxConf(WITH_EDGE_CACHE, () => generateCustomDomainNginxConfig(DOMAIN, CERT_DIR));
+    expect(vhostTemplateVersion(vhost)).toBe(4);
+    expect(vhost).not.toContain("$jrok_cache_off");
+    expect(withNginxConf(WITH_EDGE_CACHE, () => vhostNeedsUpgrade(vhost, DOMAIN, CERT_DIR))).toBe(false);
   });
 });
 
