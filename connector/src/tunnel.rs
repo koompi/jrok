@@ -152,7 +152,7 @@ impl Conn {
         self.tcp_backlog.fetch_add(bytes, Ordering::SeqCst);
     }
 
-    /// `bytes` were written to a TCP service, or never will be.
+    /// `bytes` left the queue for a TCP service (written, or never will be).
     pub fn tcp_written(&self, bytes: usize) {
         let before = self.tcp_backlog.fetch_sub(bytes, Ordering::SeqCst);
         if before >= TCP_LOW_WATER && before - bytes < TCP_LOW_WATER {
@@ -160,7 +160,7 @@ impl Conn {
         }
     }
 
-    fn tcp_backlog(&self) -> usize {
+    pub(crate) fn tcp_backlog(&self) -> usize {
         self.tcp_backlog.load(Ordering::SeqCst)
     }
 

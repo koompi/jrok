@@ -48,7 +48,11 @@ pub fn connect(conn: Arc<Conn>, message: &Value) {
 }
 
 async fn relay(conn: &Arc<Conn>, id: &str, host: &str, port: u16, rx: &mut mpsc::UnboundedReceiver<ToLocal>) {
-    let stream = match TcpStream::connect((host, port)).await {
+    let connecting = tokio::select! {
+        connecting = TcpStream::connect((host, port)) => connecting,
+        _ = conn.closed.cancelled() => return,
+    };
+    let stream = match connecting {
         Ok(s) => s,
         Err(e) => {
             conn.out.err(format!("❌ TCP Error: {host}:{port} [{id}]: {e}"));
@@ -87,9 +91,10 @@ async fn relay(conn: &Arc<Conn>, id: &str, host: &str, port: u16, rx: &mut mpsc:
         while let Some(command) = rx.recv().await {
             match command {
                 ToLocal::Data(bytes) => {
-                    let written = writer.write_all(&bytes).await;
+                    // Off the count as it leaves the queue: a write cut short
+                    // (the service or the link ended) can't leave it counted.
                     conn.tcp_written(bytes.len());
-                    written?;
+                    writer.write_all(&bytes).await?;
                 }
                 ToLocal::Close => break,
             }
@@ -173,4 +178,40 @@ mod tests {
         assert_eq!(got.len(), data.len(), "the connection was cut off");
         assert!(got == data, "bytes were reordered or changed");
     }
+
+    /// A service that hangs up its side without reading what it was sent
+    /// (a failed login, say), while our write to it is stuck: when the
+    /// connection ends, none of its bytes may still hold the tunnel's link back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_that_ends_mid_write_leaves_nothing_counted() {
+        use tokio::io::AsyncWriteExt;
+        let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        socket.set_recv_buffer_size(64 * 1024).unwrap();
+        socket.bind(&"127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap().into()).unwrap();
+        socket.listen(8).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(socket.into()).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let _ = s.shutdown().await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let (conn, _sent, _lines) = testing::conn(port, &[]);
+        super::connect(conn.clone(), &json!({ "connectionId": "c1", "localHost": "127.0.0.1", "localPort": port }));
+        for chunk in pattern(6 << 20).chunks(64 * 1024) {
+            super::data(&conn, &tcp_data(chunk));
+        }
+        for _ in 0..100 {
+            if conn.tcp_conns.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(conn.tcp_conns.lock().unwrap().is_empty(), "the connection didn't end");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(conn.tcp_backlog(), 0);
+    }
 }
+
