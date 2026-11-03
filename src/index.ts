@@ -26,7 +26,7 @@ import { connectDatabase, closeDatabase, createDistributedStateIndexes, cleanupS
 import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { purgeExpiredCaches } from "./utils/database";
 import { initTelegram, notifyOperators } from "./services/notificationService";
-import { FloodGuard, floodGuardOptionsFromEnv, blockedResponse, appBusyResponse, floodKey } from "./services/floodGuard";
+import { FloodGuard, floodGuardOptionsFromEnv, blockedResponse, appBusyResponse, addressBusyResponse, floodKey } from "./services/floodGuard";
 import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
 import * as planLimitService from "./services/planLimitService";
@@ -310,14 +310,17 @@ function answerAgentsPendingRequests(agentId: string): void {
 /**
  * A request for the app, sent to its agent; resolves when the app starts
  * answering. At most APP_MAX_WAITING of an app's requests wait at once
- * (services/floodGuard.ts): beyond that, that app alone is answered 503.
+ * (services/floodGuard.ts): beyond that, that app alone is answered 503; and
+ * once it is half full, one address beyond its share is answered 429.
  */
 async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string, clientIp?: string): Promise<Response> {
-  if (!floodGuard.startWaiting(agent.domain)) return appBusyResponse();
+  const waiting = floodGuard.startWaiting(agent.domain, clientIp);
+  if (waiting === "app") return appBusyResponse();
+  if (waiting === "address") return addressBusyResponse();
   try {
     return await sendRequestToAgent(req, agentWs, agent, tunnelId, clientIp);
   } finally {
-    floodGuard.stopWaiting(agent.domain);
+    floodGuard.stopWaiting(agent.domain, clientIp);
   }
 }
 

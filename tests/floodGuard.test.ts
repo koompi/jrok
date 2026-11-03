@@ -140,12 +140,53 @@ describe("one address asking for names at random", () => {
 describe("one app can't take an edge over", () => {
   test("at most appMaxWaiting of an app's requests wait; other apps are unaffected", () => {
     const { g } = guard();
-    expect([g.startWaiting("busy"), g.startWaiting("busy"), g.startWaiting("busy")]).toEqual([true, true, true]);
-    expect(g.startWaiting("busy")).toBe(false);
-    expect(g.startWaiting("other")).toBe(true);
+    expect([g.startWaiting("busy"), g.startWaiting("busy"), g.startWaiting("busy")]).toEqual(["ok", "ok", "ok"]);
+    expect(g.startWaiting("busy")).toBe("app");
+    expect(g.startWaiting("other")).toBe("ok");
     g.stopWaiting("busy");
-    expect(g.startWaiting("busy")).toBe(true);
+    expect(g.startWaiting("busy")).toBe("ok");
     expect(g.waitingFor("busy")).toBe(3);
+  });
+});
+
+describe("one address can't take an app's waiting slots", () => {
+  // 1000 slots: from 500 waiting on, one address may have 100.
+  const wait = (g: FloodGuard, ip: string, n: number) => {
+    const results: string[] = [];
+    for (let i = 0; i < n; i++) results.push(g.startWaiting("slow-report", ip));
+    return results;
+  };
+
+  test("once the app is half full, an address with its share waiting is refused, and another still gets in", () => {
+    const { g } = guard({ appMaxWaiting: 1000 });
+    expect(wait(g, "192.0.2.20", 500).every((r) => r === "ok")).toBe(true); // nobody else: no share below half
+    expect(g.startWaiting("slow-report", "192.0.2.20")).toBe("address");
+    expect(g.startWaiting("slow-report", "192.0.2.21")).toBe("ok");
+    expect(g.startWaiting("other-app", "192.0.2.20")).toBe("ok");
+    // As its requests are answered, it gets slots again.
+    for (let i = 0; i < 401; i++) g.stopWaiting("slow-report", "192.0.2.20");
+    expect(g.startWaiting("slow-report", "192.0.2.20")).toBe("ok");
+  });
+
+  test("many people behind one address are not refused while the app keeps up", () => {
+    const { g } = guard({ appMaxWaiting: 1000 });
+    expect(wait(g, "192.0.2.22", 499).every((r) => r === "ok")).toBe(true);
+  });
+
+  test("an address with many waiting can't keep the others out: they fill the app to its cap", () => {
+    const { g } = guard({ appMaxWaiting: 1000 });
+    wait(g, "192.0.2.23", 600);
+    let others = 0;
+    for (let i = 0; i < 1000; i++) if (g.startWaiting("slow-report", `198.18.${Math.floor(i / 99)}.${i % 99}`) === "ok") others++;
+    expect(others).toBe(500); // what the first address left
+    expect(g.startWaiting("slow-report", "192.0.2.24")).toBe("app");
+  });
+
+  test("exempt and private addresses have no share", () => {
+    const { g } = guard({ appMaxWaiting: 1000 });
+    wait(g, "192.0.2.25", 500);
+    expect(wait(g, "198.51.100.7", 200).every((r) => r === "ok")).toBe(true);
+    expect(wait(g, "10.0.0.9", 200).every((r) => r === "ok")).toBe(true);
   });
 });
 

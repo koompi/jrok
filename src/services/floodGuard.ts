@@ -26,7 +26,12 @@
  *    app's requests wait here for it to start answering. Beyond that, that app
  *    alone gets 503 with Retry-After, and every other app is served as usual.
  *    Once a response has started (an event stream, a download) it no longer
- *    counts.
+ *    counts. Once an app has half that waiting, one address may have at most
+ *    its share waiting, max(50, APP_MAX_WAITING / 10); beyond it that address
+ *    alone gets 429. One client with many slow requests used to take every
+ *    slot, and everyone else got 503. Below half there is no share, so a
+ *    school or carrier address with many people behind it isn't refused while
+ *    the app keeps up. Exempt and private addresses have none.
  *
  * Only app traffic is counted (tunnel hosts and custom domains), never agents
  * or jrok's API, which nginx limits. FLOOD_GUARD=off turns all three off.
@@ -93,6 +98,7 @@ export class FloodGuard {
   private readonly offences = new Map<string, { count: number; last: number }>();
   private readonly localBlocks = new Map<string, number>();
   private readonly waiting = new Map<string, number>();
+  private readonly waitingByAddress = new Map<string, number>();
   private readonly busyLogged = new Map<string, number>();
   private lastSweep = 0;
 
@@ -183,31 +189,59 @@ export class FloodGuard {
     return { reason, secondsLeft: seconds };
   }
 
+  /** The address a waiting request counts against, or null for none (exempt, private, unknown). */
+  private waitingAddress(ip: string | undefined): string | null {
+    if (!ip || ip === "unknown" || isPrivate(ip) || ipMatchesAny(ip, this.opts.exempt)) return null;
+    return floodKey(ip);
+  }
+
   /**
-   * A request for `app` is about to wait for the app to answer. False: the app
-   * already has appMaxWaiting waiting, and this one must be refused.
+   * A request for `app` from `ip` is about to wait for the app to answer.
+   * "app": the app already has appMaxWaiting waiting; refuse it (503).
+   * "address": the app is half full and this address has its share waiting;
+   * refuse this address alone (429). "ok": count it until stopWaiting.
    */
-  startWaiting(app: string): boolean {
-    if (!this.opts.enabled) return true;
+  startWaiting(app: string, ip?: string): "ok" | "app" | "address" {
+    if (!this.opts.enabled) return "ok";
     const n = this.waiting.get(app) ?? 0;
+    const now = this.now();
     if (n >= this.opts.appMaxWaiting) {
-      const now = this.now();
       if (now - (this.busyLogged.get(app) ?? 0) > 60_000) {
         this.busyLogged.set(app, now);
         this.opts.log?.(`🚦 ${app}: ${n} requests already waiting for it to answer; refusing more (APP_MAX_WAITING)`);
       }
-      return false;
+      return "app";
+    }
+    const address = this.waitingAddress(ip);
+    if (address !== null) {
+      const key = `${app}|${address}`;
+      const mine = this.waitingByAddress.get(key) ?? 0;
+      const share = Math.max(50, Math.floor(this.opts.appMaxWaiting / 10));
+      if (n >= this.opts.appMaxWaiting / 2 && mine >= share) {
+        if (now - (this.busyLogged.get(key) ?? 0) > 60_000) {
+          this.busyLogged.set(key, now);
+          this.opts.log?.(`🚦 ${app}: ${address} has ${mine} of its ${n} waiting requests; refusing that address more`);
+        }
+        return "address";
+      }
+      this.waitingByAddress.set(key, mine + 1);
     }
     this.waiting.set(app, n + 1);
-    return true;
+    return "ok";
   }
 
   /** The app started answering (or failed): one fewer waiting. */
-  stopWaiting(app: string): void {
+  stopWaiting(app: string, ip?: string): void {
     if (!this.opts.enabled) return;
     const n = (this.waiting.get(app) ?? 0) - 1;
     if (n > 0) this.waiting.set(app, n);
     else this.waiting.delete(app);
+    const address = this.waitingAddress(ip);
+    if (address === null) return;
+    const key = `${app}|${address}`;
+    const mine = (this.waitingByAddress.get(key) ?? 0) - 1;
+    if (mine > 0) this.waitingByAddress.set(key, mine);
+    else this.waitingByAddress.delete(key);
   }
 
   waitingFor(app: string): number {
@@ -229,6 +263,9 @@ export class FloodGuard {
     }
     for (const [key, until] of this.localBlocks) {
       if (until <= now) this.localBlocks.delete(key);
+    }
+    for (const [key, at] of this.busyLogged) {
+      if (now - at > 60_000) this.busyLogged.delete(key);
     }
     if (this.appWindows.size >= MAX_TRACKED) this.appWindows.clear();
     if (this.nameWindows.size >= MAX_TRACKED) this.nameWindows.clear();
@@ -262,6 +299,14 @@ export function blockedResponse(block: { reason: string; secondsLeft: number }):
   return new Response(
     JSON.stringify({ success: false, message: flood ? "Too many requests from your address. Try again later." : "Your address is blocked." }),
     { status: flood ? 429 : 403, headers: { "Content-Type": "application/json", "Retry-After": String(Math.max(1, block.secondsLeft)) } }
+  );
+}
+
+/** The answer when one address already has its share of an app's waiting requests. */
+export function addressBusyResponse(): Response {
+  return new Response(
+    JSON.stringify({ success: false, message: "Too many of your requests are waiting for this app. Try again shortly." }),
+    { status: 429, headers: { "Content-Type": "application/json", "Retry-After": "5" } }
   );
 }
 

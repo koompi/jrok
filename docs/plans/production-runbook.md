@@ -143,7 +143,7 @@ On 2026-11-01 the new edges were built first, and edge1's checker, still listing
   - list: `GET /security/blocked-ips`: `blockedIps` (by hand, every app) and `appBlocks` (floods, one app each);
   - lift: `POST /security/unblock-ip` with `{"ip":"…"}` (every block of that address), or `{"ip":"…","app":"…"}` (that app's);
   - block by hand: `POST /security/block-ip` with `{"ip":"…","reason":"…","duration":3600}`.
-- **One app busy:** its visitors get 503 with `X-Jrok-App-Busy`, and jrok logs `🚦 <app>: N requests already waiting`. The app itself is too slow for its traffic: more replicas, or a look at the app.
+- **One app busy:** its visitors get 503 with `X-Jrok-App-Busy`, and jrok logs `🚦 <app>: N requests already waiting`. The app itself is too slow for its traffic: more replicas, or a look at the app. Once half of its 1,000 waiting slots are taken, one address may hold at most 100 of them; beyond that, that address alone gets 429 (`🚦 <app>: <ip> has N of its M waiting requests`).
 
 ## Edge cache
 
