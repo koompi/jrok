@@ -43,6 +43,28 @@ const EDGE_USER_TIMEOUT: Duration = Duration::from_secs(60);
 const TCP_HIGH_WATER: usize = 8 << 20;
 const TCP_LOW_WATER: usize = 4 << 20;
 
+/// Across the process, for control mode's stats: tunnels running, tunnels
+/// whose link the server welcomed, and bytes waiting for the edges.
+pub static RUNNING: AtomicUsize = AtomicUsize::new(0);
+pub static CONNECTED: AtomicUsize = AtomicUsize::new(0);
+pub static QUEUED_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// `n` in a count while held (also when a panic unwinds).
+struct Counted(&'static AtomicUsize, usize);
+
+impl Counted {
+    fn new(counter: &'static AtomicUsize, n: usize) -> Counted {
+        counter.fetch_add(n, Ordering::Relaxed);
+        Counted(counter, n)
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.fetch_sub(self.1, Ordering::Relaxed);
+    }
+}
+
 /// How a tunnel paces itself. Tests shorten these.
 #[derive(Clone, Copy, Debug)]
 pub struct Timing {
@@ -83,6 +105,7 @@ impl Timing {
 pub struct Outbound {
     pub message: Message,
     _room: Option<OwnedSemaphorePermit>,
+    _queued: Counted,
 }
 
 /// One live connection to the server, shared by everything serving through it.
@@ -158,11 +181,13 @@ impl Conn {
     /// A small message that must not wait (heartbeat, ping, a close): queued
     /// at once, outside the byte budget.
     pub fn send_now(&self, message: Message) {
-        let _ = self.tx.send(Outbound { message, _room: None });
+        let _queued = Counted::new(&QUEUED_BYTES, message.len());
+        let _ = self.tx.send(Outbound { message, _room: None, _queued });
     }
 
     async fn queue(&self, message: Message) -> bool {
-        let bytes = message.len().clamp(1, QUEUE_BYTES) as u32;
+        let len = message.len();
+        let bytes = len.clamp(1, QUEUE_BYTES) as u32;
         let room = tokio::select! {
             biased;
             _ = self.closed.cancelled() => return false,
@@ -171,7 +196,8 @@ impl Conn {
                 Err(_) => return false,
             },
         };
-        self.tx.send(Outbound { message, _room: Some(room) }).is_ok()
+        let _queued = Counted::new(&QUEUED_BYTES, len);
+        self.tx.send(Outbound { message, _room: Some(room), _queued }).is_ok()
     }
 }
 
@@ -189,6 +215,7 @@ pub async fn run(cfg: TunnelConfig, out: Output, stop: CancellationToken) {
 }
 
 pub async fn run_with(cfg: TunnelConfig, out: Output, stop: CancellationToken, timing: Timing) {
+    let _running = Counted::new(&RUNNING, 1);
     let cfg = Arc::new(cfg);
     let mut attempt: u32 = 0;
     // A TCP tunnel's port lives on one edge; the server names it when this
@@ -286,7 +313,7 @@ where
             next = rx.recv() => next,
             _ = closed.cancelled() => None,
         };
-        let Some(Outbound { message, _room }) = next else { break };
+        let Some(Outbound { message, _room, _queued }) = next else { break };
         let limit = timing.write_limit(message.len());
         let sent = tokio::select! {
             sent = timeout(limit, sink.send(message)) => sent,
@@ -354,6 +381,7 @@ async fn serve(
     let mut watchdog = interval_at(start + timing.watchdog, timing.watchdog);
     let mut last_inbound = Instant::now();
     let mut welcomed: Option<Instant> = None;
+    let mut _connected: Option<Counted> = None;
     // Set while the link isn't read: too much waits for the TCP services.
     let mut paused: Option<Instant> = None;
 
@@ -382,6 +410,7 @@ async fn serve(
                         Message::Text(text) => {
                             if dispatch(&conn, &text, edge_hint) && welcomed.is_none() {
                                 welcomed = Some(Instant::now());
+                                _connected = Some(Counted::new(&CONNECTED, 1));
                             }
                         }
                         Message::Close(_) => break,

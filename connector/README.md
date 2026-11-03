@@ -7,6 +7,7 @@ Each tunnel speaks the same agent protocol as the CLI (binary frames, compressio
 ## Modes
 
 - `jrok-connector`: control mode, for the deploy worker. Commands come in on stdin as JSON lines: `{"op":"open","id":"t1","args":[…jrok CLI arguments…]}` and `{"op":"close","id":"t1"}`. Output goes to stdout as `{"id","out"}`, `{"id","err"}` and `{"id","exit"}` lines; each `out` is what the CLI would have printed for that tunnel. The connector stops every tunnel and exits when stdin closes, so it never outlives the worker.
+- Health, in control mode: `{"op":"ping","id":…}` is answered `{"pong":…,"tunnels":N}` from the loop that opens tunnels, so no pong means a wedged connector; and every 30 s it prints `{"stats":{"tunnels","connected","reconnecting","queuedBytes","rssKb","openFds"}}`. Neither line has a tunnel `id`, so workers that don't use them ignore them.
 - `jrok-connector run <jrok CLI arguments>`: one tunnel, like `jrok`. For testing (the staging `stg-conn@<edge>` units).
 - `jrok-connector --version`.
 
