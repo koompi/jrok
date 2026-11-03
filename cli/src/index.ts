@@ -1079,7 +1079,8 @@ async function connectAgent(config: ClientConfig): Promise<void> {
 
   ws.onopen = () => {
     opened = true;
-    reconnectAttempts = 0;
+    // No backoff reset here: the server may still refuse the tunnel (see the
+    // welcome handler), and resetting on open brought it back every second.
     lastPongAt = Date.now();
     console.log("✅ Connected to server!");
 

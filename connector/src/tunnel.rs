@@ -33,8 +33,6 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 
-const RECONNECT_BASE_MS: u64 = 1_000;
-const RECONNECT_MAX_MS: u64 = 30_000;
 /// What may wait for the edge, in bytes (the CLI's WS_BACKPRESSURE_LIMIT).
 pub const QUEUE_BYTES: usize = 8 << 20;
 /// Data the edge doesn't acknowledge this long ends the connection
@@ -56,6 +54,12 @@ pub struct Timing {
     /// A message the edge doesn't take this long, plus a second per 64 KB of
     /// it: the edge stopped reading.
     pub write_stall: Duration,
+    /// Backoff between attempts: from the base, doubling, up to the max.
+    pub reconnect_base: Duration,
+    pub reconnect_max: Duration,
+    /// A link that stayed up this long after its welcome was a good one: the
+    /// backoff starts over.
+    pub stable_after: Duration,
 }
 
 impl Timing {
@@ -65,6 +69,9 @@ impl Timing {
         watchdog: Duration::from_secs(15),
         dead_after: Duration::from_secs(75),
         write_stall: Duration::from_secs(30),
+        reconnect_base: Duration::from_secs(1),
+        reconnect_max: Duration::from_secs(30),
+        stable_after: Duration::from_secs(30),
     };
 
     fn write_limit(&self, bytes: usize) -> Duration {
@@ -169,8 +176,9 @@ impl Conn {
 }
 
 /// The CLI's delay: half fixed, half random, so a fleet doesn't return together.
-fn reconnect_delay(attempt: u32) -> Duration {
-    let capped = (RECONNECT_BASE_MS << attempt.saturating_sub(1).min(16)).min(RECONNECT_MAX_MS);
+fn reconnect_delay(attempt: u32, timing: &Timing) -> Duration {
+    let base = timing.reconnect_base.as_millis() as u64;
+    let capped = (base << attempt.saturating_sub(1).min(16)).min(timing.reconnect_max.as_millis() as u64);
     let half = capped / 2;
     Duration::from_millis(half + rand::random::<u64>() % (half + 1))
 }
@@ -187,20 +195,30 @@ pub async fn run_with(cfg: TunnelConfig, out: Output, stop: CancellationToken, t
     // connection reached another (tcp_port_elsewhere). Dropped if it can't be
     // reached, so a dead edge can't strand the tunnel.
     let mut edge_hint: Option<String> = None;
+    let mut redirected_before = false;
     loop {
         if stop.is_cancelled() {
             return;
         }
         let edge = edge_hint.clone().or_else(|| cfg.edge.clone());
-        let opened = serve(&cfg, &out, &stop, edge.as_deref(), &mut edge_hint, &timing).await;
+        let hint_before = edge_hint.clone();
+        let served = serve(&cfg, &out, &stop, edge.as_deref(), &mut edge_hint, &timing).await;
         if stop.is_cancelled() {
             return;
         }
-        if !opened && edge.is_some() && edge == edge_hint {
+        if !served.opened && edge.is_some() && edge == edge_hint {
             edge_hint = None;
         }
-        attempt = if opened { 1 } else { attempt + 1 };
-        let delay = reconnect_delay(attempt);
+        // The backoff starts over only after a link that held: welcomed, and
+        // up a while. An edge that takes the connection and then refuses the
+        // tunnel (a registration error) had it back every second otherwise.
+        // Sent to the edge holding a TCP port: go at once, unless that was
+        // also what happened last time (edges that disagree).
+        let redirected = edge_hint.is_some() && edge_hint != hint_before;
+        let held = served.welcomed_for.is_some_and(|up| up >= timing.stable_after);
+        attempt = if held || (redirected && !redirected_before) { 1 } else { attempt + 1 };
+        redirected_before = redirected;
+        let delay = reconnect_delay(attempt, &timing);
         out.out(format!("🔄 Attempting to reconnect in {:.1}s (attempt {attempt})...", delay.as_secs_f64()));
         tokio::select! {
             _ = sleep(delay) => {}
@@ -290,7 +308,16 @@ where
     }
 }
 
-/// One connection, until it ends. True if it opened.
+/// How a connection went.
+struct Served {
+    opened: bool,
+    /// How long it stayed up after the server's welcome, if one came.
+    welcomed_for: Option<Duration>,
+}
+
+const NEVER_OPENED: Served = Served { opened: false, welcomed_for: None };
+
+/// One connection, until it ends.
 async fn serve(
     cfg: &Arc<TunnelConfig>,
     out: &Output,
@@ -298,21 +325,21 @@ async fn serve(
     edge: Option<&str>,
     edge_hint: &mut Option<String>,
     timing: &Timing,
-) -> bool {
+) -> Served {
     let target = edge.unwrap_or(&cfg.server_host).to_string();
     let attempt = tokio::select! {
-        _ = stop.cancelled() => return false,
+        _ = stop.cancelled() => return NEVER_OPENED,
         attempt = timeout(Duration::from_secs(20), connect(cfg, &target)) => attempt,
     };
     let ws = match attempt {
         Ok(Ok(ws)) => ws,
         Ok(Err(e)) => {
             out.err(format!("❌ Connection error: {e}"));
-            return false;
+            return NEVER_OPENED;
         }
         Err(_) => {
             out.err(format!("❌ Connection error: {target}: timed out"));
-            return false;
+            return NEVER_OPENED;
         }
     };
     out.out(format!("✅ Connected to server! ({} via {target})", cfg.domain));
@@ -326,6 +353,7 @@ async fn serve(
     let mut ping = interval_at(start + timing.ping, timing.ping);
     let mut watchdog = interval_at(start + timing.watchdog, timing.watchdog);
     let mut last_inbound = Instant::now();
+    let mut welcomed: Option<Instant> = None;
     // Set while the link isn't read: too much waits for the TCP services.
     let mut paused: Option<Instant> = None;
 
@@ -351,7 +379,11 @@ async fn serve(
                 Some(Ok(m)) => {
                     last_inbound = Instant::now();
                     match m {
-                        Message::Text(text) => dispatch(&conn, &text, edge_hint),
+                        Message::Text(text) => {
+                            if dispatch(&conn, &text, edge_hint) && welcomed.is_none() {
+                                welcomed = Some(Instant::now());
+                            }
+                        }
                         Message::Close(_) => break,
                         _ => {}
                     }
@@ -386,15 +418,17 @@ async fn serve(
         let _ = timeout(Duration::from_secs(2), writer).await;
     }
     out.out("🔌 Disconnected from server");
-    true
+    Served { opened: true, welcomed_for: welcomed.map(|at| at.elapsed()) }
 }
 
-/// One message from the server. Anything that can take a while runs in its own task.
-fn dispatch(conn: &Arc<Conn>, text: &str, edge_hint: &mut Option<String>) {
+/// One message from the server. Anything that can take a while runs in its
+/// own task. True for the server's welcome.
+fn dispatch(conn: &Arc<Conn>, text: &str, edge_hint: &mut Option<String>) -> bool {
     let Ok(message) = serde_json::from_str::<serde_json::Value>(text) else {
         conn.out.err(format!("Failed to parse message: {}", text.chars().take(200).collect::<String>()));
-        return;
+        return false;
     };
+    let welcomed = message["type"] == "welcome";
     match message["type"].as_str().unwrap_or_default() {
         "welcome" => welcome(conn, &message),
         "heartbeat_ack" => {}
@@ -422,6 +456,7 @@ fn dispatch(conn: &Arc<Conn>, text: &str, edge_hint: &mut Option<String>) {
         }
         _ => conn.out.out(format!("📨 Server message: {message}")),
     }
+    welcomed
 }
 
 fn welcome(conn: &Arc<Conn>, message: &serde_json::Value) {
@@ -514,13 +549,14 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     #[test]
     fn backoff_stays_within_the_cli_bounds() {
         for attempt in 1..20 {
-            let d = super::reconnect_delay(attempt).as_millis() as u64;
+            let d = super::reconnect_delay(attempt, &Timing::DEFAULT).as_millis() as u64;
             let capped = (1_000u64 << (attempt - 1).min(16)).min(30_000);
             assert!(d >= capped / 2 && d <= capped, "attempt {attempt}: {d}");
         }
@@ -615,6 +651,7 @@ mod tests {
             watchdog: Duration::from_millis(50),
             dead_after: Duration::from_secs(5),
             write_stall: Duration::from_millis(500),
+            ..Timing::DEFAULT
         };
         let (out, _lines) = testing::output();
         let stop = CancellationToken::new();
@@ -637,7 +674,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_tcp_tunnel_holds_the_edge_back_while_its_service_stalls() {
         use base64::Engine;
-        use std::sync::atomic::AtomicUsize;
         let (port, go, done) = testing::stalling_service().await;
         let data = testing::pattern(70 << 20);
         let messages: Vec<String> = data
@@ -684,6 +720,7 @@ mod tests {
             watchdog: Duration::from_millis(100),
             dead_after: Duration::from_secs(1),
             write_stall: Duration::from_secs(5),
+            ..Timing::DEFAULT
         };
         let (out, _lines) = testing::output();
         let stop = CancellationToken::new();
@@ -701,6 +738,107 @@ mod tests {
         assert!(took >= Duration::from_secs(2), "the edge pushed everything in {took:?}: nothing held it back");
         assert!(heartbeats_before >= 10, "only {heartbeats_before} heartbeats while the link was held back");
         assert_eq!(connections.load(Ordering::SeqCst), 1, "the tunnel dropped the link for its own pause");
+    }
+
+    /// A fake edge running `script` on every connection; how many it got.
+    async fn scripted_edge(script: fn(u32) -> Vec<Message>, hold: Duration) -> (u16, Arc<AtomicUsize>) {
+        let edge = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = edge.local_addr().unwrap().port();
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = count.clone();
+        tokio::spawn(async move {
+            while let Ok((s, _)) = edge.accept().await {
+                let n = seen.fetch_add(1, Ordering::SeqCst) as u32 + 1;
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(s).await else { return };
+                    for m in script(n) {
+                        if matches!(m, Message::Close(_)) {
+                            sleep(hold).await;
+                        }
+                        let _ = ws.send(m).await;
+                    }
+                    // Read on until the agent leaves.
+                    while let Some(Ok(_)) = ws.next().await {}
+                });
+            }
+        });
+        (port, count)
+    }
+
+    fn close(code: u16, reason: &'static str) -> Message {
+        use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+        Message::Close(Some(CloseFrame { code: CloseCode::from(code), reason: reason.into() }))
+    }
+
+    fn text(value: serde_json::Value) -> Message {
+        Message::Text(value.to_string())
+    }
+
+    fn fast() -> Timing {
+        Timing { reconnect_base: Duration::from_millis(40), reconnect_max: Duration::from_millis(400), stable_after: Duration::from_millis(300), ..Timing::DEFAULT }
+    }
+
+    /// The attempt numbers of the first `n` reconnects the tunnel announces.
+    async fn attempts(edge_port: u16, timing: Timing, n: usize) -> Vec<u32> {
+        let (out, mut lines) = testing::output();
+        let stop = CancellationToken::new();
+        tokio::spawn(run_with(testing::config(&format!("http://127.0.0.1:{edge_port}"), 1), out, stop.clone(), timing));
+        let mut seen = Vec::new();
+        while seen.len() < n {
+            let line = timeout(Duration::from_secs(10), lines.recv()).await.expect("a reconnect").unwrap();
+            let line: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if let Some(attempt) = line["out"].as_str().and_then(|l| l.split("(attempt ").nth(1)).and_then(|r| r.trim_end_matches(")...").parse().ok()) {
+                seen.push(attempt);
+            }
+        }
+        stop.cancel();
+        seen
+    }
+
+    /// The finding's scenario: the edge takes the connection, then refuses the
+    /// tunnel (a domain of another organization) and closes with 1011.
+    #[tokio::test]
+    async fn an_edge_that_refuses_the_tunnel_gets_it_back_ever_more_slowly() {
+        let (port, _) = scripted_edge(
+            |_| vec![text(serde_json::json!({ "type": "error", "message": "Failed to register agent: belongs to a different organization" })), close(1011, "Failed to register agent")],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(attempts(port, fast(), 4).await, [1, 2, 3, 4]);
+    }
+
+    /// Welcomed, then closed at once: not a link that held either.
+    #[tokio::test]
+    async fn a_link_closed_right_after_its_welcome_doesnt_reset_the_backoff() {
+        let (port, _) = scripted_edge(|_| vec![text(serde_json::json!({ "type": "welcome", "agentId": "a" })), close(1000, "")], Duration::ZERO).await;
+        assert_eq!(attempts(port, fast(), 3).await, [1, 2, 3]);
+    }
+
+    /// A link that held after its welcome starts the backoff over.
+    #[tokio::test]
+    async fn a_link_that_held_starts_the_backoff_over() {
+        let (port, _) = scripted_edge(|_| vec![text(serde_json::json!({ "type": "welcome", "agentId": "a" })), close(1000, "")], Duration::from_millis(400)).await;
+        assert_eq!(attempts(port, fast(), 3).await, [1, 1, 1]);
+    }
+
+    /// Sent to the edge holding the TCP port (tcp_port_elsewhere): go there at
+    /// once, even after failures, but not again and again if edges disagree.
+    #[tokio::test]
+    async fn a_tcp_tunnel_sent_to_another_edge_goes_at_once_but_not_round_and_round() {
+        fn script(n: u32) -> Vec<Message> {
+            if n <= 2 {
+                return vec![text(serde_json::json!({ "type": "error", "message": "Failed to register agent" })), close(1011, "Failed to register agent")];
+            }
+            // Then back and forth between two names for this machine.
+            let other = if n % 2 == 1 { "localhost" } else { "127.0.0.1" };
+            vec![
+                text(serde_json::json!({ "type": "welcome", "agentId": "a" })),
+                text(serde_json::json!({ "type": "error", "code": "tcp_port_elsewhere", "edge": other, "message": format!("This TCP tunnel's port is on {other}") })),
+                close(4010, "TCP tunnel is on another edge"),
+            ]
+        }
+        let (port, _) = scripted_edge(script, Duration::ZERO).await;
+        assert_eq!(attempts(port, fast(), 5).await, [1, 2, 1, 2, 3]);
     }
 }
 
