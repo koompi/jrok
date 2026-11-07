@@ -24,8 +24,10 @@ const CUSTOM_DOMAIN_CACHE_TTL = 60_000; // 60 seconds
 export function invalidateCustomDomainCache(domain?: string): void {
   if (domain) {
     customDomainNameCache.delete(domain);
+    domainStates.delete(domain.toLowerCase());
   } else {
     customDomainNameCache.clear();
+    domainStates.clear();
   }
 }
 
@@ -202,6 +204,7 @@ export async function isActiveCustomDomain(hostname: string): Promise<boolean> {
 
 /** This server changed a domain: the set follows at once (other servers on their next reload). */
 function noteCustomDomain(domain: string | undefined, active: boolean | undefined): void {
+  if (!domain) domainStates.clear();
   if (!activeCustomDomains) return;
   if (!domain || active === undefined) {
     activeCustomDomainsAt = 0; // which one isn't known here: reload on the next request
@@ -211,12 +214,53 @@ function noteCustomDomain(domain: string | undefined, active: boolean | undefine
   else activeCustomDomains.delete(domain.toLowerCase());
 }
 
+/**
+ * Reload the set now, e.g. when another server's new certificate for a custom
+ * domain lands here: that server has just activated the domain (or is about
+ * to), and this one would otherwise answer from the old set for up to
+ * ACTIVE_CUSTOM_DOMAINS_TTL_MS. On 2026-11-07 that sent koompi.com's visitors
+ * to jrok's API (401) for 20 s on an edge that already had its certificate.
+ */
+export async function reloadActiveCustomDomains(): Promise<void> {
+  if (activeCustomDomains === null) return; // nothing asked yet: the first request loads it
+  await loadActiveCustomDomains();
+}
+
 /** For tests: forget the set, as a server that just started. */
 export function resetActiveCustomDomains(): void {
   activeCustomDomains = null;
   activeCustomDomainsAt = 0;
   activeCustomDomainsLoad = null;
   activeCustomDomainsFailing = false;
+  domainStates.clear();
+}
+
+// ===== A NAME THE SET DOESN'T HAVE, OPENED IN A BROWSER =====
+// The set can lag another server's activation, and a name it doesn't have
+// used to go to jrok's API, which answered a visitor with {"message":
+// "Unauthorized"}. For a browser opening a page, the name is looked up in
+// MongoDB (one indexed query per name every DOMAIN_STATE_TTL_MS) to tell
+// "active after all" (route it, and add it to the set), "added but not
+// verified yet" and "no app uses it" apart. Scripts and API clients never
+// trigger the lookup.
+export type CustomDomainState = "active" | "pending" | "none";
+
+const DOMAIN_STATE_TTL_MS = 10_000;
+const DOMAIN_STATE_MAX = 10_000;
+const domainStates = new Map<string, { state: CustomDomainState; at: number }>();
+
+/** What `hostname` is, from MongoDB (cached briefly). Throws if MongoDB can't be reached. */
+export async function customDomainState(hostname: string): Promise<CustomDomainState> {
+  const host = hostname.toLowerCase();
+  const cached = domainStates.get(host);
+  if (cached && Date.now() - cached.at < DOMAIN_STATE_TTL_MS) return cached.state;
+
+  const doc = await getCollections().customDomains.findOne({ domain: host }, { projection: { active: 1 } });
+  const state: CustomDomainState = !doc ? "none" : doc.active ? "active" : "pending";
+  if (domainStates.size >= DOMAIN_STATE_MAX) domainStates.clear(); // scanners' random names
+  domainStates.set(host, { state, at: Date.now() });
+  if (state === "active") noteCustomDomain(host, true);
+  return state;
 }
 
 export async function getAllCustomDomains(): Promise<CustomDomain[]> {

@@ -8,6 +8,7 @@ import {
   isOwnOAuthRedirect,
   looksLikeAgentHandshake,
   strictApiHosts,
+  isPageLoad,
 } from "../src/utils/hostRouting";
 
 // jrok used to answer its management routes by path alone, on every host — so
@@ -128,4 +129,43 @@ test("index.ts routes tunnel hosts before any management route", () => {
   const beforeTunnel = routes.filter((i) => i < tunnelBlock);
   expect(beforeTunnel.length).toBe(1);
   expect(src.slice(beforeTunnel[0]!, beforeTunnel[0]! + 40)).toContain('path === "/ws/agent"');
+});
+
+describe("isPageLoad (who gets an HTML page for a name jrok can't route)", () => {
+  const h = (init: Record<string, string>) => new Headers(init);
+  const chrome = { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document", accept: "text/html,application/xhtml+xml,*/*;q=0.8" };
+
+  test("a browser opening a page, or reloading it", () => {
+    expect(isPageLoad("GET", h(chrome))).toBe(true);
+    expect(isPageLoad("HEAD", h(chrome))).toBe(true);
+  });
+
+  test("a browser without Fetch Metadata that asks for HTML first", () => {
+    expect(isPageLoad("GET", h({ accept: "text/html,application/xhtml+xml" }))).toBe(true);
+  });
+
+  test("not a page's own fetches, images or favicon, even if they accept HTML", () => {
+    expect(isPageLoad("GET", h({ "sec-fetch-mode": "cors", accept: "*/*" }))).toBe(false);
+    expect(isPageLoad("GET", h({ "sec-fetch-mode": "no-cors", "sec-fetch-dest": "image", accept: "image/avif,*/*" }))).toBe(false);
+    expect(isPageLoad("GET", h({ "sec-fetch-mode": "cors", accept: "text/html" }))).toBe(false);
+  });
+
+  test("not API clients, curl, or a form post", () => {
+    expect(isPageLoad("GET", h({ accept: "*/*" }))).toBe(false);
+    expect(isPageLoad("GET", h({ accept: "application/json" }))).toBe(false);
+    expect(isPageLoad("GET", h({}))).toBe(false);
+    expect(isPageLoad("POST", h(chrome))).toBe(false);
+    expect(isPageLoad("GET", h({ accept: "application/json, text/plain;q=0.9, text/html;q=0.1" }))).toBe(false);
+  });
+});
+
+test("index.ts gives page loads on an unroutable name a page before the strict-mode 404 and the API", () => {
+  const src = readFileSync(join(import.meta.dir, "../src/index.ts"), "utf8");
+  const fetchStart = src.indexOf("async fetch(req: Request)");
+  const pages = src.indexOf("isPageLoad(method, req.headers)", fetchStart);
+  const strict = src.indexOf("strictApiHosts()", fetchStart);
+  const tunnelBlock = src.indexOf("if (tunnelDomain) {", fetchStart);
+  expect(pages).toBeGreaterThan(fetchStart);
+  expect(pages).toBeLessThan(strict);
+  expect(pages).toBeLessThan(tunnelBlock);
 });

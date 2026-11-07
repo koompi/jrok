@@ -838,6 +838,14 @@ export async function syncAllCertificatesToDisk(): Promise<ReconcileStats> {
       }
     }
 
+    // A custom domain's new certificate means the edge that issued it has just
+    // activated it: route it from here now, not at the set's next reload.
+    if (stats.synced.some(isCustomDomain)) {
+      await db.reloadActiveCustomDomains().catch((error) => {
+        console.warn("⚠️ Custom domains not reloaded after a certificate sync:", error?.message || error);
+      });
+    }
+
     if (stats.synced.length > 0 || stats.failed.length > 0 || stats.upgraded.length > 0) {
       console.log(
         `🔐 Certificate reconcile: ${stats.synced.length} synced, ${stats.skipped} already current, ` +

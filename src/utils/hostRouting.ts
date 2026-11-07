@@ -136,6 +136,19 @@ export function isOwnOAuthRedirect(host: string, path: string): boolean {
 }
 
 /**
+ * A browser opening a page (an address typed, a link, a reload), as opposed to
+ * a script, an API client or a page's own fetches. Only these get an HTML page
+ * for a name jrok can't route to an app; everything else keeps JSON.
+ */
+export function isPageLoad(method: string, headers: Headers): boolean {
+  if (method !== "GET" && method !== "HEAD") return false;
+  const mode = headers.get("sec-fetch-mode");
+  if (mode) return mode === "navigate";
+  // A browser without Fetch Metadata: it asks for HTML first.
+  return /^\s*text\/html/i.test(headers.get("accept") || "");
+}
+
+/**
  * The agent upgrade on a TUNNEL host. Agents are meant to dial the API host,
  * but an old deploy may point --server somewhere else; rather than strand it,
  * a request that carries the agent handshake (domain + localPort + a jrok

@@ -233,6 +233,61 @@ describe("custom domains, MongoDB unreachable", () => {
   });
 });
 
+describe("a name the active set doesn't have, opened in a browser", () => {
+  test("another server activated it after this one's last reload: found, routed, and added to the set", async () => {
+    database.resetActiveCustomDomains();
+    coll("customDomains").docs.push({ domain: "late.example.com", active: false });
+    expect(await database.isActiveCustomDomain("late.example.com")).toBe(false); // set loaded while pending
+
+    coll("customDomains").docs.find((d) => d.domain === "late.example.com")!.active = true; // another edge activates it
+    expect(await database.isActiveCustomDomain("late.example.com")).toBe(false); // the set still has the old answer
+    expect(await database.customDomainState("late.example.com")).toBe("active");
+    expect(await database.isActiveCustomDomain("late.example.com")).toBe(true); // the favicon and the rest follow
+  });
+
+  test("added but not verified yet, and unknown, are told apart", async () => {
+    database.resetActiveCustomDomains();
+    coll("customDomains").docs.push({ domain: "waiting.example.com", active: false });
+    await database.isActiveCustomDomain("x");
+    expect(await database.customDomainState("waiting.example.com")).toBe("pending");
+    expect(await database.customDomainState("WWW.Nobody.example")).toBe("none");
+  });
+
+  test("one query per name for 10 s; a change this server makes is seen at once", async () => {
+    database.resetActiveCustomDomains();
+    await database.isActiveCustomDomain("x");
+    const findOnes = () => ops.filter((op) => op === "customDomains.findOne").length;
+    const before = findOnes();
+    for (let i = 0; i < 5; i++) expect(await database.customDomainState("soon.example.com")).toBe("none");
+    expect(findOnes() - before).toBe(1);
+
+    await database.createCustomDomain({ domain: "soon.example.com", active: false } as any);
+    expect(await database.customDomainState("soon.example.com")).toBe("pending");
+
+    setSystemTime(new Date(Date.now() + 11_000));
+    coll("customDomains").docs.find((d) => d.domain === "soon.example.com")!.active = true; // activated elsewhere
+    expect(await database.customDomainState("soon.example.com")).toBe("active");
+  });
+
+  test("MongoDB unreachable: the lookup throws (the caller keeps the old answer) and routed domains keep flowing", async () => {
+    database.resetActiveCustomDomains();
+    coll("customDomains").docs.push({ domain: "flowing.example.com", active: true });
+    expect(await database.isActiveCustomDomain("flowing.example.com")).toBe(true);
+    mongoDown = true;
+    await expect(database.customDomainState("new-name.example")).rejects.toThrow();
+    expect(await database.isActiveCustomDomain("flowing.example.com")).toBe(true);
+  });
+
+  test("a certificate sync reloads the set at once", async () => {
+    database.resetActiveCustomDomains();
+    coll("customDomains").docs.push({ domain: "fresh.example.com", active: false });
+    expect(await database.isActiveCustomDomain("fresh.example.com")).toBe(false);
+    coll("customDomains").docs.find((d) => d.domain === "fresh.example.com")!.active = true;
+    await database.reloadActiveCustomDomains();
+    expect(await database.isActiveCustomDomain("fresh.example.com")).toBe(true);
+  });
+});
+
 describe("route lookup after a restart", () => {
   test("a stale record claiming this server is ignored: the request goes where the agent really is", async () => {
     coll("agentConnections").docs.push({ domain: "restarted-app", active: true, serverId: agentService.currentServerId, agentId: "gone" });

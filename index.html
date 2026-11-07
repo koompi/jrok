@@ -1,16 +1,18 @@
 <!doctype html>
 <!--
-  jrok's page for an app whose tunnel is down (no agent connected), served
-  with 503 and X-Jrok-Tunnel: down. jrok fills in {{HOST}}, {{EDGE}} and
-  {{TIME}} (HTML-escaped). Styled after the KOOMPI Cloud home page: neutral
-  greys, one violet accent, Bricolage Grotesque headings, Outfit text.
+  jrok's pages for visitors (src/utils/maintenancePage.ts): an app whose
+  tunnel is down (503, X-Jrok-Tunnel: down), a custom domain that is still
+  being verified (503) and a domain no app uses (404). jrok fills in the
+  words for each, then the host, this edge and the time (HTML-escaped).
+  Styled after the KOOMPI Cloud home page: neutral greys, one violet accent,
+  Bricolage Grotesque headings, Outfit text.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>{{HOST}} is unavailable · KOOMPI Cloud</title>
+<title>{{TITLE}} · KOOMPI Cloud</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600&family=Kantumruy+Pro:wght@400&family=Outfit:wght@400;500&display=swap" rel="stylesheet">
@@ -61,37 +63,41 @@
 </head>
 <body>
 <header>
-  <a class="brand" href="https://kconsole.koompi.cloud" aria-label="KOOMPI Cloud">
+  <a class="brand" href="https://koompi.cloud" aria-label="KOOMPI Cloud">
     <img alt="" src="data:image/png;base64,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">
     KOOMPI Cloud
   </a>
 </header>
 <main>
-  <p class="status">Temporarily unavailable</p>
-  <h1>This app isn’t available right now.</h1>
-  <p class="lead"><span class="host">{{HOST}}</span> runs on KOOMPI Cloud and isn’t answering at the moment. It may be restarting or being updated, so this page will try again by itself.</p>
-  <p class="km" lang="km">គេហទំព័រនេះមិនអាចចូលបានជាបណ្ដោះអាសន្ន។ សូមព្យាយាមម្ដងទៀតក្នុងពេលបន្តិចទៀត។</p>
+  <p class="status">{{STATUS}}</p>
+  <h1>{{HEADING}}</h1>
+  <p class="lead">{{LEAD}}</p>
+  <p class="km" lang="km">{{KM}}</p>
   <div class="actions">
     <button type="button" id="retry">Try again</button>
     <p class="countdown" id="countdown" aria-live="polite"></p>
   </div>
-  <p class="owner">Is this your app? See its status and logs in your <a href="https://kconsole.koompi.cloud/dashboard">KOOMPI Cloud dashboard</a>.</p>
+  <p class="owner">{{OWNER}}</p>
 </main>
-<footer>Error 503 · {{EDGE}} · {{TIME}}</footer>
-<script>
-  // Try again by itself, waiting a little longer each time (20 s, 40 s, then
-  // every minute; from 20 s again after 10 minutes away), and not while the
-  // tab is hidden.
+<footer>Error {{CODE}} · {{EDGE}} · {{TIME}}</footer>
+<script data-retry="{{RETRY}}">
+  // Try again by itself, waiting a little longer each time (for an app that is
+  // down: 20 s, 40 s, then every minute; from the first wait again after 10
+  // minutes away), and not while the tab is hidden. data-retry lists the waits
+  // in seconds, the last one repeating; empty means only the button.
   (function () {
+    var waits = (document.currentScript.getAttribute("data-retry") || "").split(",").map(Number).filter(function (n) { return n > 0; });
     var key = "kc-retry:" + location.host, tries = 0, now = Date.now();
     try {
       var last = JSON.parse(sessionStorage.getItem(key) || "null");
       if (last && now - last.t < 600000) tries = last.n;
       sessionStorage.setItem(key, JSON.stringify({ n: tries + 1, t: now }));
     } catch (e) {}
-    var left = [20, 40][tries] || 60;
+    var left = waits[Math.min(tries, waits.length - 1)];
     var out = document.getElementById("countdown");
     function reload() { location.reload(); }
+    document.getElementById("retry").addEventListener("click", reload);
+    if (!left) return;
     function tick() {
       if (document.hidden) return;
       left -= 1;
@@ -99,7 +105,6 @@
       out.textContent = "Trying again in " + left + " s";
     }
     out.textContent = "Trying again in " + left + " s";
-    document.getElementById("retry").addEventListener("click", reload);
     setInterval(tick, 1000);
   })();
 </script>

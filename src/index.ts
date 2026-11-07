@@ -40,7 +40,7 @@ import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "
 import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
 import { firstSubprotocol } from "./utils/wsSubprotocol";
 import { DRAIN_HEADER, isDraining } from "./utils/drain";
-import { maintenancePage } from "./utils/maintenancePage";
+import { maintenancePage, statusPage, statusPageCode } from "./utils/maintenancePage";
 import { shutdownHandler } from "./utils/shutdown";
 import {
   normalizeHostname,
@@ -49,6 +49,7 @@ import {
   looksLikeAgentHandshake,
   strictApiHosts,
   describeManagementHosts,
+  isPageLoad,
 } from "./utils/hostRouting";
 
 // =============================================================================
@@ -1294,6 +1295,40 @@ async function startServer() {
         if (ownOAuthRedirect) {
           tunnelDomain = null;
           isCustomDomainRequest = false;
+        }
+
+        // A browser opening a page on a name the set doesn't route. It used to
+        // get jrok's API ({"message":"Unauthorized"}, 401), which is what
+        // koompi.com's owner saw for 20 s after the domain went live, on an edge
+        // whose set was older than the activation. Looked up in MongoDB now:
+        // active after all -> the app; added but not verified yet -> "getting
+        // ready" (503, reloads itself); unknown -> "not connected" (404).
+        // Scripts and API clients are left as they were, and so is everything
+        // if MongoDB can't answer.
+        if (!tunnelDomain && !ownOAuthRedirect && hostRoute.kind === "custom-candidate" && isPageLoad(method, req.headers)) {
+          let state: "active" | "pending" | "none" | null = null;
+          try {
+            const { customDomainState } = await import("./utils/database");
+            state = await customDomainState(hostname);
+          } catch (error) {
+            console.error(`❌ Custom domain state lookup failed for ${hostname}:`, error instanceof Error ? error.message : String(error));
+          }
+          if (state === "active") {
+            tunnelDomain = hostname;
+            isCustomDomainRequest = true;
+          } else if (state !== null) {
+            const kind = state === "pending" ? "domain-pending" : "domain-unknown";
+            const page = statusPage(import.meta.dir + "/../index.html", kind, hostname, crossServerService.currentServerId);
+            if (page) {
+              const headers: Record<string, string> = {
+                "Content-Type": "text/html; charset=utf-8",
+                "Cache-Control": "no-store",
+                "X-Jrok-Domain": state === "pending" ? "pending" : "not-connected",
+              };
+              if (state === "pending") headers["Retry-After"] = "10";
+              return new Response(method === "HEAD" ? null : page, { status: statusPageCode(kind), headers });
+            }
+          }
         }
 
         // JROK_STRICT_API_HOSTS: the management API only on hosts that are ours
