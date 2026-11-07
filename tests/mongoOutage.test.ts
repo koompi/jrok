@@ -288,6 +288,56 @@ describe("a name the active set doesn't have, opened in a browser", () => {
   });
 });
 
+describe("an app's IP rules reach every tunnel record of its domain", () => {
+  // koompicom-c80o had three tunnel records (one per edge and replica); a save
+  // updated only the first, and a request checks its own tunnel's id first.
+  const X = "203.147.139.61";
+  const seed = (domain: string, ids: string[]) =>
+    ids.forEach((id) => coll("tunnels").docs.push({ id, domain }));
+
+  test("an unblock reaches the record an agent's older block was filed under", async () => {
+    const security = await import("../src/services/securityService");
+    seed("ipr-unblock", ["ipr-u1", "ipr-u2", "ipr-u3"]);
+    // An agent on the second record brought a block (P33), filed under its id.
+    await security.setTunnelIpSecurity("ipr-u2", { mode: "blocklist", allowedIps: [], blockedIps: [X] });
+    expect(security.checkIpSecurity("ipr-u3", X, "ipr-unblock").allowed).toBe(false);
+
+    await security.setTunnelIpSecurity("ipr-unblock", { mode: "allow-all", allowedIps: [], blockedIps: [] });
+    for (const id of ["ipr-u1", "ipr-u2", "ipr-u3"]) {
+      expect(security.checkIpSecurity(id, X, "ipr-unblock").allowed).toBe(true);
+    }
+    const docs = coll("tunnels").docs.filter((d) => d.domain === "ipr-unblock");
+    expect(docs.map((d) => d.ipSecurity?.mode)).toEqual(["allow-all", "allow-all", "allow-all"]);
+  });
+
+  test("a block saved by domain turns the address away on every record's agents", async () => {
+    const security = await import("../src/services/securityService");
+    seed("ipr-block", ["ipr-b1", "ipr-b2", "ipr-b3"]);
+    await security.setTunnelIpSecurity("ipr-b2", { mode: "allow-all", allowedIps: [], blockedIps: [] }); // older rules on one record
+    await security.setTunnelIpSecurity("ipr-block", { mode: "blocklist", allowedIps: [], blockedIps: [X] });
+    for (const id of ["ipr-b1", "ipr-b2", "ipr-b3"]) {
+      expect(security.checkIpSecurity(id, X, "ipr-block").allowed).toBe(false);
+      expect(security.checkIpSecurity(id, "198.51.100.7", "ipr-block").allowed).toBe(true);
+    }
+    expect(coll("tunnels").docs.filter((d) => d.domain === "ipr-block").every((d) => d.ipSecurity?.blockedIps?.[0] === X)).toBe(true);
+  });
+
+  test("a custom domain with no tunnel record yet: in force here under its name", async () => {
+    const security = await import("../src/services/securityService");
+    await security.setTunnelIpSecurity("ipr-new.example.com", { mode: "blocklist", allowedIps: [], blockedIps: [X] });
+    expect(security.checkIpSecurity("any-id", X, "ipr-new.example.com").allowed).toBe(false);
+  });
+
+  test("another app's records are untouched", async () => {
+    const security = await import("../src/services/securityService");
+    seed("ipr-other", ["ipr-o1"]);
+    seed("ipr-mine", ["ipr-m1"]);
+    await security.setTunnelIpSecurity("ipr-mine", { mode: "blocklist", allowedIps: [], blockedIps: [X] });
+    expect(coll("tunnels").docs.find((d) => d.id === "ipr-o1")!.ipSecurity).toBeUndefined();
+    expect(security.checkIpSecurity("ipr-o1", X, "ipr-other").allowed).toBe(true);
+  });
+});
+
 describe("route lookup after a restart", () => {
   test("a stale record claiming this server is ignored: the request goes where the agent really is", async () => {
     coll("agentConnections").docs.push({ domain: "restarted-app", active: true, serverId: agentService.currentServerId, agentId: "gone" });

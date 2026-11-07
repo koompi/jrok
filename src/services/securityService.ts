@@ -1021,29 +1021,29 @@ export async function setTunnelIpSecurity(
   security.updatedAt = Date.now();
   if (updatedBy) security.updatedBy = updatedBy;
 
-  // Update cache with provided key
+  // The rules are the app's: they go to every tunnel record of its domain.
+  // An app has one record per edge and replica (koompicom-c80o had three), and
+  // a request checks its own tunnel's id before the domain. Only the first
+  // record used to be updated, so another one's older rules stayed in force on
+  // the edges whose agents use it: an unblock that half worked, or a block
+  // that didn't. `tunnelId` may be a tunnel id (an agent's rules, P33) or a
+  // domain (kconsole's saves).
+  const byId = await collections.tunnels.findOne({ id: tunnelId }, { projection: { domain: 1 } });
+  const domain: string = byId?.domain || tunnelId;
+  const records = await collections.tunnels.find({ domain }, { projection: { id: 1 } }).toArray();
+
   ipSecurityCache.set(tunnelId, security);
-
-  // Find the tunnel to get both ID and domain for caching
-  const tunnel = await collections.tunnels.findOne(
-    { $or: [{ id: tunnelId }, { domain: tunnelId }] }
-  );
-
-  // Also cache by the alternate key (domain or ID) for lookups
-  if (tunnel) {
-    if (tunnel.id && tunnel.id !== tunnelId) {
-      ipSecurityCache.set(tunnel.id, security);
-    }
-    if (tunnel.domain && tunnel.domain !== tunnelId) {
-      ipSecurityCache.set(tunnel.domain, security);
-    }
+  ipSecurityCache.set(domain, security);
+  for (const record of records) {
+    if (record.id) ipSecurityCache.set(record.id, security);
   }
 
-  // Persist to MongoDB (update tunnel document). ipSecurityChangedAt is
-  // MongoDB's own clock, so every server can ask for "changed since" without
-  // trusting its clock to agree with this one's (securitySync.ts).
-  await collections.tunnels.updateOne(
-    { $or: [{ id: tunnelId }, { domain: tunnelId }] },
+  // Persist to MongoDB. ipSecurityChangedAt is MongoDB's own clock, so every
+  // server can ask for "changed since" without trusting its clock to agree
+  // with this one's (securitySync.ts); every record changed, so every server
+  // files the rules under every id.
+  await collections.tunnels.updateMany(
+    { domain },
     { $set: { ipSecurity: security, updatedAt: Date.now() }, $currentDate: { ipSecurityChangedAt: true } }
   );
 

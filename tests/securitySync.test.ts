@@ -45,6 +45,15 @@ function fakeCollection() {
       }
       return { acknowledged: true };
     },
+    async updateMany(filter: Doc, update: Doc) {
+      check();
+      const hit = docs.filter((d) => matches(d, filter));
+      for (const doc of hit) {
+        Object.assign(doc, update.$set ?? {});
+        for (const k of Object.keys(update.$currentDate ?? {})) doc[k] = new Date();
+      }
+      return { acknowledged: true, modifiedCount: hit.length };
+    },
   };
 }
 
@@ -202,5 +211,26 @@ describe("flood blocks", () => {
     await securitySync.syncSecurityRules();
     expect(securityService.isIpBlocked("192.0.2.81")).toBe(false);
     expect(securityService.isIpBlocked("192.0.2.82")).toBe(true);
+  });
+});
+
+describe("an app with a tunnel record per edge", () => {
+  test("a block saved by domain holds on another server for every record's agents, and so does lifting it", async () => {
+    for (const id of ["t-multi-1", "t-multi-2", "t-multi-3"]) tunnels().docs.push({ id, domain: "multi-app" });
+    await securityService.setTunnelIpSecurity("multi-app", { mode: "blocklist", allowedIps: [], blockedIps: ["203.147.139.61"] });
+
+    becomeAnotherServer();
+    await securitySync.syncSecurityRules();
+    for (const id of ["t-multi-1", "t-multi-2", "t-multi-3"]) {
+      expect(securityService.checkIpSecurity(id, "203.147.139.61", "multi-app").allowed).toBe(false);
+    }
+
+    await new Promise((r) => setTimeout(r, 5)); // a later MongoDB timestamp
+    await securityService.setTunnelIpSecurity("multi-app", { mode: "allow-all", allowedIps: [], blockedIps: [] });
+    becomeAnotherServer();
+    await securitySync.syncSecurityRules();
+    for (const id of ["t-multi-1", "t-multi-2", "t-multi-3"]) {
+      expect(securityService.checkIpSecurity(id, "203.147.139.61", "multi-app").allowed).toBe(true);
+    }
   });
 });
