@@ -200,13 +200,18 @@
             default 1;
         }
 
-        # Security headers. A live preview (KOOMPI Cloud's Ask AI: live-<10 hex>)
-        # is shown in a frame in the dashboard's chat, so the dashboard may frame
-        # it (frame-ancestors); every other app stays unframeable by other sites.
-        # The dashboard is at koompi.cloud, and still at kconsole.koompi.cloud:
-        # a site missing here sees "refused to connect" in the frame.
+        # Security headers. Who may show an app in a frame (frame-ancestors):
+        # - a live preview (KOOMPI Cloud's Ask AI: live-<10 hex>): the dashboard,
+        #   which shows it in its chat. The dashboard is at koompi.cloud, and
+        #   still at kconsole.koompi.cloud: a site missing here sees "refused to
+        #   connect" in the frame.
+        # - any other app that says nothing about it itself (no X-Frame-Options,
+        #   no frame-ancestors of its own): itself and the KOOMPI Cloud Showcase
+        #   (koompi.cloud/showcase shows each listed app live in its card); no
+        #   other site, against clickjacking. An app that sets either keeps its
+        #   own rule: a browser ignores X-Frame-Options once a policy has
+        #   frame-ancestors, so ours is never added on top of its.
         # An empty value adds no header.
-        add_header X-Frame-Options $jrok_frame_options always;
         add_header Content-Security-Policy $jrok_frame_ancestors always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header X-XSS-Protection "1; mode=block" always;
@@ -230,12 +235,22 @@
         # base domain) gets an empty key, which nginx never counts: one page
         # load makes dozens of requests, and many mobile users share one IP.
         # Custom domains have their own server blocks, which set no limit.
-        map $host $jrok_frame_options {
-            "~^live-[a-f0-9]{10}\." "";
-            default "SAMEORIGIN";
+        map $host $jrok_is_live_preview {
+            "~^live-[a-f0-9]{10}\." 1;
+            default 0;
         }
-        map $host $jrok_frame_ancestors {
-            "~^live-[a-f0-9]{10}\." "frame-ancestors 'self' {{ jrok_dashboard_origins | default('https://koompi.cloud https://kconsole.koompi.cloud') }}";
+        map $upstream_http_x_frame_options $jrok_app_frame_options {
+            "" 0;
+            default 1;
+        }
+        map $upstream_http_content_security_policy $jrok_app_frame_ancestors {
+            "~*frame-ancestors" 1;
+            default 0;
+        }
+        # live preview | app sets X-Frame-Options | app sets frame-ancestors
+        map "$jrok_is_live_preview$jrok_app_frame_options$jrok_app_frame_ancestors" $jrok_frame_ancestors {
+            "~^1" "frame-ancestors 'self' {{ jrok_dashboard_origins | default('https://koompi.cloud https://kconsole.koompi.cloud') }}";
+            "000" "frame-ancestors 'self' {{ jrok_showcase_origins | default('https://koompi.cloud') }}";
             default "";
         }
         map $host $jrok_limit_key {
