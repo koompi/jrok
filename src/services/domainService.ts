@@ -8,7 +8,7 @@ import * as monitoringService from "./monitoringService";
 import { generateId, sanitizeDomainToSubdomain, generateShortSuffix } from "../utils/helpers";
 import { getTunnelByDomain } from "../utils/database";
 import dns from "dns/promises";
-import { randomBytes } from "crypto";
+import { randomBytes, createHash } from "crypto";
 import { writeFile, mkdir } from "fs/promises";
 import { nginxSitesPath, nginxConfigFileName, generateCustomDomainNginxConfig, ensureJrokUpstreamFile } from "../utils/nginxConfig";
 
@@ -170,16 +170,105 @@ async function generateUniqueSubdomain(baseName: string): Promise<string> {
   return newTargetSubdomain(baseName, () => `${randomBytes(4).toString('hex')}${Date.now().toString(36)}`);
 }
 
+// ===== PENDING REGISTRATIONS =====
+// A registration holds its hostname from every other organization, and one
+// never verified used to hold it forever: anyone could pre-register a
+// customer's domain, and the customer could then never add it. Now a pending
+// registration holds the name for DOMAIN_PENDING_TTL_HOURS (72) only, and
+// another organization that proves it controls the domain's DNS takes it over
+// at once.
+
+const DEFAULT_PENDING_TTL_HOURS = 72;
+
+/** How long an unverified registration holds its hostname from other organizations. */
+export function pendingRegistrationTtlMs(): number {
+  const hours = Number(process.env.DOMAIN_PENDING_TTL_HOURS);
+  return (Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_PENDING_TTL_HOURS) * 60 * 60 * 1000;
+}
+
+/**
+ * Has this registration stopped holding its hostname from other organizations?
+ * Only an unverified one, past the TTL. A registration whose DNS was once
+ * verified for its owner (the certificate then failed) keeps it: the DNS points
+ * at that owner. Its owner may still verify it after the TTL, while nobody has
+ * taken it over (kconsole checks pending domains for 7 days).
+ */
+export function pendingRegistrationExpired(domain: CustomDomain, now: number = Date.now()): boolean {
+  if (domain.active || domain.cnameVerified || domain.txtVerified) return false;
+  return now - (domain.createdAt || 0) >= pendingRegistrationTtlMs();
+}
+
+/**
+ * The TXT value that proves an organization controls a hostname, so it can
+ * take over another organization's pending registration of it:
+ * `jrok-verify=<token>` at the hostname itself, the same record as normal
+ * verification. It needs no secret: anyone can work out an organization's
+ * token, but only whoever runs the domain's DNS can publish it, and it names
+ * one organization only.
+ */
+export function domainClaimToken(domain: string, organizationId: string): string {
+  return createHash("sha256")
+    .update(`jrok-domain-claim\0${domain.toLowerCase().replace(/\.$/, "")}\0${organizationId}`)
+    .digest("hex")
+    .slice(0, 40);
+}
+
+/** Another organization's pending registration holds the name; the caller can claim it by DNS. */
+export class DomainClaimRequiredError extends Error {
+  readonly status = 409;
+  constructor(readonly domain: string, readonly txtValue: string, expires: boolean) {
+    super(
+      `${domain} is waiting for verification by another organization. If the domain is yours, add a TXT record ` +
+      `${domain} -> ${txtValue} at your DNS provider, then add the domain again: it is then yours at once.` +
+      (expires ? ` Otherwise it becomes free once that registration expires.` : "")
+    );
+    this.name = "DomainClaimRequiredError";
+  }
+}
+
+export interface RegisterDeps {
+  now?: () => number;
+  verifyTxt?: typeof verifyTxt;
+}
+
 /**
  * Register a custom domain - creates pending domain awaiting CNAME verification
  * Does NOT issue certificate until CNAME is verified
  */
 export async function registerCustomDomain(
-  request: RegisterCustomDomainRequest
+  request: RegisterCustomDomainRequest,
+  deps: RegisterDeps = {}
 ): Promise<CustomDomain> {
   console.log(`[DomainService] Registering custom domain: ${request.domain}. OrganizationId: ${request.organizationId}`);
   // Check if domain already exists
-  const existing = await db.getCustomDomainByName(request.domain);
+  let existing = await db.getCustomDomainByName(request.domain);
+  let claimedToken: string | undefined;
+  if (existing && existing.organizationId !== request.organizationId && !existing.active) {
+    // Another organization's pending registration: expired, or the caller
+    // proves it runs the domain's DNS, and it is replaced.
+    const now = (deps.now ?? Date.now)();
+    let reason: string | null = null;
+    if (pendingRegistrationExpired(existing, now)) {
+      reason = "its registration expired unverified";
+    } else if (request.organizationId) {
+      const token = domainClaimToken(request.domain, request.organizationId);
+      if ((await (deps.verifyTxt ?? verifyTxt)(request.domain, token)).verified) {
+        reason = "the new owner proved control of its DNS (TXT)";
+        claimedToken = token;
+      } else {
+        throw new DomainClaimRequiredError(request.domain, `jrok-verify=${token}`, !existing.cnameVerified && !existing.txtVerified);
+      }
+    }
+    if (reason) {
+      // Only that pending record: if it was verified meanwhile, nothing is removed.
+      if (await db.deletePendingCustomDomain(request.domain, existing)) {
+        console.log(`🔁 Pending registration of ${request.domain} by org ${existing.organizationId} replaced by org ${request.organizationId}: ${reason}`);
+        existing = null;
+      } else {
+        existing = await db.getCustomDomainByName(request.domain);
+      }
+    }
+  }
   if (existing) {
     // If domain exists but belongs to same organization, return it (idempotent/upsert behavior)
     if (existing.organizationId === request.organizationId) {
@@ -208,8 +297,10 @@ export async function registerCustomDomain(
   const targetSubdomain = await generateUniqueSubdomain(baseSubdomain);
   const cnameTarget = `${targetSubdomain}.${primaryBaseDomain()}`;
 
-  // Generate unique verification token for TXT record verification
-  const verificationToken = generateVerificationToken();
+  // Generate unique verification token for TXT record verification. A
+  // takeover by TXT keeps the token it proved with, so the record already in
+  // place verifies the new registration too.
+  const verificationToken = claimedToken ?? generateVerificationToken();
 
   const domain: CustomDomain = {
     id: generateId(),

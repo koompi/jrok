@@ -303,6 +303,21 @@ export async function updateCustomDomainByName(domain: string, updates: Partial<
   if ("active" in updates) noteCustomDomain(domain, updates.active);
 }
 
+/**
+ * Remove this pending (not active) registration, and only it: by its _id when
+ * it has one, and never once it is active (verified meanwhile on another edge).
+ * Whether it was removed.
+ */
+export async function deletePendingCustomDomain(domainName: string, record: CustomDomain & { _id?: unknown }): Promise<boolean> {
+  const collections = getCollections();
+  const filter: Record<string, unknown> = { domain: domainName, active: { $ne: true } };
+  if (record._id !== undefined) filter._id = record._id;
+  else filter.organizationId = record.organizationId ?? null;
+  const result = await collections.customDomains.deleteOne(filter);
+  invalidateCustomDomainCache(domainName);
+  return result.deletedCount > 0;
+}
+
 export async function deleteCustomDomainById(id: string): Promise<void> {
   const collections = getCollections();
   // Try to delete by _id (ObjectId) first

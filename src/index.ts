@@ -2597,17 +2597,17 @@ async function startServer() {
         // Verify CNAME and issue certificate
         if (path.startsWith("/domains/") && path.endsWith("/verify") && method === "POST") {
           const domain = path.split("/")[2];
-          return await domainHandler.handleVerifyAndIssueCertificate(decodeURIComponent(domain), authContext);
+          return await domainHandler.handleVerifyAndIssueCertificate(decodeURIComponent(domain), authContext, await domainHandler.requestedOrganization(req));
         }
 
         if (path.startsWith("/domains/") && path.endsWith("/resync") && method === "POST") {
           const domain = path.split("/")[2];
-          return await domainHandler.handleResyncDomain(decodeURIComponent(domain), authContext);
+          return await domainHandler.handleResyncDomain(decodeURIComponent(domain), authContext, await domainHandler.requestedOrganization(req));
         }
 
         if (path.startsWith("/domains/") && path.endsWith("/transfer") && method === "POST") {
           const domain = path.split("/")[2];
-          return await domainHandler.handleTransferDomain(decodeURIComponent(domain), req, authContext);
+          return await domainHandler.handleTransferDomain(decodeURIComponent(domain), req, authContext, await domainHandler.requestedOrganization(req));
         }
 
         if (path.startsWith("/domains/") && path.endsWith("/backup") && method === "POST") {
@@ -2619,7 +2619,7 @@ async function startServer() {
           const parts = path.split("/");
           const domain = parts[2];
           const backupId = parts[4];
-          return await domainHandler.handleRestoreDomain(decodeURIComponent(domain), backupId, authContext);
+          return await domainHandler.handleRestoreDomain(decodeURIComponent(domain), backupId, authContext, await domainHandler.requestedOrganization(req));
         }
 
         if (path.startsWith("/domains/") && path.includes("/backup") && method === "GET") {
@@ -2635,7 +2635,8 @@ async function startServer() {
 
         if (path.startsWith("/domains/") && method === "DELETE") {
           const domain = path.split("/")[2];
-          return await domainHandler.handleDeleteDomain(decodeURIComponent(domain), authContext);
+          // ?organizationId=: only that organization's domain (kconsole's platform key).
+          return await domainHandler.handleDeleteDomain(decodeURIComponent(domain), authContext, await domainHandler.requestedOrganization(req));
         }
 
         // ============ Certificate Sync API (for multi-server cert distribution) ============

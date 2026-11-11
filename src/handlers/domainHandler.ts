@@ -37,6 +37,42 @@ async function denyUnlessDomainOwner(domain: string, ctx: AuthContext): Promise<
   );
 }
 
+/**
+ * The organization a request says it acts for: `?organizationId=` (kconsole's
+ * platform key, managing a customer's domain), or `organizationId` in a JSON
+ * body. Null when it names none.
+ */
+export async function requestedOrganization(req: Request): Promise<string | null> {
+  const fromQuery = new URL(req.url).searchParams.get("organizationId");
+  if (fromQuery) return fromQuery;
+  if (!(req.headers.get("content-type") || "").includes("application/json")) return null;
+  try {
+    const body = await req.clone().json() as { organizationId?: unknown };
+    return typeof body?.organizationId === "string" && body.organizationId ? body.organizationId : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A request acting for an organization changes only that organization's
+ * domains: delete, verify, re-sync, transfer and restore. kconsole manages
+ * every customer's domains with one platform key, which may change any
+ * domain; with this, a kconsole bug or a wrong service can't change another
+ * customer's domain once kconsole says whose it is. Without an organizationId,
+ * nothing changes (privileged callers keep managing every domain).
+ */
+async function denyIfNotActingOrgsDomain(domain: string, actingFor: string | null | undefined): Promise<Response | null> {
+  if (!actingFor) return null;
+  const record = await database.getCustomDomainByName(domain);
+  if (!record || record.organizationId === actingFor) return null;
+  console.warn(`🚫 Refused a change to ${domain} for org ${actingFor}: it belongs to org ${record.organizationId ?? "(none)"}`);
+  return new Response(
+    JSON.stringify({ success: false, message: `Domain ${domain} belongs to another organization` } as DomainResponse),
+    { status: 403, headers: { "Content-Type": "application/json" } }
+  );
+}
+
 // `clientIp` is the verified visitor address from the server (utils/clientIp.ts).
 export async function handleRegisterDomain(req: Request, clientIp: string, authContext: AuthContext): Promise<Response> {
   try {
@@ -146,6 +182,18 @@ export async function handleRegisterDomain(req: Request, clientIp: string, authC
       { status: 201, headers: { "Content-Type": "application/json" } }
     );
   } catch (error) {
+    // Another organization's pending registration holds it: the caller is told
+    // how to prove the domain is theirs (domainService.registerCustomDomain).
+    if (error instanceof domainService.DomainClaimRequiredError) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          message: error.message,
+          claim: { type: "TXT", name: error.domain, value: error.txtValue },
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } }
+      );
+    }
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.error("Domain registration error:", errorMsg);
 
@@ -233,9 +281,9 @@ export async function handleListDomains(authContext: AuthContext): Promise<Respo
   }
 }
 
-export async function handleDeleteDomain(domain: string, authContext: AuthContext): Promise<Response> {
+export async function handleDeleteDomain(domain: string, authContext: AuthContext, actingFor?: string | null): Promise<Response> {
   try {
-    const denied = await denyUnlessDomainOwner(domain, authContext);
+    const denied = await denyUnlessDomainOwner(domain, authContext) ?? await denyIfNotActingOrgsDomain(domain, actingFor);
     if (denied) return denied;
 
     if (!domain) {
@@ -283,9 +331,9 @@ export async function handleDeleteDomain(domain: string, authContext: AuthContex
   }
 }
 
-export async function handleResyncDomain(domain: string, authContext: AuthContext): Promise<Response> {
+export async function handleResyncDomain(domain: string, authContext: AuthContext, actingFor?: string | null): Promise<Response> {
   try {
-    const denied = await denyUnlessDomainOwner(domain, authContext);
+    const denied = await denyUnlessDomainOwner(domain, authContext) ?? await denyIfNotActingOrgsDomain(domain, actingFor);
     if (denied) return denied;
 
     if (!domain) {
@@ -321,9 +369,10 @@ export async function handleResyncDomain(domain: string, authContext: AuthContex
   }
 }
 
-export async function handleTransferDomain(domain: string, req: Request, authContext: AuthContext): Promise<Response> {
+export async function handleTransferDomain(domain: string, req: Request, authContext: AuthContext, actingFor?: string | null): Promise<Response> {
   try {
-    const denied = await denyUnlessDomainOwner(decodeURIComponent(domain), authContext);
+    const denied = await denyUnlessDomainOwner(decodeURIComponent(domain), authContext) ??
+      await denyIfNotActingOrgsDomain(decodeURIComponent(domain), actingFor);
     if (denied) return denied;
 
     if (!domain) {
@@ -416,9 +465,10 @@ export async function handleBackupDomain(domain: string, authContext: AuthContex
   }
 }
 
-export async function handleRestoreDomain(domain: string, backupId: string, authContext: AuthContext): Promise<Response> {
+export async function handleRestoreDomain(domain: string, backupId: string, authContext: AuthContext, actingFor?: string | null): Promise<Response> {
   try {
-    const denied = await denyUnlessDomainOwner(decodeURIComponent(domain), authContext);
+    const denied = await denyUnlessDomainOwner(decodeURIComponent(domain), authContext) ??
+      await denyIfNotActingOrgsDomain(decodeURIComponent(domain), actingFor);
     if (denied) return denied;
 
     if (!domain) {
@@ -595,9 +645,9 @@ export async function handleCheckCnameStatus(domain: string, authContext: AuthCo
  * Verify CNAME and issue certificate
  * POST /domains/:domain/verify
  */
-export async function handleVerifyAndIssueCertificate(domain: string, authContext: AuthContext): Promise<Response> {
+export async function handleVerifyAndIssueCertificate(domain: string, authContext: AuthContext, actingFor?: string | null): Promise<Response> {
   try {
-    const denied = await denyUnlessDomainOwner(domain, authContext);
+    const denied = await denyUnlessDomainOwner(domain, authContext) ?? await denyIfNotActingOrgsDomain(domain, actingFor);
     if (denied) return denied;
 
     if (!domain) {
