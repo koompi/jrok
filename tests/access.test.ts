@@ -154,7 +154,11 @@ describe("resolveDomainOwner (POST /domains)", () => {
 
   test("no organizationId (the CLI sends none): the caller's own org", async () => {
     expect(await resolveDomainOwner(ctx.aliceKey, undefined, { lookupUserOrgs })).toEqual({ ok: true, organizationId: "org-alice" });
-    expect(await resolveDomainOwner(ctx.orgless, undefined, { lookupUserOrgs })).toEqual({ ok: true, organizationId: undefined });
+  });
+
+  test("a caller with no organization is refused (its registration only held the name from others)", async () => {
+    expect(await resolveDomainOwner(ctx.orgless, undefined, { lookupUserOrgs }))
+      .toEqual({ ok: false, status: 403, message: "You must be part of an organization to register custom domains" });
   });
 });
 

@@ -1,6 +1,31 @@
 ---
 # Ansible Role: Deploy and run jrok application (without Docker)
 
+# jrok_self_serve (default off): JROK_SELF_SERVE, src/config/selfServe.ts. Off,
+# nobody but KOOMPI Cloud makes jrok organizations or API keys, so nobody can
+# claim names under KOOMPI Cloud's domain on their own. "on" for a self-hosted
+# jrok that people sign up to.
+#
+# impersonation_key_ids: the platform key(s), comma-separated jrok API key ids
+# (kconsole's JROK_API_KEY, and the workers' if they use other keys):
+# JROK_IMPERSONATION_KEY_IDS, src/config/impersonation.ts. Unset, EVERY key of
+# KOOMPI Cloud's jrok organization may manage every customer's domains, IP
+# rules and agents. With self-serve off a deploy needs it; "org" keeps the old
+# rule knowingly. Rotating a key gives it a new id: put the new id here and
+# deploy, or kconsole loses its platform rights until then.
+- name: The platform key is named (impersonation_key_ids) when self-serve is off
+  assert:
+    that:
+      - (impersonation_key_ids | default('') | string | trim | length) > 0
+    fail_msg: >-
+      jrok_self_serve is off but impersonation_key_ids is not set, so every key of KOOMPI Cloud's jrok
+      organization would count as the platform key. Set impersonation_key_ids in the inventory to the id(s)
+      of the key(s) kconsole and its workers use (db.apiKeys: id, matched by keyPrefix, the key's first 14
+      characters), or impersonation_key_ids=org to keep the organization rule.
+    quiet: true
+  when: not (jrok_self_serve_on | bool)
+  tags: ["app"]
+
 - name: Create application directory
   file:
     path: "{{ app_dir }}"
@@ -249,6 +274,17 @@
       {% endif %}
       {% if telegram_bot_token | length > 0 and telegram_chat_id | length > 0 %}
       Environment=TELEGRAM_CHAT_ID={{ telegram_chat_id }}
+      {% endif %}
+      # Self-serve sign-up, organizations and API keys (src/config/selfServe.ts):
+      # off, only KOOMPI Cloud makes them (jrok_self_serve, default off).
+      Environment=JROK_SELF_SERVE={{ 'on' if (jrok_self_serve_on | bool) else 'off' }}
+      # The platform key(s) (src/config/impersonation.ts); see the assert at the top.
+      {% if (impersonation_key_ids | default('') | string | trim) not in ['', 'org'] %}
+      Environment=JROK_IMPERSONATION_KEY_IDS={{ impersonation_key_ids | string | trim }}
+      {% endif %}
+      {% if domain_pending_ttl_hours is defined %}
+      # How long an unverified custom domain holds its name from other organizations (default 72)
+      Environment=DOMAIN_PENDING_TTL_HOURS={{ domain_pending_ttl_hours }}
       {% endif %}
       # The server key (API_KEY) is accepted only from this machine and the
       # edges, plus server_key_sources (comma-separated; e.g. kconsole's

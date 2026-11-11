@@ -66,6 +66,10 @@
     # edge answers to it; it needs no DNS record.
     jrok_peer_name: "{{ peer_name | default('jrok-peer.' ~ jrok_base_domains[0]) }}"
     jrok_peer_gateway_port: 3001
+    # Self-serve sign-up, organizations and API keys (JROK_SELF_SERVE,
+    # src/config/selfServe.ts): off unless jrok_self_serve is on/true. Off,
+    # only KOOMPI Cloud makes them; see roles/app for impersonation_key_ids.
+    jrok_self_serve_on: "{{ (jrok_self_serve | default('off') | string | lower) in ['on', 'true', 'yes', '1'] }}"
     # Addresses other edges connect from: their ansible_host, plus extras.
     jrok_peer_sources: "{{ (groups['jrok_servers'] | map('extract', hostvars, 'ansible_host') | list) + (jrok_port_extra_sources | default([])) }}"
 

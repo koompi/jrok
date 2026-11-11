@@ -5,6 +5,7 @@ import { extractAgentToken } from "../src/handlers/agentHandler";
 import {
   canImpersonate,
   resolveAgentOrg,
+  describePlatformKeys,
   DEFAULT_IMPERSONATION_ORG_IDS,
 } from "../src/config/impersonation";
 
@@ -94,6 +95,16 @@ describe("organization impersonation", () => {
     // Another key of the same org, or a '*' key, no longer qualifies.
     expect(canImpersonate({ ...platformKey, apiKeyId: "someone-elses-key" })).toBe(false);
     expect(canImpersonate({ organizationId: "x", apiKeyId: "k", permissions: ["*"] })).toBe(false);
+  });
+
+  test("the startup log warns while the platform key isn't pinned to key ids (audit 2026-11-11)", () => {
+    expect(describePlatformKeys()).toMatchObject({ warn: true });
+    expect(describePlatformKeys().message).toContain(`EVERY key of org ${DEFAULT_IMPERSONATION_ORG_IDS[0]}`);
+    process.env.JROK_IMPERSONATION_KEY_IDS = "kconsole-key,worker-key";
+    expect(describePlatformKeys()).toEqual({ message: "Platform key(s): kconsole-key, worker-key (JROK_IMPERSONATION_KEY_IDS)", warn: false });
+    delete process.env.JROK_IMPERSONATION_KEY_IDS;
+    process.env.JROK_IMPERSONATION_ORG_IDS = "none";
+    expect(describePlatformKeys().warn).toBe(false);
   });
 
   test("JROK_IMPERSONATION_ORG_IDS replaces the default org; 'none' disables", () => {

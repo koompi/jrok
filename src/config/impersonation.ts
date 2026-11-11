@@ -41,6 +41,23 @@ export function impersonationKeyIds(): Set<string> {
   return new Set(csv(process.env.JROK_IMPERSONATION_KEY_IDS));
 }
 
+/**
+ * What this server takes for the platform key, for its startup log. Unpinned,
+ * every key anyone makes in a platform org (a staff member's own CLI key, say)
+ * may manage every customer's domains, IP rules and agents.
+ */
+export function describePlatformKeys(): { message: string; warn: boolean } {
+  const keyIds = impersonationKeyIds();
+  if (keyIds.size > 0) return { message: `Platform key(s): ${[...keyIds].join(", ")} (JROK_IMPERSONATION_KEY_IDS)`, warn: false };
+  const orgs = [...impersonationOrgIds()];
+  if (orgs.length === 0) return { message: "No platform key: no key may act for another organization", warn: false };
+  return {
+    message: `JROK_IMPERSONATION_KEY_IDS is not set: EVERY key of org ${orgs.join(", ")} (and any '*'/'sudo' key) counts as the platform key. ` +
+      `Set it to kconsole's key id(s).`,
+    warn: true,
+  };
+}
+
 export interface AgentKeyIdentity {
   organizationId?: string;
   apiKeyId?: string;

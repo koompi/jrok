@@ -31,6 +31,8 @@ import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
 import * as planLimitService from "./services/planLimitService";
 import { PROXY_MODE } from "./config/proxyMode";
+import { describePlatformKeys } from "./config/impersonation";
+import { selfServeOpen } from "./config/selfServe";
 import { allBaseDomains } from "./utils/baseDomains";
 import { fromTrustedProxy, getClientIp, setForwardedClientHeaders, trustedProxyHops, trustedProxyIps } from "./utils/clientIp";
 import { isFromPeer, stripPeerHeaders } from "./utils/peerLink";
@@ -2870,6 +2872,12 @@ async function startServer() {
     if (serverKeySources().length === 0) {
       console.warn("⚠️ SERVER_KEY_SOURCES is not set: the server key works from any address. Set it to the edges' (and any operator's) addresses.");
     }
+    const platformKeys = describePlatformKeys();
+    if (platformKeys.warn) console.warn(`⚠️ ${platformKeys.message}`);
+    else console.log(`🔑 ${platformKeys.message}`);
+    console.log(selfServeOpen()
+      ? "👤 Self-serve open: anyone signing in may create organizations and API keys (JROK_SELF_SERVE=off closes it)"
+      : "👤 Self-serve closed (JROK_SELF_SERVE=off): new accounts start pending; organizations and keys are made by KOOMPI Cloud");
     console.log(`🔌 WebSocket agent endpoint: ws://localhost:${server.port}/ws/agent`);
 
     // Flush accumulated bandwidth stats to MongoDB every 30 seconds (batched writes)

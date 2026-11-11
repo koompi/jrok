@@ -1,7 +1,8 @@
 import type { AuthContext, TunnelResponse, ListTunnelsResponse, CreateTunnelRequest } from "../types/index";
 import * as tunnelService from "../services/tunnelService";
 import * as authService from "../services/authService";
-import { checkOrgAccess } from "../utils/access";
+import * as agentService from "../services/agentService";
+import { checkOrgAccess, isPrivileged } from "../utils/access";
 import { isReservedTunnelName } from "../utils/hostRouting";
 
 // Helper to create JSON response
@@ -19,11 +20,6 @@ export async function handleCreateTunnel(req: Request): Promise<Response> {
     return jsonResponse({ success: false, message: "Unauthorized" }, 401);
   }
 
-  // Get organization ID from auth context
-  const organizationId = authContext.isApiKeyAuth 
-    ? authContext.organization?.id 
-    : null; // For user auth, org should be passed in body
-
   try {
     const body = (await req.json()) as CreateTunnelRequest & { agentId: string; organizationId?: string };
 
@@ -39,8 +35,15 @@ export async function handleCreateTunnel(req: Request): Promise<Response> {
       return jsonResponse({ success: false, message: `'${body.domain}' is reserved` } as TunnelResponse, 403);
     }
 
-    // Use org from API key or from body
-    const finalOrgId = organizationId || body.organizationId;
+    // The agent must be the caller's, and the tunnel is its organization's.
+    // Any signed-in account used to name any connected agent and any
+    // organizationId here: a record that holds the name from everyone else,
+    // or a TCP port opened to another organization's agent (a database).
+    const agent = await agentService.getAgentAsync(body.agentId);
+    if (!agent || !(await checkOrgAccess(authContext, agent.organizationId)).allowed) {
+      return jsonResponse({ success: false, message: "Agent not connected" } as TunnelResponse, 404);
+    }
+    const finalOrgId = isPrivileged(authContext) ? (body.organizationId || agent.organizationId) : agent.organizationId;
 
     const tunnel = await tunnelService.createTunnel(body, body.agentId, finalOrgId);
 

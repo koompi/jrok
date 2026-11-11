@@ -2,6 +2,7 @@ import * as authService from "../services/authService";
 import * as organizationService from "../services/organizationService";
 import * as apiKeyService from "../services/apiKeyService";
 import * as planLimitService from "../services/planLimitService";
+import { mayCreateOrganization, mayCreateApiKey } from "../config/selfServe";
 import type { ApiKeyPermission } from "../types/index";
 
 // Helper to create JSON response
@@ -18,6 +19,12 @@ export async function handleCreateOrganization(req: Request): Promise<Response> 
 
   if (!authContext?.user) {
     return jsonResponse({ success: false, message: "Unauthorized" }, 401);
+  }
+
+  // Self-serve closed (JROK_SELF_SERVE=off): only super-admins make organizations.
+  const selfServe = mayCreateOrganization(authContext.user);
+  if (!selfServe.allowed) {
+    return jsonResponse({ success: false, message: selfServe.message }, 403);
   }
 
   try {
@@ -322,6 +329,13 @@ export async function handleCreateApiKey(req: Request, orgId: string): Promise<R
 
   if (!organizationService.isAdminOrOwner(organization, authContext.user.id)) {
     return jsonResponse({ success: false, message: "Forbidden" }, 403);
+  }
+
+  // Self-serve closed (JROK_SELF_SERVE=off): new keys only in KOOMPI Cloud's
+  // own organization, or by a super-admin.
+  const selfServe = mayCreateApiKey(authContext.user, organization.id);
+  if (!selfServe.allowed) {
+    return jsonResponse({ success: false, message: selfServe.message }, 403);
   }
 
   // Check limits

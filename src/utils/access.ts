@@ -133,6 +133,8 @@ export async function filterOwned<T>(
  * customers). Anyone else gets their own org: an organizationId in the body
  * that isn't theirs is refused, and an absent one defaults to the caller's org
  * (the CLI sends none, which used to leave the domain with no owner at all).
+ * A caller with no org at all is refused: its registration could never carry a
+ * tunnel (agents need the domain's org), and only held the name from others.
  */
 export async function resolveDomainOwner(
   ctx: AuthContext | null | undefined,
@@ -146,7 +148,9 @@ export async function resolveDomainOwner(
       ? { ok: true, organizationId: requestedOrg }
       : { ok: false, status: 403, message: "organizationId is not one of your organizations" };
   }
-  return { ok: true, organizationId: ctx?.apiKey?.organizationId || ctx?.organization?.id || undefined };
+  const own = ctx?.apiKey?.organizationId || ctx?.organization?.id || [...orgs][0];
+  if (!own) return { ok: false, status: 403, message: "You must be part of an organization to register custom domains" };
+  return { ok: true, organizationId: own };
 }
 
 async function findTunnelsByRef(ref: string): Promise<Array<{ organizationId?: string }>> {

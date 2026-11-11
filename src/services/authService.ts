@@ -1,6 +1,7 @@
 import { getCollections } from "../utils/mongodb";
 import { generateId } from "../utils/helpers";
 import { getSystemSettings } from "./adminService";
+import { newAccountStatus } from "../config/selfServe";
 import type {
   User,
   AuthSession,
@@ -196,9 +197,10 @@ export async function findOrCreateUser(koompUser: KoompiUserInfo["user"]): Promi
   const userCount = await collections.users.countDocuments();
   const isSuperAdmin = userCount === 0;
 
-  // Check system settings for waiting list
+  // Waiting list, or self-serve closed (config/selfServe.ts): a new account
+  // starts pending, with no organization and no way to make one.
   const settings = await getSystemSettings();
-  const initialStatus = isSuperAdmin ? 'active' : (settings.waitingListEnabled ? 'pending' : 'active');
+  const initialStatus = newAccountStatus(isSuperAdmin, settings.waitingListEnabled);
 
   // Create new user
   const newUser: User = {
