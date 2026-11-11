@@ -90,6 +90,19 @@ dashboard_url=https://tunnel.yourdomain.com
 jwt_secret=YOUR_JWT_SECRET_64_CHARS
 cert_sync_api_key=YOUR_CERT_SYNC_KEY
 
+# Accounts (JROK_SELF_SERVE, src/config/selfServe.ts). Default off: new
+# accounts start pending, only super-admins create organizations, and API keys
+# are created only in the platform organization. "on" for a jrok that people
+# sign up to themselves.
+# jrok_self_serve=on
+# The platform key(s): the jrok API key id(s) kconsole (and its workers) use,
+# comma-separated (JROK_IMPERSONATION_KEY_IDS). Required while self-serve is
+# off; "org" keeps the old rule (every key of the platform organization).
+impersonation_key_ids=YOUR_PLATFORM_KEY_ID
+# How long an unverified custom domain holds its name from other organizations
+# (DOMAIN_PENDING_TTL_HOURS, default 72).
+# domain_pending_ttl_hours=72
+
 # Repository settings
 repo_url=https://github.com/koompi/jrok.git
 repo_branch=main

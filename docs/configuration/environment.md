@@ -62,6 +62,11 @@ These must be set for Jrok to function properly.
 |----------|-------------|---------|
 | `API_KEY` | Legacy API key (backward compat) | None |
 | `CERT_SYNC_API_KEY` | Key for certificate sync API | None |
+| `JROK_SELF_SERVE` | `off`: new accounts start pending, only super-admins create organizations, and API keys are created only in the platform organization (`JROK_IMPERSONATION_ORG_IDS`). Existing accounts, organizations and keys keep working. Ansible sets `off` unless `jrok_self_serve=on`. | on |
+| `JROK_IMPERSONATION_KEY_IDS` | The platform key(s): API key ids (comma-separated) that may act for other organizations and manage every organization's domains, IP rules and agents (kconsole's). Unset: every key of the platform organization, plus any `*`/`sudo` key (logged as a warning at startup). Rotating a key gives it a new id. | None |
+| `JROK_IMPERSONATION_ORG_IDS` | The platform organization(s) (comma-separated), `none` for none | KOOMPI Cloud's organization |
+| `DOMAIN_PENDING_TTL_HOURS` | How long an unverified custom-domain registration holds its name from other organizations. After it, another organization's registration replaces it; before it, one that publishes `jrok-verify=<its claim token>` as TXT at the domain does. | 72 |
+| `FLOOD_EXEMPT` | Addresses (comma-separated IPs or IPv4 ranges) never blocked for floods. They still get only their share of an app's waiting requests (`APP_MAX_WAITING`). List no host that runs customers' code. | None |
 
 ### Notifications (Optional)
 

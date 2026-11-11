@@ -51,6 +51,28 @@ The wildcard certificate (`tunnel.koompi.cloud`: `public.` and `tunnel.koompi.cl
 
 The server key (`API_KEY`) works only from the edges themselves and from `server_key_sources` (inventory, comma-separated). Elsewhere it is refused and the edge logs `🚫 Server key presented from <ip>`. Operators use it on an edge: `ssh root@<edge>`, then `curl -H "X-Admin-Key: <key>" http://127.0.0.1:3000/…`. kconsole must call with a `jrok_` key (its `JROK_API_KEY`); if that is the server key, put kconsole's outgoing addresses in `server_key_sources`, or better, give it a `jrok_` key of KOOMPI Cloud's organization.
 
+## Accounts and the platform key
+
+Since 2026-11-11 (audit), only KOOMPI Cloud makes jrok organizations and API keys (`JROK_SELF_SERVE=off`, Ansible's default; src/config/selfServe.ts). Before, anyone with a KOOMPI ID could sign in to jrok directly, make an organization and a `tunnel:create` key, and claim any free `<name>.public.koompi.cloud` (phishing under our domain), a name a customer was about to pick, or a customer's custom domain.
+- **New accounts** start pending. They can sign in but have no organization and can't make one. A Super Admin approves one, or an admin of KOOMPI Cloud's jrok organization adds it as a member.
+- **Organizations:** created by Super Admins only.
+- **API keys:** created only in KOOMPI Cloud's organization (`JROK_IMPERSONATION_ORG_IDS`, default `af9ef06c-…`) by its owners and admins. A Super Admin still may in any organization they own or administer. Rotating a key is allowed.
+- **Unchanged:** existing accounts, organizations and keys keep working, and kconsole needs nothing of this: it works with its platform key. To shut out another organization, disable it (`PUT /admin/organizations/<id>/status` `{"status":"disabled"}`, Super Admin): its keys stop on the REST API at once on that edge and within 30 s on the others, and its agents can't connect again (those already connected stay until they reconnect).
+
+**The platform key** (`impersonation_key_ids` in the inventory, `JROK_IMPERSONATION_KEY_IDS`) is the key, or keys, that may act for other organizations and manage every customer's domains, IP rules and agents: kconsole's `JROK_API_KEY`, and the workers' if they use other keys. Unset, every key of KOOMPI Cloud's organization counted, a staff member's own CLI key too (jrok logs a warning at startup). With self-serve off, an `app` deploy refuses to run until it is set (`impersonation_key_ids=org` keeps the old rule knowingly).
+- **Finding the ids** (read-only, in production's `jrok` database): `db.apiKeys.find({organizationId: "af9ef06c-d009-4ed4-8d13-017622ac2014", isActive: true}, {id: 1, name: 1, keyPrefix: 1, lastUsedAt: 1})`. `keyPrefix` is the key's first 14 characters (`jrok_` and 9 more): match it against the start of kconsole's and the workers' `JROK_API_KEY`, never print the keys.
+- **Rotating** a platform key gives it a new id: put the new id in the inventory and deploy (`app`), or kconsole loses its rights until then.
+
+**Before the first deploy with this,** check read-only that every key agents use belongs to an organization that isn't disabled (`isActive` not `false`, `status` not `disabled`): such keys are now refused.
+
+## Custom domains: who holds a name
+
+- **A pending registration** (never verified) holds its hostname from other organizations for 72 hours (`domain_pending_ttl_hours`, `DOMAIN_PENDING_TTL_HOURS`). It used to hold it forever. After that, another organization's registration replaces it. Its owner may still verify it while nobody has (kconsole checks pending domains for 7 days). A registration whose DNS was verified for its owner, but whose certificate then failed, is not freed by time.
+- **Taking over at once:** an organization adding a hostname that another one's pending registration holds gets `409`, with a TXT record to publish: `jrok-verify=<token>` at the hostname, where the token names that organization alone. With it in DNS, adding the domain again replaces the other registration, and the same record verifies it. An active domain is never taken over.
+- **No organization, no registration:** a signed-in account with no organization can't register a domain (it could only hold the name from others).
+- **Every registration** gets its own CNAME target (`<name>-<8 hex>.public.koompi.cloud`) and TXT token, so a domain deleted and registered again by another organization can't verify with the first owner's records still in DNS.
+- **Acting for an organization:** with `?organizationId=<org>` (or `organizationId` in a JSON body), `DELETE /domains/<d>` and its verify, re-sync, transfer and restore refuse (403) a domain of any other organization, even for the platform key. kconsole should send its service's organization there. Without it, the platform key manages every domain, as before.
+
 ## Deploy
 
 ```bash
@@ -138,14 +160,16 @@ On 2026-11-01 the new edges were built first, and edge1's checker, still listing
 
 ## Floods
 
-- **Settings:** see jrok's [scale-out plan](jrok-scale-out-plan.md), 3.6. `flood_exempt` in the inventory lists the deploy workers (116.212.132.113, 202.124.44.232): apps calling other apps through their public URLs must never be blocked. Add any new worker or monitor there and run `scripts/deploy-production.sh` (tag `app`).
+- **Settings:** see jrok's [scale-out plan](jrok-scale-out-plan.md), 3.6. `flood_exempt` in the inventory lists addresses never blocked for floods; today the deploy workers, so apps calling other apps through their public URLs are never blocked. Changes take `scripts/deploy-production.sh` (tag `app`).
+- **Exempt is not unlimited (2026-11-11):** an exempt address gets only its share of an app's waiting requests, like any other (below, "One app busy"). A deploy worker's address also carries its customers' apps' outbound traffic, and one such app could fill another app's every waiting slot.
+- **What to list:** only hosts that run no customers' code (kconsole's control hosts, monitors). A deploy or build worker in `flood_exempt` lets any app on it send another app any number of requests without ever being blocked. Without the workers listed, an app calling another app at more than 3,000 requests in 10 s from one worker is refused for the rest of that window, and blocked from that app on a repeat (with every other app on that worker calling it). If real traffic does that, raise `flood_requests` rather than exempting the worker.
 - **What is refused:** an address (an IPv6 /64 counts as one) sending one app more than 3,000 requests in 10 s gets 429 from that app for the rest of those 10 s (`🚦 … the rest of this window refused`). Doing it again within the hour blocks it from that app on every edge: 10 minutes, doubling each time, at most an hour. Its other apps are never refused. An address asking one edge for more than 500 different names in 10 s (names at random, each a MongoDB lookup) is refused every app on that edge for 10 minutes.
 - **A block happening:** an edge logs `🛑 Flood blocked: <ip> …` (`journalctl -u jrok | grep "Flood blocked"`). With `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` set on the edges, a person gets the same message; not configured yet.
 - **List or lift blocks** with the server key, on any edge itself (see "The server key"; the change reaches the others within 10 s):
   - list: `GET /security/blocked-ips`: `blockedIps` (by hand, every app) and `appBlocks` (floods, one app each);
   - lift: `POST /security/unblock-ip` with `{"ip":"…"}` (every block of that address), or `{"ip":"…","app":"…"}` (that app's);
   - block by hand: `POST /security/block-ip` with `{"ip":"…","reason":"…","duration":3600}`.
-- **One app busy:** its visitors get 503 with `X-Jrok-App-Busy`, and jrok logs `🚦 <app>: N requests already waiting`. The app itself is too slow for its traffic: more replicas, or a look at the app. Once half of its 1,000 waiting slots are taken, one address may hold at most 100 of them; beyond that, that address alone gets 429 (`🚦 <app>: <ip> has N of its M waiting requests`).
+- **One app busy:** its visitors get 503 with `X-Jrok-App-Busy`, and jrok logs `🚦 <app>: N requests already waiting`. The app itself is too slow for its traffic: more replicas, or a look at the app. Once half of its 1,000 waiting slots are taken, one address may hold at most 100 of them; beyond that, that address alone gets 429 (`🚦 <app>: <ip> has N of its M waiting requests`). This holds for `flood_exempt` addresses too; private addresses have no share.
 
 ## Edge cache
 
