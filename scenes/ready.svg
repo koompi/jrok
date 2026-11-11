@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 320" focusable="false">
+<!-- domain-pending: the dolphin bringing the key for the new domain's HTTPS padlock. The dolphin is brand/kc-dolphin.svg; the colors are the classes in index.html. -->
+<rect class="sky" width="480" height="320"/>
+<circle class="star" cx="48" cy="34" r="1.6"/><circle class="star" cx="170" cy="22" r="1.2"/><circle class="star" cx="236" cy="58" r="1.6"/><circle class="star" cx="300" cy="28" r="1.2"/><circle class="star" cx="458" cy="122" r="1.4"/>
+<circle class="sun" cx="410" cy="62" r="26"/>
+<g class="cloud" transform="translate(30 40)"><circle cx="18" cy="22" r="16"/><circle cx="40" cy="12" r="20"/><circle cx="62" cy="24" r="13"/><rect x="2" y="22" width="74" height="16" rx="8"/></g>
+<path class="sea1" d="M0 178C40 172 80 184 120 178S200 172 240 178 320 184 360 178 440 172 480 178V320H0Z"/>
+<path class="sea2" d="M0 216C60 208 100 224 160 216S260 208 320 216 420 224 480 216V320H0Z"/>
+<g class="bob2" transform="translate(0 -10)">
+<path d="M342 182v-22a24 24 0 0 1 48 0v22" fill="none" stroke="var(--metal)" stroke-width="11"/>
+<rect class="hat" x="324" y="178" width="84" height="72" rx="14"/>
+<rect class="hat2" x="324" y="226" width="84" height="24" rx="12"/>
+<rect class="hat2" x="324" y="226" width="84" height="12"/>
+<circle class="ink" cx="366" cy="206" r="8"/>
+<path class="ink" d="M362 210h8l2 16h-12Z"/>
+</g>
+<path class="white twinkle" d="M300 140l3.2 7.8 7.8 3.2-7.8 3.2-3.2 7.8-3.2-7.8-7.8-3.2 7.8-3.2Z"/>
+<path class="white twinkle t2" d="M432 156l2.4 5.6 5.6 2.4-5.6 2.4-2.4 5.6-2.4-5.6-5.6-2.4 5.6-2.4Z"/>
+<path class="hat twinkle t2" d="M420 112l2 4.8 4.8 2-4.8 2-2 4.8-2-4.8-4.8-2 4.8-2Z"/>
+<g class="bob">
+<g class="nudge">
+<circle cx="234" cy="222" r="10" fill="none" stroke="var(--hat2)" stroke-width="6"/>
+<rect class="hat2" x="242" y="219" width="40" height="6" rx="3"/>
+<rect class="hat2" x="268" y="223" width="5" height="9" rx="1.5"/>
+<rect class="hat2" x="276" y="223" width="5" height="7" rx="1.5"/>
+</g>
+<g transform="translate(24 52) scale(2.3)">
+<path class="dol" d="M90.2 89.2C94 69 88.3 49.4 74.05 46C63.6 44 54.1 41 47.45 39.4C45.08 35.5 42.23 32 38.52 30.6C36.72 30 35.77 31 35.86 32.8C36.05 35.5 35.1 38 32.73 41C24.18 46.5 17.05 65.5 14.2 88.6C27.5 81.75 38.9 83.18 52.2 92.54S78.8 97.62 90.2 89.2Z"/>
+<circle class="ink" cx="78.8" cy="62" r="4.6"/>
+<path class="smile" d="M87.83 73.9C84.97 77.12 81.17 77.12 78.33 73.9"/>
+<circle class="dol" cx="93.24" cy="62.98" r="1.9"/>
+<circle class="dol" cx="96.28" cy="52.62" r="2.6"/>
+<circle class="dol" cx="97.42" cy="42.2" r="3.3"/>
+</g>
+</g>
+<path class="sea3" d="M0 246C40 240 80 250 120 244S200 240 250 246 330 258 380 252 450 244 480 248V320H0Z"/>
+<path class="foam" d="M58 251c9-4 18-4 27 0M212 253c9-4 18-4 27 0M34 276c12-5 24-5 36 0M180 288c12-5 24-5 36 0M352 276c12-5 24-5 36 0"/>
+</svg>

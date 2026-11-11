@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 320" focusable="false">
+<!-- no-answer: the dolphin waiting beside a big stopwatch, its words still on the way. The dolphin is brand/kc-dolphin.svg; the colors are the classes in index.html. -->
+<rect class="sky" width="480" height="320"/>
+<circle class="star" cx="48" cy="34" r="1.6"/><circle class="star" cx="170" cy="22" r="1.2"/><circle class="star" cx="236" cy="58" r="1.6"/><circle class="star" cx="300" cy="28" r="1.2"/><circle class="star" cx="458" cy="122" r="1.4"/>
+<circle class="sun" cx="410" cy="62" r="26"/>
+<g class="cloud" transform="translate(30 40)"><circle cx="18" cy="22" r="16"/><circle cx="40" cy="12" r="20"/><circle cx="62" cy="24" r="13"/><rect x="2" y="22" width="74" height="16" rx="8"/></g>
+<path class="sea1" d="M0 178C40 172 80 184 120 178S200 172 240 178 320 184 360 178 440 172 480 178V320H0Z"/>
+<path class="sea2" d="M0 216C60 208 100 224 160 216S260 208 320 216 420 224 480 216V320H0Z"/>
+<g class="bob2">
+<rect class="box" x="350" y="116" width="20" height="16" rx="4"/>
+<rect class="box" x="342" y="108" width="36" height="10" rx="5"/>
+<rect class="box" x="398" y="132" width="12" height="18" rx="4" transform="rotate(45 404 141)"/>
+<circle class="box" cx="360" cy="196" r="62"/>
+<circle class="white" cx="360" cy="196" r="51"/>
+<path class="tick" d="M360 151v9M360 232v9M405 196h-9M315 196h9M391.8 164.2l-5 5M328.2 164.2l5 5M391.8 227.8l-5-5M328.2 227.8l5-5"/>
+<rect class="ink" x="357" y="168" width="6" height="31" rx="3" transform="rotate(-50 360 196)"/>
+<rect class="dol spin" x="357.5" y="152" width="5" height="44" rx="2.5"/>
+<circle class="ink" cx="360" cy="196" r="6"/>
+</g>
+<g class="bob">
+<path class="white" d="M178 42h80a20 20 0 0 1 20 20v8a20 20 0 0 1-20 20h-46l-16 16 2-16h-20a20 20 0 0 1-20-20v-8a20 20 0 0 1 20-20Z"/>
+<circle class="metal2 pulse" cx="200" cy="66" r="6"/>
+<circle class="metal2 pulse p2" cx="218" cy="66" r="6"/>
+<circle class="metal2 pulse p3" cx="236" cy="66" r="6"/>
+<g transform="translate(24 52) scale(2.3)">
+<path class="dol" d="M90.2 89.2C94 69 88.3 49.4 74.05 46C63.6 44 54.1 41 47.45 39.4C45.08 35.5 42.23 32 38.52 30.6C36.72 30 35.77 31 35.86 32.8C36.05 35.5 35.1 38 32.73 41C24.18 46.5 17.05 65.5 14.2 88.6C27.5 81.75 38.9 83.18 52.2 92.54S78.8 97.62 90.2 89.2Z"/>
+<circle class="ink" cx="78.8" cy="62" r="4.6"/>
+<path class="smile" d="M87.83 73.9C84.97 77.12 81.17 77.12 78.33 73.9"/>
+<circle class="dol" cx="93.24" cy="62.98" r="1.9"/>
+<circle class="dol" cx="96.28" cy="52.62" r="2.6"/>
+<circle class="dol" cx="97.42" cy="42.2" r="3.3"/>
+</g>
+</g>
+<path class="sea3" d="M0 246C40 240 80 250 120 244S200 240 250 246 330 258 380 252 450 244 480 248V320H0Z"/>
+<path class="foam" d="M58 251c9-4 18-4 27 0M212 253c9-4 18-4 27 0M34 276c12-5 24-5 36 0M180 288c12-5 24-5 36 0M352 276c12-5 24-5 36 0"/>
+</svg>
