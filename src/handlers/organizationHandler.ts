@@ -210,6 +210,9 @@ export async function handleDeleteOrganization(req: Request, orgId: string): Pro
   }
 
   const success = await organizationService.deleteOrganization(orgId);
+  // Its keys stop at once here, within 30 s on the other edges.
+  authService.invalidateApiKeyCacheWhere({ organizationId: orgId });
+  authService.invalidateUserOrgCache();
 
   return jsonResponse({
     success,
@@ -481,6 +484,8 @@ export async function handleRevokeApiKey(req: Request, orgId: string, keyId: str
   }
 
   const success = await apiKeyService.revokeApiKey(keyId);
+  // At once here, within 30 s on the other edges (authService's key cache).
+  authService.invalidateApiKeyCacheWhere({ keyId });
 
   return jsonResponse({
     success,
@@ -513,6 +518,7 @@ export async function handleRotateApiKey(req: Request, orgId: string, keyId: str
   }
 
   const result = await apiKeyService.rotateApiKey(keyId);
+  authService.invalidateApiKeyCacheWhere({ keyId });
 
   if (!result) {
     return jsonResponse({ success: false, message: "Failed to rotate API key" }, 500);

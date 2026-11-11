@@ -1,5 +1,5 @@
 import * as adminService from "../services/adminService";
-import { getSession } from "../services/authService";
+import { getSession, invalidateApiKeyCacheWhere, invalidateUserOrgCache } from "../services/authService";
 
 // Helper to create JSON response
 function jsonResponse(data: unknown, status = 200): Response {
@@ -167,6 +167,10 @@ export async function handleUpdateOrgStatus(req: Request, orgId: string): Promis
     }
 
     await adminService.updateOrganizationStatus(orgId, status);
+    // A disabled organization's keys stop at once here, within 30 s on the
+    // other edges; its agents can't connect again (validateApiKeyForAgent).
+    invalidateApiKeyCacheWhere({ organizationId: orgId });
+    invalidateUserOrgCache();
     return jsonResponse({ success: true });
   } catch (error) {
     return jsonResponse({ success: false, message: "Failed to update organization status" }, 500);

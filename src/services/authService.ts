@@ -343,7 +343,13 @@ export async function getSession(token: string): Promise<AuthSession | null> {
 }
 
 // ===== API KEY CACHE FOR PERFORMANCE =====
-// Avoids DB queries on every authenticated request
+// Avoids DB queries on every authenticated request.
+//
+// A revoked key, or a key of a disabled organization, used to keep working for
+// up to 5 minutes from this cache, on every edge (nothing ever invalidated it).
+// Now: 30 s on the other edges, at once on the edge that revoked it or disabled
+// the organization (invalidateApiKeyCacheWhere), and never past the key's own
+// expiry.
 
 interface ApiKeyCacheEntry {
   apiKey: ApiKey;
@@ -352,7 +358,7 @@ interface ApiKeyCacheEntry {
 }
 
 const apiKeyCache = new Map<string, ApiKeyCacheEntry>();
-const API_KEY_CACHE_TTL = 5 * 60 * 1000; // 5 minutes cache TTL
+export const API_KEY_CACHE_TTL = 30 * 1000;
 const LAST_USED_UPDATE_INTERVAL = 60 * 1000; // Update lastUsedAt every minute max
 const lastUsedUpdateTimes = new Map<string, number>();
 
@@ -361,6 +367,16 @@ export function invalidateApiKeyCache(keyHash?: string): void {
     apiKeyCache.delete(keyHash);
   } else {
     apiKeyCache.clear();
+  }
+}
+
+/** Forget cached keys with this id, or of this organization (revoked, rotated, disabled). */
+export function invalidateApiKeyCacheWhere(match: { keyId?: string; organizationId?: string }): void {
+  for (const [hash, entry] of apiKeyCache) {
+    if ((match.keyId && entry.apiKey.id === match.keyId) ||
+      (match.organizationId && entry.apiKey.organizationId === match.organizationId)) {
+      apiKeyCache.delete(hash);
+    }
   }
 }
 
@@ -373,7 +389,8 @@ export async function validateApiKey(key: string): Promise<{ apiKey: ApiKey; org
 
   // Check cache first
   const cached = apiKeyCache.get(keyHash);
-  if (cached && Date.now() - cached.timestamp < API_KEY_CACHE_TTL) {
+  if (cached && Date.now() - cached.timestamp < API_KEY_CACHE_TTL &&
+    !(cached.apiKey.expiresAt && cached.apiKey.expiresAt <= Date.now())) {
     // Update lastUsedAt only once per minute (not on every request!)
     const lastUpdate = lastUsedUpdateTimes.get(keyHash) || 0;
     if (Date.now() - lastUpdate > LAST_USED_UPDATE_INTERVAL) {
@@ -576,6 +593,11 @@ export async function deactivateUser(userId: string): Promise<boolean> {
   return result.modifiedCount > 0;
 }
 
+/** An organization that exists and isn't disabled (isActive unset counts as active). */
+export function organizationIsActive(org: Pick<Organization, "isActive" | "status"> | null | undefined): boolean {
+  return !!org && org.isActive !== false && org.status !== "disabled";
+}
+
 // Validate API key for agent WebSocket connections
 export async function validateApiKeyForAgent(rawKey: string): Promise<{
   valid: boolean;
@@ -610,6 +632,18 @@ export async function validateApiKeyForAgent(rawKey: string): Promise<{
   // Check expiration
   if (apiKey.expiresAt && apiKey.expiresAt < Date.now()) {
     return { valid: false, reason: "API key has expired" };
+  }
+
+  // The key's organization must still exist and be active. A disabled (or
+  // deleted) organization's keys used to keep connecting agents, so disabling
+  // an organization didn't stop its tunnels. Organizations from before the
+  // isActive field count as active.
+  const organization = await collections.organizations.findOne(
+    { id: apiKey.organizationId },
+    { projection: { isActive: 1, status: 1 } }
+  ) as Pick<Organization, "isActive" | "status"> | null;
+  if (!organizationIsActive(organization)) {
+    return { valid: false, reason: "API key's organization is disabled" };
   }
 
   // Check if key has tunnel:create permission (also accept tunnels:write for backward compatibility)
