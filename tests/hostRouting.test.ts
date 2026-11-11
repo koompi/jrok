@@ -159,10 +159,12 @@ describe("isPageLoad (who gets an HTML page for a name jrok can't route)", () =>
   });
 });
 
+// wantsPage (utils/maintenancePage.ts) is isPageLoad, or a waiting page's own
+// check whether the app is back.
 test("index.ts gives page loads on an unroutable name a page before the strict-mode 404 and the API", () => {
   const src = readFileSync(join(import.meta.dir, "../src/index.ts"), "utf8");
   const fetchStart = src.indexOf("async fetch(req: Request)");
-  const pages = src.indexOf("isPageLoad(method, req.headers)", fetchStart);
+  const pages = src.indexOf("wantsPage(method, req.headers)", fetchStart);
   const strict = src.indexOf("strictApiHosts()", fetchStart);
   const tunnelBlock = src.indexOf("if (tunnelDomain) {", fetchStart);
   expect(pages).toBeGreaterThan(fetchStart);

@@ -10,6 +10,7 @@
  * rule (P9).
  */
 import { describe, test, expect, beforeEach, afterEach, mock, setSystemTime } from "bun:test";
+import { join } from "path";
 
 type Doc = Record<string, any>;
 const ops: string[] = [];
@@ -395,6 +396,35 @@ describe("one hop", () => {
       expect(res.status).toBe(200);
     } finally {
       current.stop();
+    }
+  });
+
+  test("still a miss: a browser gets the reconnecting page with the miss's status and headers; scripts get the JSON", async () => {
+    const { pageInstead } = await import("../src/utils/maintenancePage");
+    const template = join(import.meta.dir, "..", "index.html");
+    const stale = peer(() => crossServer.routeMissResponse("lost-app"));
+    try {
+      placeRemoteAgent("lost-app", "peer-lost", stale.port);
+      const route = await crossServer.findServerForDomain("lost-app");
+      const browser = { "sec-fetch-mode": "navigate", accept: "text/html,*/*;q=0.8" };
+      for (const headers of [browser, { accept: "application/json", "user-agent": "kconsole-health-check" }]) {
+        const req = new Request("http://lost-app.tunnel.example/shop", { headers });
+        const forwarded = await crossServer.forwardToAgentServer("lost-app", route.targetServer!, req, "/shop");
+        const res = pageInstead(req, forwarded, "reconnecting", template, "edge-a");
+        expect(res.status).toBe(503);
+        expect(res.headers.get("X-Jrok-Route")).toBe("miss");
+        expect(res.headers.get("X-Jrok-Tunnel")).toBe("reconnecting");
+        if (headers === browser) {
+          expect(res.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+          expect(res.headers.get("Content-Length")).toBeNull(); // the peer's JSON length isn't the page's
+          expect(await res.text()).toContain("Reconnecting to this app");
+        } else {
+          expect(res).toBe(forwarded);
+          expect((await res.json()).message).toBe("The agent for lost-app is not on this server.");
+        }
+      }
+    } finally {
+      stale.stop();
     }
   });
 

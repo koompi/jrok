@@ -40,7 +40,7 @@ import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "
 import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
 import { firstSubprotocol } from "./utils/wsSubprotocol";
 import { DRAIN_HEADER, isDraining } from "./utils/drain";
-import { maintenancePage, statusPage, statusPageCode } from "./utils/maintenancePage";
+import { PAGE_CHECK_HEADER, pageInstead, statusPage, statusPageCode, wantsPage } from "./utils/maintenancePage";
 import { shutdownHandler } from "./utils/shutdown";
 import {
   normalizeHostname,
@@ -49,7 +49,6 @@ import {
   looksLikeAgentHandshake,
   strictApiHosts,
   describeManagementHosts,
-  isPageLoad,
 } from "./utils/hostRouting";
 
 // =============================================================================
@@ -94,6 +93,10 @@ const WS_SKIP_HEADERS = new Set(['upgrade', 'connection', 'sec-websocket-key', '
 // The CLI has a matching default; whichever side is shorter decides, so an
 // older CLI or server simply keeps its 30s.
 const TUNNEL_REQUEST_TIMEOUT_MS = parseInt(process.env.TUNNEL_REQUEST_TIMEOUT_MS || '120000');
+
+// The page a browser gets when the app can't be reached (utils/maintenancePage.ts).
+// One level up from src/ when run from source and from dist/ when built.
+const STATUS_PAGE = import.meta.dir + "/../index.html";
 
 // Store pending requests waiting for agent responses
 const pendingRequests = new Map<string, {
@@ -330,13 +333,15 @@ async function sendRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent
     const requestId = generateId();
     const timeout = setTimeout(() => {
       pendingRequests.delete(requestId);
-      resolve(new Response(
+      // A browser opening a page gets the "taking too long" page; everyone
+      // else today's JSON.
+      resolve(pageInstead(req, new Response(
         JSON.stringify({
           success: false,
           message: `Agent timeout - no response within ${TUNNEL_REQUEST_TIMEOUT_MS / 1000} seconds`
         }),
         { status: 504, headers: { "Content-Type": "application/json" } }
-      ));
+      ), "no-answer", STATUS_PAGE, crossServerService.currentServerId));
     }, TUNNEL_REQUEST_TIMEOUT_MS);
 
     // Prepare request data to send to agent
@@ -358,8 +363,10 @@ async function sendRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent
     // Passing it on let any visitor choose the IP the customer's app logs,
     // rate-limits and allowlists on.
     setForwardedClientHeaders(headers, clientIp);
-    // The edge-to-edge key and host (utils/peerLink.ts) are ours, not the app's.
+    // The edge-to-edge key and host (utils/peerLink.ts) are ours, not the app's,
+    // and so is a waiting page's check whether the app is back.
     stripPeerHeaders(headers);
+    delete headers[PAGE_CHECK_HEADER.toLowerCase()];
 
     try {
       // Read request body as raw bytes. Agents that advertise the "b64body"
@@ -1302,10 +1309,11 @@ async function startServer() {
         // koompi.com's owner saw for 20 s after the domain went live, on an edge
         // whose set was older than the activation. Looked up in MongoDB now:
         // active after all -> the app; added but not verified yet -> "getting
-        // ready" (503, reloads itself); unknown -> "not connected" (404).
-        // Scripts and API clients are left as they were, and so is everything
-        // if MongoDB can't answer.
-        if (!tunnelDomain && !ownOAuthRedirect && hostRoute.kind === "custom-candidate" && isPageLoad(method, req.headers)) {
+        // ready" (503; the page checks by itself and opens the app once it's
+        // active, its checks answered here like a page load); unknown -> "no app
+        // lives here" (404). Scripts and API clients are left as they were, and
+        // so is everything if MongoDB can't answer.
+        if (!tunnelDomain && !ownOAuthRedirect && hostRoute.kind === "custom-candidate" && wantsPage(method, req.headers)) {
           let state: "active" | "pending" | "none" | null = null;
           try {
             const { customDomainState } = await import("./utils/database");
@@ -1318,7 +1326,7 @@ async function startServer() {
             isCustomDomainRequest = true;
           } else if (state !== null) {
             const kind = state === "pending" ? "domain-pending" : "domain-unknown";
-            const page = statusPage(import.meta.dir + "/../index.html", kind, hostname, crossServerService.currentServerId);
+            const page = statusPage(STATUS_PAGE, kind, hostname, crossServerService.currentServerId);
             if (page) {
               const headers: Record<string, string> = {
                 "Content-Type": "text/html; charset=utf-8",
@@ -1333,11 +1341,13 @@ async function startServer() {
 
         // JROK_STRICT_API_HOSTS: the management API only on hosts that are ours
         // by configuration (JROK_API_HOSTS, base domains, localhost, IPs).
+        // A browser gets the "no app lives here" page (it lands here when the
+        // lookup above couldn't answer).
         if (!tunnelDomain && !ownOAuthRedirect && hostRoute.kind === "custom-candidate" && strictApiHosts()) {
-          return new Response(
+          return pageInstead(req, new Response(
             JSON.stringify({ success: false, message: "Not Found" }),
             { status: 404, headers: { "Content-Type": "application/json" } }
-          );
+          ), "domain-unknown", STATUS_PAGE, crossServerService.currentServerId);
         }
 
         // Handle preflight OPTIONS request — only for Jrok management API.
@@ -1423,13 +1433,20 @@ async function startServer() {
               return new Response("Failed to upgrade WebSocket connection", { status: 400 });
             }
 
-            return crossServerService.forwardToAgentServer(
+            const forwarded = await crossServerService.forwardToAgentServer(
               subdomain,
               routeResult.targetServer,
               req,
               url.pathname + url.search,
               visitorIp
             );
+            // The edge holding the agent no longer has it or can't be reached
+            // (X-Jrok-Route: miss / unreachable): a browser gets the
+            // "reconnecting" page. Anything else is that edge's answer.
+            const route = forwarded.headers.get("X-Jrok-Route");
+            return route === "miss" || route === "unreachable"
+              ? pageInstead(req, forwarded, "reconnecting", STATUS_PAGE, crossServerService.currentServerId)
+              : forwarded;
           }
 
           // Import agentGroupService for load-balanced agent selection
@@ -1456,9 +1473,11 @@ async function startServer() {
             // health monitor can tell "jrok has no agent for this domain" apart
             // from a user app that merely returns its own 503, and restart the
             // tunnel only in the former case.
-            const htmlContent = maintenancePage(import.meta.dir + "/../index.html", hostname, crossServerService.currentServerId);
+            // Everyone gets the page here, as before; only its words and
+            // picture are a browser's concern.
+            const htmlContent = statusPage(STATUS_PAGE, "tunnel-down", hostname, crossServerService.currentServerId);
             if (htmlContent) {
-              return addCors(new Response(htmlContent, {
+              return addCors(new Response(method === "HEAD" ? null : htmlContent, {
                 status: 503,
                 headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Jrok-Tunnel": "down" }
               }));
@@ -1502,13 +1521,15 @@ async function startServer() {
               // The deploy worker only force-restarts tunnels on "down";
               // reporting "down" here made it kill healthy tunnels that were
               // seconds away from reconnecting on their own.
-              return addCors(new Response(
+              // A browser opening a page gets the "reconnecting" page, with
+              // the same status and headers.
+              return addCors(pageInstead(req, new Response(
                 JSON.stringify({
                   success: false,
                   message: `Agent for ${subdomain} is not connected (readyState: ${finalWs?.readyState || 'null'}). ${isGroupDomain ? 'All agents in the group are unavailable.' : 'Attempting reconnection...'}`,
                 }),
                 { status: 503, headers: { "Content-Type": "application/json", "X-Jrok-Tunnel": "reconnecting" } }
-              ));
+              ), "reconnecting", STATUS_PAGE, crossServerService.currentServerId));
             }
           }
 
@@ -1646,6 +1667,10 @@ async function startServer() {
                 console.log(`↪️  ${subdomain}${path}: its replica went away before answering; retried on another`);
                 response = await forwardRequestToAgent(req, otherWs, other, other.tunnelId || tunnelId, clientIp);
               }
+            }
+            // Still jrok's own 502: a browser gets the "reconnecting" page.
+            if (response.headers.has(AGENT_GONE_HEADER)) {
+              response = pageInstead(req, response, "reconnecting", STATUS_PAGE, crossServerService.currentServerId);
             }
             response.headers.delete(AGENT_GONE_HEADER);
           }

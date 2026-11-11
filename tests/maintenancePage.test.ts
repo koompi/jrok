@@ -261,3 +261,37 @@ describe("pageInstead: jrok's own answer as a page for a browser, unchanged for 
     expect(pageInstead(req(BROWSER), answer, "reconnecting", "/nonexistent/index.html", "e")).toBe(answer);
   });
 });
+
+// Source-level guards, in the style of hostRouting.test.ts: the deploy worker
+// tells a dead tunnel from a reconnecting one, and both from the app's own
+// errors, by these statuses and headers alone.
+describe("index.ts keeps every status and header the deploy worker reads", () => {
+  const src = readFileSync(join(import.meta.dir, "..", "src", "index.ts"), "utf8");
+  const ws = (s: string) => s.replace(/\s+/g, " ");
+  const flat = ws(src);
+
+  test("app down: the page for everyone, 503 with X-Jrok-Tunnel: down, and the same JSON without a template", () => {
+    expect(flat).toContain('statusPage(STATUS_PAGE, "tunnel-down", hostname, crossServerService.currentServerId)');
+    expect(flat).toContain('status: 503, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Jrok-Tunnel": "down" }');
+    expect(flat).toContain('{ status: 503, headers: { "Content-Type": "application/json", "X-Jrok-Tunnel": "down" } }');
+  });
+
+  test("reconnecting: 503 with X-Jrok-Tunnel: reconnecting, a page only for a browser", () => {
+    expect(flat).toContain('{ status: 503, headers: { "Content-Type": "application/json", "X-Jrok-Tunnel": "reconnecting" } } ), "reconnecting", STATUS_PAGE');
+  });
+
+  test("no answer in time: 504, a page only for a browser", () => {
+    expect(flat).toContain('{ status: 504, headers: { "Content-Type": "application/json" } } ), "no-answer", STATUS_PAGE');
+  });
+
+  test("another edge's miss or unreachable, and an agent gone before answering: the reconnecting page for a browser", () => {
+    expect(flat).toContain('route === "miss" || route === "unreachable" ? pageInstead(req, forwarded, "reconnecting"');
+    expect(flat).toContain('if (response.headers.has(AGENT_GONE_HEADER)) { response = pageInstead(req, response, "reconnecting"');
+    // The marker still never reaches the visitor.
+    expect(flat).toContain("response.headers.delete(AGENT_GONE_HEADER);");
+  });
+
+  test("a waiting page's check never reaches the app", () => {
+    expect(flat).toContain("delete headers[PAGE_CHECK_HEADER.toLowerCase()];");
+  });
+});
