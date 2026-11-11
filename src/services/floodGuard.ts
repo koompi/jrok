@@ -31,7 +31,10 @@
  *    alone gets 429. One client with many slow requests used to take every
  *    slot, and everyone else got 503. Below half there is no share, so a
  *    school or carrier address with many people behind it isn't refused while
- *    the app keeps up. Exempt and private addresses have none.
+ *    the app keeps up. Private addresses have none. FLOOD_EXEMPT addresses DO
+ *    have one: a deploy worker's address also carries its customers' apps'
+ *    outbound traffic, and one such app could otherwise fill another app's
+ *    every waiting slot from an address nothing limited.
  *
  * Only app traffic is counted (tunnel hosts and custom domains), never agents
  * or jrok's API, which nginx limits. FLOOD_GUARD=off turns all three off.
@@ -189,9 +192,13 @@ export class FloodGuard {
     return { reason, secondsLeft: seconds };
   }
 
-  /** The address a waiting request counts against, or null for none (exempt, private, unknown). */
+  /**
+   * The address a waiting request counts against, or null for none (private,
+   * unknown). Exempt addresses count: exempt from flood blocks (1, 2), not from
+   * an app's share of waiting requests (3).
+   */
   private waitingAddress(ip: string | undefined): string | null {
-    if (!ip || ip === "unknown" || isPrivate(ip) || ipMatchesAny(ip, this.opts.exempt)) return null;
+    if (!ip || ip === "unknown" || isPrivate(ip)) return null;
     return floodKey(ip);
   }
 

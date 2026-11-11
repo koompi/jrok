@@ -182,11 +182,41 @@ describe("one address can't take an app's waiting slots", () => {
     expect(g.startWaiting("slow-report", "192.0.2.24")).toBe("app");
   });
 
-  test("exempt and private addresses have no share", () => {
+  test("private addresses have no share", () => {
     const { g } = guard({ appMaxWaiting: 1000 });
     wait(g, "192.0.2.25", 500);
-    expect(wait(g, "198.51.100.7", 200).every((r) => r === "ok")).toBe(true);
     expect(wait(g, "10.0.0.9", 200).every((r) => r === "ok")).toBe(true);
+  });
+
+  // Audit 2026-11-11: FLOOD_EXEMPT lists the deploy workers, whose addresses
+  // also carry customer apps' outbound traffic. One such app could fill
+  // another app's every waiting slot, and its visitors all got 503.
+  test("an exempt address (a deploy worker) has a share like any other", () => {
+    const { g } = guard({ appMaxWaiting: 1000 });
+    const worker = "198.51.100.7";
+    const fromWorker = wait(g, worker, 1000);
+    expect(fromWorker.filter((r) => r === "ok").length).toBe(500); // up to half: no share yet
+    expect(fromWorker.slice(500).every((r) => r === "address")).toBe(true); // then 429 for it alone
+    // The app's visitors still get the other half.
+    let visitors = 0;
+    for (let i = 0; i < 500; i++) if (g.startWaiting("slow-report", `198.18.${Math.floor(i / 99)}.${i % 99}`) === "ok") visitors++;
+    expect(visitors).toBe(500);
+    // A range in FLOOD_EXEMPT too.
+    const { g: g2 } = guard({ appMaxWaiting: 1000 });
+    wait(g2, "203.0.113.40", 500);
+    expect(g2.startWaiting("slow-report", "203.0.113.40")).toBe("address");
+    // As its requests are answered, it gets slots again.
+    for (let i = 0; i < 401; i++) g2.stopWaiting("slow-report", "203.0.113.40");
+    expect(g2.startWaiting("slow-report", "203.0.113.40")).toBe("ok");
+  });
+
+  test("an exempt address is still never blocked for a flood", () => {
+    const { g, blocks, advance } = guard();
+    for (let i = 0; i < 3; i++) {
+      expect(send(g, "198.51.100.7", 500)).toBe(0);
+      advance(10_000);
+    }
+    expect(blocks).toEqual([]);
   });
 });
 

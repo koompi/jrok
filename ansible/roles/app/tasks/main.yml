@@ -231,7 +231,10 @@
       # Largest request body jrok accepts; nginx's client_max_body_size caps it too.
       Environment=MAX_REQUEST_BODY_MB={{ max_request_body_mb | default(10) }}
       # Flood protection (src/services/floodGuard.ts); unset: its defaults.
-      # flood_exempt: addresses never blocked (e.g. kconsole's hosts).
+      # flood_exempt: addresses never blocked for floods (e.g. kconsole's
+      # control hosts). They still get only their share of an app's waiting
+      # requests. List no host that runs customers' code (deploy or build
+      # workers): it would exempt those apps' floods of other apps.
       {% if flood_requests is defined %}
       Environment=FLOOD_REQUESTS={{ flood_requests }}
       {% endif %}
