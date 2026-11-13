@@ -28,7 +28,25 @@ export async function logActivity(params: {
 }): Promise<ActivityLog> {
   const db = await getDatabase();
   const collection = db.collection(COLLECTION_NAME);
+  const activity = activityRecord(params);
+  await collection.insertOne(activity);
+  return activity;
+}
 
+/** An activity entry as stored. */
+function activityRecord(params: {
+  organizationId: string;
+  userId?: string;
+  category: ActivityCategory;
+  action: ActivityAction;
+  resourceType: string;
+  resourceId?: string;
+  resourceName?: string;
+  description: string;
+  metadata?: Record<string, unknown>;
+  ipAddress?: string;
+  userAgent?: string;
+}): ActivityLog {
   const activity: ActivityLog = {
     id: generateId(),
     organizationId: params.organizationId,
@@ -44,9 +62,6 @@ export async function logActivity(params: {
     userAgent: params.userAgent,
     createdAt: Date.now(),
   };
-
-  await collection.insertOne(activity);
-  
   return activity;
 }
 
@@ -208,8 +223,43 @@ export async function logTunnelDeleted(orgId: string, userId: string | undefined
   });
 }
 
+// Agents' connects and disconnects are written together: one insert per agent cost one of the ~100 operations
+// a second the database gives each edge, in the bursts that need them most (an edge or a deploy server
+// restarting reconnects every agent it had; KOOMPI Cloud's load test, 2026-11-13). Written every
+// AGENT_LOG_FLUSH_MS or at AGENT_LOG_BATCH entries, and at shutdown (index.ts): a crash loses at most the
+// last couple of seconds of them.
+export const AGENT_LOG_FLUSH_MS = 2000;
+export const AGENT_LOG_BATCH = 500;
+let agentLogs: ActivityLog[] = [];
+let agentLogTimer: ReturnType<typeof setTimeout> | null = null;
+
+function queueAgentLog(params: Parameters<typeof logActivity>[0]): Promise<void> {
+  agentLogs.push(activityRecord(params));
+  if (agentLogs.length >= AGENT_LOG_BATCH) return flushAgentLogs();
+  if (!agentLogTimer) {
+    agentLogTimer = setTimeout(() => { void flushAgentLogs(); }, AGENT_LOG_FLUSH_MS);
+    (agentLogTimer as { unref?: () => void }).unref?.();
+  }
+  return Promise.resolve();
+}
+
+/** Writes the agent connects and disconnects waiting, in one insert. Never throws. */
+export async function flushAgentLogs(): Promise<void> {
+  if (agentLogTimer) clearTimeout(agentLogTimer);
+  agentLogTimer = null;
+  const batch = agentLogs;
+  agentLogs = [];
+  if (!batch.length) return;
+  try {
+    const db = await getDatabase();
+    await db.collection(COLLECTION_NAME).insertMany(batch, { ordered: false });
+  } catch (error) {
+    console.error(`Failed to write ${batch.length} agent activity entries:`, error);
+  }
+}
+
 export async function logAgentConnected(orgId: string, agentId: string, domain: string, ip?: string): Promise<void> {
-  await logActivity({
+  await queueAgentLog({
     organizationId: orgId,
     category: "agents",
     action: "connected",
@@ -222,7 +272,7 @@ export async function logAgentConnected(orgId: string, agentId: string, domain: 
 }
 
 export async function logAgentDisconnected(orgId: string, agentId: string, domain: string, ip?: string): Promise<void> {
-  await logActivity({
+  await queueAgentLog({
     organizationId: orgId,
     category: "agents",
     action: "disconnected",

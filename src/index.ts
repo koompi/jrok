@@ -12,6 +12,7 @@ import * as agentService from "./services/agentService";
 import * as vpsService from "./services/vpsService";
 import * as authService from "./services/authService";
 import * as statsService from "./services/statsService";
+import * as activityService from "./services/activityService";
 import * as wsProxyService from "./services/wsProxyService";
 import * as tcpService from "./services/tcpService";
 import * as securityService from "./services/securityService";
@@ -2977,7 +2978,8 @@ async function startServer() {
     // SIGINT both write the usage counted so far; only SIGINT leaves the
     // cluster (utils/shutdown.ts).
     const shutdown = shutdownHandler({
-      flush: () => statsService.flushBandwidthToMongo(),
+      // The usage counted so far, and the agent connects/disconnects not yet written (activityService.flushAgentLogs)
+      flush: async () => { await Promise.all([statsService.flushBandwidthToMongo(), activityService.flushAgentLogs()]); },
       stop: () => {
         securityService.shutdownSecurityService();
         securitySync.stopSecuritySync();

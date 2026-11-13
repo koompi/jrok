@@ -363,22 +363,55 @@ const LAST_USED_UPDATE_INTERVAL = 60 * 1000; // Update lastUsedAt every minute m
 const lastUsedUpdateTimes = new Map<string, number>();
 
 export function invalidateApiKeyCache(keyHash?: string): void {
+  agentKeyGeneration++;
   if (keyHash) {
     apiKeyCache.delete(keyHash);
+    agentKeyCache.delete(keyHash);
   } else {
     apiKeyCache.clear();
+    agentKeyCache.clear();
   }
 }
 
-/** Forget cached keys with this id, or of this organization (revoked, rotated, disabled). */
+/** Forget cached keys with this id, or of this organization (revoked, rotated, disabled): the REST and the agent caches. */
 export function invalidateApiKeyCacheWhere(match: { keyId?: string; organizationId?: string }): void {
+  agentKeyGeneration++;
   for (const [hash, entry] of apiKeyCache) {
     if ((match.keyId && entry.apiKey.id === match.keyId) ||
       (match.organizationId && entry.apiKey.organizationId === match.organizationId)) {
       apiKeyCache.delete(hash);
     }
   }
+  for (const [hash, entry] of agentKeyCache) {
+    if ((match.keyId && entry.result.apiKeyId === match.keyId) ||
+      (match.organizationId && entry.result.organizationId === match.organizationId)) {
+      agentKeyCache.delete(hash);
+    }
+  }
 }
+
+/** lastUsedAt, at most once a minute per key and never waited for. */
+function touchKeyLastUsed(keyHash: string, keyId: string): void {
+  const lastUpdate = lastUsedUpdateTimes.get(keyHash) || 0;
+  if (Date.now() - lastUpdate <= LAST_USED_UPDATE_INTERVAL) return;
+  lastUsedUpdateTimes.set(keyHash, Date.now());
+  getCollections().apiKeys.updateOne({ id: keyId }, { $set: { lastUsedAt: Date.now() } }).catch(() => { });
+}
+
+// ===== AGENT KEY CACHE =====
+// Every replica's agent connects with the platform's key, and each connect cost three operations (the key, its
+// organization, an awaited lastUsedAt write to that one document) on a database that answers each edge about 100
+// a second: 200 apps at once (600 agents) waited a median 32 s for their tunnels in KOOMPI Cloud's load test
+// (2026-11-13), and every agent of a restarting edge or deploy server registers again the same way. A key that
+// passed is kept like the REST cache keeps one: 30 s on the other edges, forgotten at once on the edge that
+// revokes or rotates it or disables its organization, never past its own expiry. Agents connecting at the same
+// moment share one lookup; a lookup an invalidation overtook is not kept (agentKeyGeneration).
+
+type AgentKeyCheck = { valid: boolean; reason?: string; organizationId?: string; apiKeyId?: string; permissions?: string[] };
+interface AgentKeyEntry { result: AgentKeyCheck & { valid: true; apiKeyId: string }; expiresAt?: number | null; timestamp: number }
+const agentKeyCache = new Map<string, AgentKeyEntry>();
+const agentKeyLookups = new Map<string, Promise<{ result: AgentKeyCheck; expiresAt?: number | null }>>();
+let agentKeyGeneration = 0;
 
 // Validate API key (with caching)
 export async function validateApiKey(key: string): Promise<{ apiKey: ApiKey; organization: Organization } | null> {
@@ -598,14 +631,8 @@ export function organizationIsActive(org: Pick<Organization, "isActive" | "statu
   return !!org && org.isActive !== false && org.status !== "disabled";
 }
 
-// Validate API key for agent WebSocket connections
-export async function validateApiKeyForAgent(rawKey: string): Promise<{
-  valid: boolean;
-  reason?: string;
-  organizationId?: string;
-  apiKeyId?: string;
-  permissions?: string[];
-}> {
+// Validate API key for agent WebSocket connections (cached: AGENT KEY CACHE above)
+export async function validateApiKeyForAgent(rawKey: string): Promise<AgentKeyCheck> {
   if (!rawKey || typeof rawKey !== 'string') {
     return { valid: false, reason: "API key is required" };
   }
@@ -615,23 +642,47 @@ export async function validateApiKeyForAgent(rawKey: string): Promise<{
     return { valid: false, reason: "Invalid API key format" };
   }
 
-  const collections = getCollections();
-
   // Hash the key to compare with stored hash
   const hash = crypto.createHash("sha256").update(rawKey).digest("hex");
 
+  const cached = agentKeyCache.get(hash);
+  if (cached && Date.now() - cached.timestamp < API_KEY_CACHE_TTL && !(cached.expiresAt && cached.expiresAt < Date.now())) {
+    touchKeyLastUsed(hash, cached.result.apiKeyId);
+    return { ...cached.result, permissions: [...(cached.result.permissions ?? [])] };
+  }
+
+  let lookup = agentKeyLookups.get(hash);
+  if (!lookup) {
+    const generation = agentKeyGeneration;
+    lookup = lookUpAgentKey(hash).then((found) => {
+      // Kept only if no revocation or disabling came while it was being looked up
+      if (found.result.valid && found.result.apiKeyId && generation === agentKeyGeneration) {
+        agentKeyCache.set(hash, { result: found.result as AgentKeyEntry["result"], expiresAt: found.expiresAt, timestamp: Date.now() });
+      }
+      return found;
+    }).finally(() => agentKeyLookups.delete(hash));
+    agentKeyLookups.set(hash, lookup);
+  }
+  const { result } = await lookup;
+  if (result.valid && result.apiKeyId) touchKeyLastUsed(hash, result.apiKeyId);
+  return { ...result, ...(result.permissions && { permissions: [...result.permissions] }) };
+}
+
+/** The key and its organization from the database: whether it may connect agents. */
+async function lookUpAgentKey(hash: string): Promise<{ result: AgentKeyCheck; expiresAt?: number | null }> {
+  const collections = getCollections();
   const apiKey = await collections.apiKeys.findOne({
     key: hash,
     isActive: true
   });
 
   if (!apiKey) {
-    return { valid: false, reason: "Invalid or revoked API key" };
+    return { result: { valid: false, reason: "Invalid or revoked API key" } };
   }
 
   // Check expiration
   if (apiKey.expiresAt && apiKey.expiresAt < Date.now()) {
-    return { valid: false, reason: "API key has expired" };
+    return { result: { valid: false, reason: "API key has expired" } };
   }
 
   // The key's organization must still exist and be active. A disabled (or
@@ -643,7 +694,7 @@ export async function validateApiKeyForAgent(rawKey: string): Promise<{
     { projection: { isActive: 1, status: 1 } }
   ) as Pick<Organization, "isActive" | "status"> | null;
   if (!organizationIsActive(organization)) {
-    return { valid: false, reason: "API key's organization is disabled" };
+    return { result: { valid: false, reason: "API key's organization is disabled" } };
   }
 
   // Check if key has tunnel:create permission (also accept tunnels:write for backward compatibility)
@@ -651,19 +702,16 @@ export async function validateApiKeyForAgent(rawKey: string): Promise<{
     apiKey.permissions.includes('tunnels:write') ||
     apiKey.permissions.includes('*');
   if (!hasTunnelPermission) {
-    return { valid: false, reason: "API key does not have tunnel:create permission" };
+    return { result: { valid: false, reason: "API key does not have tunnel:create permission" } };
   }
 
-  // Update last used timestamp
-  await collections.apiKeys.updateOne(
-    { id: apiKey.id },
-    { $set: { lastUsedAt: Date.now() } }
-  );
-
   return {
-    valid: true,
-    organizationId: apiKey.organizationId,
-    apiKeyId: apiKey.id,
-    permissions: apiKey.permissions
+    result: {
+      valid: true,
+      organizationId: apiKey.organizationId,
+      apiKeyId: apiKey.id,
+      permissions: apiKey.permissions
+    },
+    expiresAt: apiKey.expiresAt ?? null,
   };
 }
