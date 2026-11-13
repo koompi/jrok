@@ -7,7 +7,8 @@
  * The nginx side (the maps in the Ansible role's nginx.conf, template v5) was
  * checked with nginx 1.18; here, what jrok writes into the files nginx includes.
  */
-import { test, expect, beforeEach, afterAll } from "bun:test";
+import { describe, test, expect, beforeEach, afterAll } from "bun:test";
+import { readFileSync } from "fs";
 import { mkdtemp, readFile, writeFile, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -186,4 +187,15 @@ test("nothing is written where nginx.conf includes neither file, nor before this
       else process.env[name] = value;
     }
   }
+});
+
+describe("the nginx.conf the Ansible nginx role writes", () => {
+  test("has map buckets for any host name: with nginx's default 64 bytes, a long one made nginx refuse every update of the map (2026-11-08 to 11-14)", () => {
+    const role = readFileSync(join(import.meta.dir, "../ansible/roles/nginx/tasks/main.yml"), "utf8");
+    const http = role.slice(role.indexOf("      http {"));
+    expect(http.indexOf("map_hash_bucket_size 512;")).toBeGreaterThan(0);
+    // Set once, in http, before the map that needs it
+    expect(role.match(/map_hash_bucket_size/g)!.length).toBe(1);
+    expect(http.indexOf("map_hash_bucket_size 512;")).toBeLessThan(http.indexOf("include /etc/nginx/jrok-cache-off.map;"));
+  });
 });
