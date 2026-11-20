@@ -99,7 +99,7 @@ export class DnsHealthChecker {
       return {
         updateOne: {
           filter: { _id: `${checkerId}:${edge.id}` as any },
-          update: [{ $set: { checker: checkerId, region, edge: edge.id, address: edge.address, healthy: next.healthy, at: "$$NOW" } }],
+          update: [{ $set: { checker: checkerId, region, edge: edge.id, address: edge.address, healthy: next.healthy, confirmed: next.confirmed, at: "$$NOW" } }],
           upsert: true,
         },
       };
@@ -144,8 +144,9 @@ export class DnsHealthChecker {
       .collection("dnsHealthVotes")
       .find({ $expr: { $gte: ["$at", { $subtract: ["$$NOW", maxVoteAgeMs] }] } })
       .toArray();
-    const current = votes.map((v) => ({ checker: v.checker, edge: v.edge, healthy: v.healthy, address: v.address, region: v.region }));
+    const current = votes.map((v) => ({ checker: v.checker, edge: v.edge, healthy: v.healthy, address: v.address, region: v.region, confirmed: v.confirmed }));
     const verdict = verdicts(edges, current);
+    const addable = verdicts(edges, current.filter((v) => v.confirmed !== false));
     const probed = new Set<string>(votes.map((v) => v.address).filter(Boolean));
 
     // Regions that disagree evenly (a cut between them, or a region that is
@@ -179,7 +180,7 @@ export class DnsHealthChecker {
 
     for (const name of records) {
       const current = await this.dns.addressRecords(name);
-      const plan = planRecord(edges, verdict, current.map((r) => r.content), this.dueLeftovers(name, leftoverAddresses(edges, current, probed), seen));
+      const plan = planRecord(edges, verdict, current.map((r) => r.content), this.dueLeftovers(name, leftoverAddresses(edges, current, probed), seen), addable);
       for (const address of plan.remove) {
         const edge = edges.find((e) => e.address === address)!;
         this.log(`${dryRun ? "would remove" : "removing"} ${edge.id} (${address}) from ${name}: down`);

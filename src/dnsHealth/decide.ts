@@ -38,6 +38,8 @@ export interface Vote {
   address?: string;
   /** The checker's region (absent from checkers older than this field: the default region). */
   region?: string;
+  /** False while the checker hasn't probed enough to back it (ProbeState.confirmed); absent from older checkers: true. */
+  confirmed?: boolean;
 }
 
 export const DEFAULT_REGION = "default";
@@ -49,9 +51,16 @@ export interface ProbeState {
   healthy: boolean;
   /** Consecutive probes that disagreed with `healthy`. */
   streak: number;
+  /**
+   * Backed by a probe: a success, or `failAfter` failures in a row. An
+   * unbacked "up" still keeps an edge in DNS, but can't add one (planRecord):
+   * with every checker restarted at once, a drained edge was voted up for
+   * `failAfter` probes and put into DNS (2026-11-20, kh1, 23 s).
+   */
+  confirmed: boolean;
 }
 
-export const INITIAL_PROBE_STATE: ProbeState = { healthy: true, streak: 0 };
+export const INITIAL_PROBE_STATE: ProbeState = { healthy: true, streak: 0, confirmed: false };
 
 /** The state after one more probe: it flips after `failAfter` failures, or `recoverAfter` successes, in a row. */
 export function nextProbeState(
@@ -59,10 +68,10 @@ export function nextProbeState(
   ok: boolean,
   { failAfter, recoverAfter }: { failAfter: number; recoverAfter: number }
 ): ProbeState {
-  if (ok === prev.healthy) return { healthy: prev.healthy, streak: 0 };
+  if (ok === prev.healthy) return { healthy: prev.healthy, streak: 0, confirmed: prev.confirmed || ok };
   const streak = prev.streak + 1;
-  if (streak >= (prev.healthy ? failAfter : recoverAfter)) return { healthy: ok, streak: 0 };
-  return { healthy: prev.healthy, streak };
+  if (streak >= (prev.healthy ? failAfter : recoverAfter)) return { healthy: ok, streak: 0, confirmed: true };
+  return { healthy: prev.healthy, streak, confirmed: prev.confirmed };
 }
 
 /**
@@ -114,18 +123,23 @@ export function verdicts(edges: Edge[], votes: Vote[]): Map<string, Verdict> {
  * Anything else in the record is left alone. A record is never emptied of
  * edges: if every edge looks down, sending visitors to them is still better
  * than a name that doesn't resolve (and gets cached as missing).
+ * `addable`: the verdicts from confirmed votes only; an edge not in the record
+ * is added only when it is "up" there too, so checkers that just started
+ * can't put a drained or broken edge in before they have probed it.
  */
 export function planRecord(
   edges: Edge[],
   verdict: Map<string, Verdict>,
   currentAddresses: string[],
-  leftovers: string[] = []
+  leftovers: string[] = [],
+  addable?: Map<string, Verdict>
 ): { add: string[]; remove: string[]; leftovers: string[] } {
   const current = new Set(currentAddresses);
   const desired = edges
     .filter((edge) => {
       const v = verdict.get(edge.id) ?? "unknown";
-      return v === "up" || (v === "unknown" && current.has(edge.address));
+      if (current.has(edge.address)) return v !== "down";
+      return v === "up" && (!addable || addable.get(edge.id) === "up");
     })
     .map((edge) => edge.address);
   if (desired.length === 0) return { add: [], remove: [], leftovers: [] };

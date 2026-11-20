@@ -41,6 +41,15 @@ describe("one checker's view is debounced", () => {
     expect(run([false, false, false]).healthy).toBe(false);
   });
 
+  test("no vote until a probe backs it: a success, or enough failures in a row", () => {
+    expect(INITIAL_PROBE_STATE.confirmed).toBe(false);
+    expect(run([false]).confirmed).toBe(false);
+    expect(run([false, false]).confirmed).toBe(false);
+    expect(run([false, false, false]).confirmed).toBe(true);
+    expect(run([true]).confirmed).toBe(true);
+    expect(run([false, true]).confirmed).toBe(true);
+  });
+
   test("up again after two successes in a row", () => {
     expect(run([false, false, false, true]).healthy).toBe(false);
     expect(run([false, false, false, true, true]).healthy).toBe(true);
@@ -143,6 +152,14 @@ describe("what changes in a record", () => {
   test("a down edge is removed and an up one added", () => {
     expect(planRecord(EDGES, verdictMap({ a: "up", b: "up", c: "down" }), all)).toEqual({ add: [], remove: ["192.0.2.3"], leftovers: [] });
     expect(planRecord(EDGES, verdictMap({ a: "up", b: "up", c: "up" }), ["192.0.2.1", "192.0.2.2"])).toEqual({ add: ["192.0.2.3"], remove: [], leftovers: [] });
+  });
+
+  test("an edge is added only on confirmed votes, but unconfirmed ones keep it", () => {
+    const up = verdictMap({ a: "up", b: "up", c: "up" });
+    const unbacked = verdictMap({ a: "up", b: "up", c: "unknown" });
+    expect(planRecord(EDGES, up, ["192.0.2.1", "192.0.2.2"], [], unbacked)).toEqual({ add: [], remove: [], leftovers: [] });
+    expect(planRecord(EDGES, up, ["192.0.2.1", "192.0.2.2"], [], up)).toEqual({ add: ["192.0.2.3"], remove: [], leftovers: [] });
+    expect(planRecord(EDGES, up, all, [], unbacked)).toEqual({ add: [], remove: [], leftovers: [] });
   });
 
   test("an unknown edge stays as it is", () => {
@@ -272,6 +289,27 @@ describe.skipIf(!MONGO)("checkers agreeing through MongoDB", () => {
     expect(dns.addresses("*.app.test")).toEqual(["192.0.2.1", "192.0.2.2"]);
 
     unreachable.clear();
+    await rounds(3, [a, b]);
+    expect(dns.addresses("app.test")).toEqual(["192.0.2.1", "192.0.2.2", "192.0.2.3"]);
+  });
+
+  test("checkers that all just started don't put a drained edge back into DNS", async () => {
+    const dns = fakeDns();
+    const setup = dns.client("setup");
+    for (const name of ["app.test", "*.app.test"]) {
+      for (const r of await setup.addressRecords(name)) if (r.content === "192.0.2.3") await setup.removeRecord(name, r.id);
+    }
+    dns.changes.length = 0;
+    const drained = new Set(["c"]);
+    const a = checkerOn("a", dns, drained);
+    const b = checkerOn("b", dns, drained);
+    for (let i = 0; i < 4; i++) {
+      await rounds(1, [a, b]);
+      expect(dns.addresses("app.test")).toEqual(["192.0.2.1", "192.0.2.2"]);
+    }
+    expect(dns.changes).toEqual([]);
+
+    drained.clear(); // undrained: back in once it recovers (recoverAfter)
     await rounds(3, [a, b]);
     expect(dns.addresses("app.test")).toEqual(["192.0.2.1", "192.0.2.2", "192.0.2.3"]);
   });
