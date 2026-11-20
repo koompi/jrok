@@ -4,7 +4,10 @@
 # Or with tags: ansible-playbook -i inventory.ini playbook.yml --tags "docker"
 
 - name: Setup jrok VPS servers
-  hosts: jrok_servers
+  # jrok_manual: edges listed so the others know them (peers, DNS checks,
+  # server-key sources) but set up by hand, which this playbook can't do
+  # (selendra-01: Arch, another platform's Swarm). See the runbook.
+  hosts: "jrok_servers:!jrok_manual"
   become: yes
   # One edge at a time: each is restarted and passes its health check before
   # the next is touched, so the others keep serving (and nginx's fallback to a

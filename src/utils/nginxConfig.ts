@@ -272,7 +272,32 @@ function normaliseVhost(content: string): string {
  */
 export function isUnmodifiedGeneratedVhost(content: string, domain: string, certPath: string): boolean {
   const render = VHOST_RENDERERS[vhostTemplateVersion(content)];
-  return render !== undefined && normaliseVhost(content) === normaliseVhost(render(domain, certPath));
+  return render !== undefined && normaliseVhost(content) === normaliseVhost(withTlsListen(render(domain, certPath)));
+}
+
+/**
+ * JROK_TLS_LISTEN: what a vhost's HTTPS block listens on, e.g.
+ * "127.0.0.1:4443 ssl http2 proxy_protocol" on an edge where port 443 is held
+ * by an SNI router that passes other sites' names to another proxy
+ * (selendra-01). Unset, port 443 as every template wrote it. Anything but a
+ * plain listen value is ignored: it goes into nginx config.
+ */
+export function tlsListen(): string | null {
+  const value = (process.env.JROK_TLS_LISTEN || "").trim();
+  if (!value) return null;
+  if (!/^[A-Za-z0-9.:\[\]_ ]+$/.test(value)) {
+    console.warn(`⚠️ Ignoring JROK_TLS_LISTEN "${value}" (want an nginx listen value)`);
+    return null;
+  }
+  return value;
+}
+
+function withTlsListen(vhost: string): string {
+  const listen = tlsListen();
+  if (!listen) return vhost;
+  return vhost
+    .replace(/^( *)listen 443 ssl http2;$/m, `$1listen ${listen};`)
+    .replace(/^ *listen \[::\]:443 ssl http2;\n/m, "");
 }
 
 /** True when reconcile should replace this vhost with the current template. */
@@ -289,7 +314,7 @@ export function vhostNeedsUpgrade(content: string, domain: string, certPath: str
  * upstream, so callers must also call ensureJrokUpstreamFile.
  */
 export function generateCustomDomainNginxConfig(domain: string, certPath: string): string {
-  return VHOST_RENDERERS[currentVhostVersion()]!(domain, certPath);
+  return withTlsListen(VHOST_RENDERERS[currentVhostVersion()]!(domain, certPath));
 }
 
 function nginxConf(): string {

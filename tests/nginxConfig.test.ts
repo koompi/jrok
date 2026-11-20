@@ -19,6 +19,7 @@ import {
   vhostNeedsUpgrade,
   vhostTemplateVersion,
   renderVhostTemplate,
+  tlsListen,
   CUSTOM_DOMAIN_VHOST_VERSION,
   JROK_UPSTREAM_NAME,
 } from "../src/utils/nginxConfig";
@@ -254,6 +255,50 @@ describe("peer edges as backups (JROK_PEERS)", () => {
     withPeers(undefined, () => { current = generateJrokUpstreamConfig(); });
     withPeers("10.130.0.14:3000", () => {
       expect(upstreamFileUpdate(current)).toContain("server 10.130.0.14:3000 backup;");
+    });
+  });
+});
+
+describe("HTTPS on another address (JROK_TLS_LISTEN)", () => {
+  const withListen = <T>(value: string | undefined, fn: () => T): T => {
+    const saved = process.env.JROK_TLS_LISTEN;
+    if (value === undefined) delete process.env.JROK_TLS_LISTEN;
+    else process.env.JROK_TLS_LISTEN = value;
+    try { return fn(); } finally {
+      if (saved === undefined) delete process.env.JROK_TLS_LISTEN;
+      else process.env.JROK_TLS_LISTEN = saved;
+    }
+  };
+  const render = () => withNginxConf(WITH_EDGE_CACHE_RULES, () => generateCustomDomainNginxConfig(DOMAIN, CERT_DIR));
+
+  test("unset, the vhost is the template's, on port 443", () => {
+    const undated = (v: string) => v.replace(/^# Generated:.*$/m, "");
+    const vhost = withListen(undefined, render);
+    expect(undated(vhost)).toBe(undated(renderVhostTemplate(CUSTOM_DOMAIN_VHOST_VERSION, DOMAIN, CERT_DIR)));
+    expect(vhost).toContain("listen 443 ssl http2;");
+  });
+
+  test("set, the HTTPS block listens there only; port 80 is unchanged", () => {
+    const vhost = withListen("127.0.0.1:4443 ssl http2 proxy_protocol", render);
+    expect(vhost).toContain("    listen 127.0.0.1:4443 ssl http2 proxy_protocol;\n");
+    expect(vhost).not.toContain("443 ssl http2;");
+    expect(vhost).toContain("    listen 80;\n    listen [::]:80;\n");
+  });
+
+  test("a vhost written with it still counts as unmodified, so later templates upgrade it", () => {
+    withListen("127.0.0.1:4443 ssl http2 proxy_protocol", () => {
+      const vhost = render();
+      withNginxConf(WITH_EDGE_CACHE_RULES, () => {
+        expect(isUnmodifiedGeneratedVhost(vhost, DOMAIN, CERT_DIR)).toBe(true);
+        expect(vhostNeedsUpgrade(vhost, DOMAIN, CERT_DIR)).toBe(false);
+      });
+    });
+  });
+
+  test("anything but a listen value is ignored", () => {
+    withListen("127.0.0.1:4443 ssl; include /etc/passwd", () => {
+      expect(tlsListen()).toBeNull();
+      expect(render()).toContain("listen 443 ssl http2;");
     });
   });
 });
