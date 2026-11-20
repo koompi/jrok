@@ -18,6 +18,7 @@ import * as tcpService from "./services/tcpService";
 import * as securityService from "./services/securityService";
 import * as securitySync from "./services/securitySync";
 import * as edgeCacheRules from "./services/edgeCacheRules";
+import * as cachePurge from "./services/cachePurge";
 import { decodeFrame, FRAME_RESPONSE_CHUNK } from "./utils/tunnelFrames";
 import * as crossServerService from "./services/crossServerService";
 import * as certSyncService from "./services/certificateSyncService";
@@ -652,6 +653,7 @@ async function startServer() {
     // Edge-wide files and ports belong to the edge's first process (utils/processRole.ts).
     const primary = isPrimaryProcess();
     if (primary) edgeCacheRules.startEdgeCacheRules();
+    if (primary) cachePurge.startCachePurgeSync();
 
     // Initialize cross-server routing
     crossServerService.initCrossServerRouting();
@@ -789,6 +791,9 @@ async function startServer() {
             // Register agent for TCP forwarding if it's a TCP tunnel
             if (protocol === 'tcp') {
               tcpService.registerAgentConnection(agent.id, ws);
+            } else {
+              // A redeploy reconnects the app's agent: the edges drop its cached files.
+              cachePurge.appReleased(finalDomain);
             }
 
             // Prepare welcome message
@@ -2993,6 +2998,7 @@ async function startServer() {
         securityService.shutdownSecurityService();
         securitySync.stopSecuritySync();
         if (primary) edgeCacheRules.stopEdgeCacheRules();
+        if (primary) cachePurge.stopCachePurgeSync();
         monitoringService.shutdownMonitoringService();
       },
       leave: async () => {

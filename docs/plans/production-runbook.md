@@ -182,6 +182,14 @@ nginx keeps what an app marks shareable (`public` or `s-maxage`, never HTML) and
 
 Their requests are never answered from the cache nor stored in it, so jrok's checks see each one. jrok rewrites both files and reloads nginx within about 20 s of a change reaching the edge, at most once every 15 s. If nginx refuses them, it puts the old ones back and logs `❌ nginx refused the edge cache rules`; a change logs `🧊 Edge cache rules updated`. If nginx accepts them but the reload itself fails (nginx stopped), jrok logs `❌ Edge cache rules written, but nginx was not reloaded` and tries again every minute: until then nginx still serves the old rules, so look at `systemctl status nginx`. Don't edit them by hand: jrok overwrites them.
 
+### What it keeps, and releases
+
+Kept in `/var/cache/nginx/jrok` (max 1 GB): what an app marks `public` or `s-maxage`, and its scripts, styles, fonts and wasm with no `Cache-Control` at all, for `jrok_cache_asset_ttl` (1h). Never HTML, JSON, images the app says nothing about, or anything with `Set-Cookie` or `Authorization`. Browsers still revalidate unmarked files against the edge (`no-cache`).
+
+When an app's agent registers (every redeploy restarts it), jrok unlinks that app's files on its edge within 2 s and writes `cachePurges` in MongoDB; process 0 of every other edge purges them within about 5 s more. A purge logs `🧹 Edge cache: N of M file(s) removed`. A reconnect without a release only costs misses. `JROK_CACHE_DIR=off` in jrok's env stops purges (then turn the asset TTL down too).
+
+Hit ratio per app: the `jrok_app` access log ends with `$host $upstream_cache_status $request_time`, e.g. `awk '{print $(NF-1)}' /var/log/nginx/access.log | sort | uniq -c`. `scripts/nginx-check-role.sh` checks all of this against nginx 1.18 locally.
+
 ## Checks
 
 ```bash

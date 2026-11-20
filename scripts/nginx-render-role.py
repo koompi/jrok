@@ -3,6 +3,7 @@
 usage: python3 scripts/nginx-render-role.py <role main.yml> <out nginx.conf>
 (called by scripts/nginx-check-role.sh)
 """
+import os
 import re
 import sys
 
@@ -19,6 +20,8 @@ env.filters["bool"] = lambda v: v if isinstance(v, bool) else str(v).lower() in 
 env.filters["regex_escape"] = lambda s: re.sub(r"([.^$*+?()\[\]{}|\\])", r"\\\1", s)
 
 values = {
+    # Production runs 3 jrok processes per edge (ports 3000, 3010, 3020).
+    "jrok_proc_count": int(os.environ.get("JROK_PROCS", "3")),
     "jrok_base_domains": ["public.test", "tunnel.test"],
     "jrok_ssl_cert_name": "tunnel.test",
     "jrok_peer_tls": True,
@@ -28,6 +31,7 @@ values = {
     "forward_host": "edge-a.public.test",
     "groups": {"jrok_servers": ["edge-a", "edge-b"]},
     "inventory_hostname": "edge-a",
+    "ansible_hostname": "edge-a",
     "hostvars": {"edge-a": {"ansible_host": "10.0.0.1"}, "edge-b": {"ansible_host": "10.0.0.2"}},
 }
 rendered = env.from_string(template).render(**values)

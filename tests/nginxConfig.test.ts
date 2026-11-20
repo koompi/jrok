@@ -33,9 +33,11 @@ function fixture(name: string, domain = DOMAIN, certDir = CERT_DIR): string {
 }
 
 // Templates v3 and later are written only where nginx.conf defines the edge
-// cache; v5 only where it also defines $jrok_is_html and $jrok_cache_off.
+// cache; v5 only where it also defines $jrok_is_html and $jrok_cache_off; v6
+// only where it also has the jrok_app log format.
 const WITH_EDGE_CACHE = join(import.meta.dir, "fixtures/nginx/nginx-with-edge-cache.conf");
-const WITH_EDGE_CACHE_RULES = join(import.meta.dir, "fixtures/nginx/nginx-with-edge-cache-rules.conf");
+const WITH_CACHE_OFF_RULES = join(import.meta.dir, "fixtures/nginx/nginx-with-edge-cache-rules.conf");
+const WITH_EDGE_CACHE_RULES = join(import.meta.dir, "fixtures/nginx/nginx-with-release-cache.conf");
 function withNginxConf<T>(path: string, fn: () => T): T {
   const saved = process.env.NGINX_CONF_PATH;
   process.env.NGINX_CONF_PATH = path;
@@ -70,7 +72,7 @@ describe("current template", () => {
 
   test("uses the edge cache, keyed by host, never for Authorization", () => {
     expect(vhost).toContain("proxy_cache jrok_cache;");
-    expect(vhost).toContain("proxy_cache_key v2$scheme$host$request_uri;");
+    expect(vhost).toContain("proxy_cache_key v3$scheme://$host$request_uri;");
     expect(vhost).toMatch(/proxy_no_cache \$jrok_not_shareable .*\$http_authorization/);
     expect(vhost).toMatch(/proxy_cache_bypass \$http_authorization/);
     expect(vhost).not.toContain("proxy_cache_lock");
@@ -101,13 +103,29 @@ describe("current template", () => {
     expect(https).toContain('proxy_set_header X-Jrok-Acme-Challenge "";');
   });
 
-  test("unedited v3 and v4 vhosts upgrade to it; edited ones don't", () => {
-    for (const version of [3, 4]) {
+  test("keeps the unmarked scripts and styles $jrok_not_shareable picks for an hour, and logs host and cache status", () => {
+    expect(vhost).toContain("proxy_cache_valid 200 1h;");
+    expect(vhost).toContain("access_log /var/log/nginx/access.log jrok_app;");
+  });
+
+  test("unedited v3, v4 and v5 vhosts upgrade to it; edited ones don't", () => {
+    for (const version of [3, 4, 5]) {
       const older = renderVhostTemplate(version, DOMAIN, CERT_DIR);
       expect(withNginxConf(WITH_EDGE_CACHE_RULES, () => vhostNeedsUpgrade(older, DOMAIN, CERT_DIR))).toBe(true);
       const edited = older.replace("proxy_read_timeout 3600s;", "proxy_read_timeout 7200s;");
       expect(withNginxConf(WITH_EDGE_CACHE_RULES, () => vhostNeedsUpgrade(edited, DOMAIN, CERT_DIR))).toBe(false);
     }
+  });
+});
+
+describe("an edge whose nginx.conf predates the jrok_app log format", () => {
+  // v6 there would name a log format nginx doesn't know: nginx -t fails.
+  test("keeps writing v5, and its v5 vhosts stay", () => {
+    const vhost = withNginxConf(WITH_CACHE_OFF_RULES, () => generateCustomDomainNginxConfig(DOMAIN, CERT_DIR));
+    expect(vhostTemplateVersion(vhost)).toBe(5);
+    expect(vhost).not.toContain("jrok_app");
+    expect(vhost).not.toContain("proxy_cache_valid");
+    expect(withNginxConf(WITH_CACHE_OFF_RULES, () => vhostNeedsUpgrade(vhost, DOMAIN, CERT_DIR))).toBe(false);
   });
 });
 

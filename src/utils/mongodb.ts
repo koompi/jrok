@@ -33,6 +33,8 @@ export interface Collections {
   agentGroupMembers: Collection; // Individual agent memberships in groups
   // Admin IP blocks and suspensions, shared by every server (services/securitySync.ts)
   securityRules: Collection;
+  // An app's release, so every edge drops its cached files (services/cachePurge.ts)
+  cachePurges: Collection;
 }
 
 let collections: Collections;
@@ -132,6 +134,7 @@ export async function connectDatabase(): Promise<void> {
       agentGroups: db.collection("agentGroups"),
       agentGroupMembers: db.collection("agentGroupMembers"),
       securityRules: db.collection("securityRules"),
+      cachePurges: db.collection("cachePurges"),
     };
 
     // Create indexes
@@ -355,6 +358,10 @@ export async function createDistributedStateIndexes(): Promise<void> {
   await safeCreateIndex(collections.securityRules, { kind: 1, key: 1 }, { unique: true });
   await safeCreateIndex(collections.securityRules, { updatedAt: 1 });
   await safeCreateIndex(collections.tunnels, { ipSecurityChangedAt: 1 }, { sparse: true });
+
+  // Edge cache purges, one per app per edge, read by every edge every few seconds.
+  await safeCreateIndex(collections.cachePurges, { app: 1, edge: 1 }, { unique: true });
+  await safeCreateIndex(collections.cachePurges, { at: 1 }, { expireAfterSeconds: 86400 });
 
   // Agent groups for multi-agent load balancing
   await safeCreateIndex(collections.agentGroups, { id: 1 }, { unique: true });

@@ -167,7 +167,7 @@ export function nginxConfigFileName(domain: string): string {
 // its version, edit the new one, bump CUSTOM_DOMAIN_VHOST_VERSION.
 
 /** Version written by generateCustomDomainNginxConfig. */
-export const CUSTOM_DOMAIN_VHOST_VERSION = 5;
+export const CUSTOM_DOMAIN_VHOST_VERSION = 6;
 
 const VHOST_VERSION_MARKER = "# jrok-vhost-template:";
 
@@ -312,14 +312,48 @@ export function edgeCacheAvailable(): boolean {
 }
 
 /**
- * The template version this server writes: 5 where nginx.conf also defines
- * `$jrok_is_html` and `$jrok_cache_off` (v5 uses them; nginx refuses unknown
- * variables), 4 with the edge cache alone, else 2.
+ * The template version this server writes: 6 where nginx.conf also has the
+ * `jrok_app` log format (v6 logs with it; nginx refuses an unknown one), 5
+ * where it defines `$jrok_is_html` and `$jrok_cache_off` (v5 uses them; nginx
+ * refuses unknown variables), 4 with the edge cache alone, else 2.
  */
 export function currentVhostVersion(): number {
   const conf = nginxConf();
   if (!conf.includes("keys_zone=jrok_cache") || !conf.includes("$jrok_not_shareable")) return 2;
-  return conf.includes("$jrok_is_html") && conf.includes("$jrok_cache_off") ? CUSTOM_DOMAIN_VHOST_VERSION : 4;
+  if (!conf.includes("$jrok_is_html") || !conf.includes("$jrok_cache_off")) return 4;
+  return conf.includes("log_format jrok_app") ? CUSTOM_DOMAIN_VHOST_VERSION : 5;
+}
+
+/**
+ * Template v6: v5, with the scripts, styles, fonts and wasm an app says
+ * nothing about kept an hour too (nginx.conf's $jrok_not_shareable picks them;
+ * an app's files leave the cache when its new release connects,
+ * services/cachePurge.ts), a key a purge can read the host back from, and the
+ * jrok_app access log (host and cache status).
+ */
+function generateCustomDomainNginxConfigV6(domain: string, certPath: string): string {
+  return generateCustomDomainNginxConfigV5(domain, certPath)
+    .replace(`${VHOST_VERSION_MARKER} 5\n`, `${VHOST_VERSION_MARKER} 6\n`)
+    .replace(`    location / {
+        proxy_pass http://jrok_local;`, `    location / {
+        access_log /var/log/nginx/access.log jrok_app;
+        proxy_pass http://jrok_local;`)
+    .replace(`        # Edge cache: only responses the app marks public / s-maxage, keyed by
+        # host; never HTML, nor with Authorization, nor what the cache leaves to
+        # jrok ($jrok_cache_off: IP rules, suspensions, addresses blocked by
+        # hand); served while the app is down.
+        proxy_cache jrok_cache;
+        proxy_cache_key v2$scheme$host$request_uri;
+`, `        # Edge cache: responses the app marks public / s-maxage, and its
+        # unmarked scripts, styles and fonts for an hour ($jrok_not_shareable),
+        # until its next release connects (cachePurge.ts). Keyed by host; never
+        # HTML, nor with Authorization, nor what the cache leaves to jrok
+        # ($jrok_cache_off: IP rules, suspensions, addresses blocked by hand);
+        # served while the app is down.
+        proxy_cache jrok_cache;
+        proxy_cache_key v3$scheme://$host$request_uri;
+        proxy_cache_valid 200 1h;
+`);
 }
 
 /**
@@ -534,4 +568,5 @@ const VHOST_RENDERERS: Record<number, (domain: string, certPath: string) => stri
   3: generateCustomDomainNginxConfigV3,
   4: generateCustomDomainNginxConfigV4,
   5: generateCustomDomainNginxConfigV5,
+  6: generateCustomDomainNginxConfigV6,
 };
