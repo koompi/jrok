@@ -44,6 +44,7 @@
 - name: Issue certificate with Certbot (DNS-based for wildcard)
   shell: |
     certbot certonly \
+      --key-type ecdsa \
       --dns-cloudflare \
       --dns-cloudflare-credentials /etc/letsencrypt/secrets/cloudflare.ini \
       {% if certbot_email %}--email "{{ certbot_email }}"{% else %}--register-unsafely-without-email{% endif %} \

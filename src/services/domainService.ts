@@ -778,6 +778,7 @@ async function issueCertificate(
       // Run certbot with separate arguments (no shell interpolation)
       const certbotProcess = Bun.spawn([
         "certbot", "certonly",
+        "--key-type", "ecdsa",
         "--dns-cloudflare",
         "--dns-cloudflare-credentials", credentialsPath,
         "--email", safeEmail,
@@ -820,6 +821,7 @@ async function issueCertificate(
     console.log(`🔐 Running certbot webroot challenge for ${safeDomain}...`);
     const certbotProcess = Bun.spawn([
       "certbot", "certonly",
+      "--key-type", "ecdsa",
       "--webroot",
       "--webroot-path", webrootPath,
       "--email", safeEmail,
