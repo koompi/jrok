@@ -12,11 +12,13 @@
 
 | | Address | Size | Server id | TCP ports | TCP name | Edge name (`forward_host`) |
 |---|---|---|---|---|---|---|
-| edge1 (the original server) | 152.42.241.139 | 1 vCPU / 1 GB, 4 GB swap | `vps-sgp1` | 10000–13333 | `sgp1.private.koompi.cloud` | `edge-sgp1.public.koompi.cloud` |
-| edge2 `jrok-edge-sgp2` | 206.189.33.115 | 1 vCPU / 1 GB, 2 GB swap | `vps-sgp2` | 13334–16666 | `sgp2.private.koompi.cloud` | `edge-sgp2.public.koompi.cloud` |
-| edge3 `jrok-edge-sgp3` | 168.144.96.128 | 1 vCPU / 1 GB, 2 GB swap | `vps-sgp3` | 16667–19999 | `sgp3.private.koompi.cloud` | `edge-sgp3.public.koompi.cloud` |
+| edge1 (the original server) | 152.42.241.139 | 4 vCPU / 8 GB | `vps-sgp1` | 10000–13333 | `sgp1.private.koompi.cloud` | `edge-sgp1.public.koompi.cloud` |
+| edge2 `jrok-edge-sgp2` | 206.189.33.115 | 4 vCPU / 8 GB | `vps-sgp2` | 13334–16666 | `sgp2.private.koompi.cloud` | `edge-sgp2.public.koompi.cloud` |
+| edge3 `jrok-edge-sgp3` | 168.144.96.128 | 4 vCPU / 8 GB | `vps-sgp3` | 16667–19999 | `sgp3.private.koompi.cloud` | `edge-sgp3.public.koompi.cloud` |
 
-All three are the $6 size (edges 2 and 3 were replaced on 2026-11-01: DigitalOcean can't shrink a disk). One such edge does about 500 requests/s; production's peak is about 10. To grow, add edges or rebuild one bigger. The playbook gives edges with under 3 GB of RAM a 2 GB swap file.
+Since 2026-11-20 all three are `s-4vcpu-8gb` (resized in place, disk kept so they can shrink again), serve an ECDSA P-256 certificate and run three jrok processes each (`jrok_processes=3` in the inventory). One edge does about 2,800 uncached requests/s (a 1 vCPU edge with one process did about 500). To grow, add edges or raise the size and `jrok_processes` (one per vCPU, minus one for nginx).
+
+**Processes on an edge:** units `jrok`, `jrok-p1`, `jrok-p2` on ports 3000, 3010, 3020, server ids `vps-sgpN`, `vps-sgpN-p1`, `vps-sgpN-p2`, one `JROK_EDGE_ID`. nginx sends an app's agents (`$arg_domain`) and visitors (app name) to the same process with `hash … consistent`; TCP agents and the base domains go to `jrok` (p0); a request forwarded from another edge names its process in `X-Jrok-Target-Server`; a 502/504 falls back to the local peer gateway, which finds a sibling over 127.0.0.1. Stopping one process costs its apps about 1 s of 502s while their agents reconnect.
 
 The two new droplets carry the DigitalOcean tag `jrok-production`.
 
@@ -90,6 +92,7 @@ JROK_LIMIT=edge1 JROK_ANSIBLE_ARGS="--check --diff" JROK_LOG=<file> scripts/depl
   - Restarting jrok on edge1 cost 13–15 s of 502/503 for every app while all agents are on edge1. Edges 2 and 3 restart with no effect.
   - Once workers connect to every edge, a restart drops nothing (staging: 0 of 404).
   - The playbook stops if an edge's agents don't come back.
+- **One edge at a time with a drain** (what the 2026-11-20 rollout did): `touch /etc/jrok/drain`, wait until it is out of DNS plus 120 s, deploy with `JROK_LIMIT=edgeN JROK_ANSIBLE_ARGS="-e jrok_agent_return=0"` (agents can't come back to a drained edge, so the playbook's wait would fail), check the units and `/health` on each port, `rm /etc/jrok/drain`, wait for DNS and the agents. A change to the nginx template needs the tags `nginx,app`.
 - **nginx refusing a reload:** if nginx refuses a reload, the deploy now fails. It used to carry on with the old config running (Fix-126).
 
 ## Rollback
