@@ -502,11 +502,11 @@
       ExecStart=/root/.bun/bin/bun run src/dnsHealth/main.ts
       Restart=always
       RestartSec=5
-      # Bun's native memory grows here by ~200 MB a day (the JS heap stays flat; Node
-      # doesn't grow): on 1 GB edges it got jrok itself OOM-killed (2026-11-19).
-      # A restart every 6 h (SIGTERM: lease and votes handed over) keeps it small;
-      # the cap kills only this checker if it still grows.
-      RuntimeMaxSec=6h
+      # Bun's native memory grows here by 40-60 MB an hour after a start (the JS heap
+      # stays flat; Node doesn't grow): on 1 GB edges it got jrok itself OOM-killed
+      # (2026-11-19). An hourly restart (SIGTERM: lease and votes handed over) keeps
+      # it under ~160 MB; the cap kills only this checker if it grows faster.
+      RuntimeMaxSec=1h
       MemoryMax=250M
       MemorySwapMax=0
       SyslogIdentifier=jrok-dns-health
