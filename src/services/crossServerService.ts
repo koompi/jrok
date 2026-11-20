@@ -20,6 +20,9 @@ import { StaleCache } from "../utils/staleCache";
 import { AGENT_WS_BUFFER_LIMIT_BYTES, frameByteLength, isBacklogged } from "../utils/wsFlowControl";
 import { addressPeerRequest, ownForwardUrl, peerOrigin } from "../utils/peerLink";
 import { firstSubprotocol } from "../utils/wsSubprotocol";
+import { edgeId, processIndex } from "../utils/processRole";
+
+const EDGE_ID = edgeId();
 
 // =============================================================================
 // SERVER HEALTH TRACKING
@@ -31,6 +34,8 @@ interface ServerHealth {
   serverPort: number;
   /** Where other edges forward to (FORWARD_URL); unset means plain http to serverHost:serverPort. */
   forwardUrl?: string;
+  /** The edge this process runs on (JROK_EDGE_ID); processes of one edge share it. */
+  edgeId?: string;
   region?: string;
   lastHeartbeat: number;
   agentCount: number;
@@ -72,6 +77,8 @@ export async function sendServerHeartbeat(): Promise<void> {
         serverHost: SERVER_HOST,
         serverPort: SERVER_PORT,
         forwardUrl: ownForwardUrl(),
+        edgeId: EDGE_ID,
+        processIndex: processIndex(),
         region: process.env.VPS_REGION || 'default',
         lastHeartbeat: now,
         // Counted from the sockets: updateLocalMetrics is never called, so
@@ -103,6 +110,7 @@ export async function getHealthyServers(): Promise<ServerHealth[]> {
     serverHost: s.serverHost,
     serverPort: s.serverPort,
     forwardUrl: s.forwardUrl || undefined,
+    edgeId: s.edgeId || s.serverId,
     region: s.region,
     lastHeartbeat: s.lastHeartbeat,
     agentCount: s.agentCount || 0,
@@ -138,6 +146,7 @@ async function loadServer(serverId: string): Promise<ServerHealth | null> {
     serverHost: server.serverHost,
     serverPort: server.serverPort,
     forwardUrl: server.forwardUrl || undefined,
+    edgeId: server.edgeId || server.serverId,
     region: server.region,
     lastHeartbeat: server.lastHeartbeat,
     agentCount: server.agentCount || 0,
@@ -602,6 +611,28 @@ export function forgetRoute(subdomain: string): void {
   routeCache.delete(subdomain);
 }
 
+/**
+ * How to reach a server: a sibling process on this edge directly over
+ * 127.0.0.1 (no TLS, no peer key: it trusts this address like nginx), any
+ * other through its edge's FORWARD_URL.
+ */
+export function targetFor(server: ServerHealth): PeerTarget & { serverId: string } {
+  if (server.edgeId === EDGE_ID && server.serverId !== SERVER_ID) {
+    return { serverId: server.serverId, serverHost: "127.0.0.1", serverPort: server.serverPort };
+  }
+  return {
+    serverId: server.serverId,
+    serverHost: server.serverHost,
+    serverPort: server.serverPort,
+    forwardUrl: server.forwardUrl,
+  };
+}
+
+function remoteRoute(server: ServerHealth): RouteResult {
+  const targetServer = targetFor(server);
+  return { isLocal: false, targetServer, proxyUrl: peerOrigin(targetServer) };
+}
+
 async function lookupRoute(subdomain: string): Promise<RouteResult> {
   const collections = getCollections();
 
@@ -609,36 +640,28 @@ async function lookupRoute(subdomain: string): Promise<RouteResult> {
   // Never a record claiming THIS server: had this server the agent, the fast
   // path in findServerForDomain would have found its socket, so such a record
   // is stale (e.g. left from before a restart) and other servers' records are
-  // the ones that can actually serve.
-  const agentConn = await collections.agentConnections.findOne({
-    domain: subdomain,
-    active: true,
-    serverId: { $ne: SERVER_ID },
-  });
-  
-  if (agentConn) {
-    // Get server info for cross-server routing
-    const server = await getServer(agentConn.serverId);
-    if (server && server.healthy) {
-      return {
-        isLocal: false,
-        targetServer: {
-          serverId: server.serverId,
-          serverHost: server.serverHost,
-          serverPort: server.serverPort,
-          forwardUrl: server.forwardUrl,
-        },
-        proxyUrl: peerOrigin(server),
-      };
-    }
+  // the ones that can actually serve. A group's replicas may sit on several
+  // servers: a sibling process on this edge is the cheapest hop.
+  const conns = await collections.agentConnections
+    .find({ domain: subdomain, active: true, serverId: { $ne: SERVER_ID } })
+    .limit(8)
+    .toArray();
+
+  let fallback: ServerHealth | null = null;
+  for (const conn of conns) {
+    const server = await getServer(conn.serverId);
+    if (!server || !server.healthy) continue;
+    if (server.edgeId === EDGE_ID) return remoteRoute(server);
+    fallback ??= server;
   }
-  
+  if (fallback) return remoteRoute(fallback);
+
   // Fallback: check tunnels collection (for cases where agent just connected)
-  const tunnel = await collections.tunnels.findOne({ 
-    domain: subdomain, 
-    active: true 
+  const tunnel = await collections.tunnels.findOne({
+    domain: subdomain,
+    active: true
   });
-  
+
   if (!tunnel) {
     return { isLocal: false };
   }
@@ -648,21 +671,9 @@ async function lookupRoute(subdomain: string): Promise<RouteResult> {
     return { isLocal: true };
   }
 
-  // Get server info
   if (tunnel.serverId) {
     const server = await getServer(tunnel.serverId);
-    if (server && server.healthy) {
-      return {
-        isLocal: false,
-        targetServer: {
-          serverId: server.serverId,
-          serverHost: server.serverHost,
-          serverPort: server.serverPort,
-          forwardUrl: server.forwardUrl,
-        },
-        proxyUrl: peerOrigin(server),
-      };
-    }
+    if (server && server.healthy) return remoteRoute(server);
   }
 
   return { isLocal: false };

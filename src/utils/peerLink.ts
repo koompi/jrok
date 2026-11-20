@@ -24,6 +24,7 @@
  * plain http to serverHost:serverPort, as before.
  */
 import { createHash, timingSafeEqual } from "crypto";
+import { TARGET_SERVER_HEADER } from "./processRole";
 
 export const PEER_KEY_HEADER = "X-Jrok-Peer-Key";
 export const FORWARDED_HOST_HEADER = "X-Jrok-Forwarded-Host";
@@ -89,7 +90,7 @@ export function peerOrigin(
  * another edge. `set` and `remove` work on either a Headers or a plain object.
  */
 export function addressPeerRequest(
-  target: { forwardUrl?: string },
+  target: { forwardUrl?: string; serverId?: string },
   originalHost: string | null,
   set: (name: string, value: string) => void,
   remove: (name: string) => void
@@ -97,8 +98,12 @@ export function addressPeerRequest(
   // Never pass on what a visitor sent under these names.
   remove(PEER_KEY_HEADER);
   remove(FORWARDED_HOST_HEADER);
+  remove(TARGET_SERVER_HEADER);
 
   if (target.forwardUrl) {
+    // An edge running several processes picks the one holding the agent by
+    // this header (nginx map in its edge-to-edge block).
+    if (target.serverId) set(TARGET_SERVER_HEADER, target.serverId);
     // Host is the edge's name (the URL's); the peer's nginx restores the
     // visitor's from X-Jrok-Forwarded-Host.
     remove("host");
@@ -116,4 +121,5 @@ export function addressPeerRequest(
 export function stripPeerHeaders(headers: Record<string, string>): void {
   delete headers[PEER_KEY_HEADER.toLowerCase()];
   delete headers[FORWARDED_HOST_HEADER.toLowerCase()];
+  delete headers[TARGET_SERVER_HEADER.toLowerCase()];
 }

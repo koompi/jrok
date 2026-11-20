@@ -316,12 +316,61 @@
         # two hops for most requests.)
         # fail_timeout is also how long a restarted local jrok is passed over:
         # keep it short so traffic returns to it within seconds.
+        {% set jrok_multi = jrok_proc_count | int > 1 %}
+        {% set jrok_p0_port = jrok_port | default('3000') | int %}
+        {% if jrok_multi %}
+        # Several jrok processes on this edge (jrok_processes). An app's
+        # visitors and its agent go to the same process: both are hashed on the
+        # app's name (the first label of its host, or of the agent's ?domain=).
+        # A request landing on another process (a renamed or custom domain) is
+        # passed on to the right one over 127.0.0.1 by jrok itself.
+        map $host $jrok_app_key {
+          "~^([^.]+)\.(?:[^.]+\.)*(?:{{ jrok_base_domains | map('regex_escape') | join('|') }})$" $1;
+          default $host;
+        }
+        map $arg_domain $jrok_agent_key {
+          "~^([^.]+)" $1;
+          default "";
+        }
+        map $http_x_jrok_forwarded_host $jrok_fwd_key {
+          "~^([^.]+)\.(?:[^.]+\.)*(?:{{ jrok_base_domains | map('regex_escape') | join('|') }})$" $1;
+          default $http_x_jrok_forwarded_host;
+        }
+        # jrok's own API (the base domains) is process 0's: it writes nginx
+        # vhosts and runs certbot for custom domains.
+        map $host $jrok_upstream {
+          {% for d in jrok_base_domains %}
+          "{{ d }}" jrok_p0;
+          {% endfor %}
+          default jrok;
+        }
+        # TCP tunnels bind ports: process 0 only.
+        map $arg_protocol $jrok_agent_upstream {
+          tcp jrok_p0;
+          default jrok_agents;
+        }
+        {% for i in range(jrok_proc_count | int) %}
+        upstream jrok_p{{ i }} {
+          server 127.0.0.1:{{ jrok_p0_port + 10 * i }};
+          keepalive 16;
+        }
+        {% endfor %}
+        {% endif %}
         upstream jrok {
+          {% if jrok_multi %}
+          # hash forbids backup servers: the other edges are tried through
+          # error_page @jrok_peers in the server block instead.
+          hash $jrok_app_key consistent;
+          {% for i in range(jrok_proc_count | int) %}
+          server 127.0.0.1:{{ jrok_p0_port + 10 * i }} max_fails=3 fail_timeout=5s;
+          {% endfor %}
+          {% else %}
           server 127.0.0.1:{{ jrok_port | default('3000') }} max_fails=3 fail_timeout=5s;
-          {% if jrok_peer_tls | bool %}
+          {% endif %}
+          {% if jrok_peer_tls | bool and not jrok_multi %}
           # The other edges, over HTTPS (the edge-to-edge gateway below).
           server 127.0.0.1:{{ jrok_peer_gateway_port }} backup;
-          {% else %}
+          {% elif not jrok_multi %}
           {% for h in groups['jrok_servers'] | default([]) if h != inventory_hostname %}
           server {{ hostvars[h].jrok_peer_address | default(hostvars[h].ansible_host) }}:{{ jrok_port | default('3000') }} backup;
           {% endfor %}
@@ -334,7 +383,14 @@
         # would stay there, leaving this edge without it (seen on staging).
         # Failing instead makes the agent retry until its own edge is back.
         upstream jrok_agents {
+          {% if jrok_multi %}
+          hash $jrok_agent_key consistent;
+          {% for i in range(jrok_proc_count | int) %}
+          server 127.0.0.1:{{ jrok_p0_port + 10 * i }};
+          {% endfor %}
+          {% else %}
           server 127.0.0.1:{{ jrok_port | default('3000') }};
+          {% endif %}
         }
         {% if jrok_peer_tls | bool %}
 
@@ -347,9 +403,25 @@
         # This edge's jrok for requests other edges send. Never a backup: a
         # forwarded request must not bounce on to yet another edge.
         upstream jrok_this_edge {
+          {% if jrok_multi %}
+          hash $jrok_fwd_key consistent;
+          {% for i in range(jrok_proc_count | int) %}
+          server 127.0.0.1:{{ jrok_p0_port + 10 * i }};
+          {% endfor %}
+          {% else %}
           server 127.0.0.1:{{ jrok_port | default('3000') }};
+          {% endif %}
           keepalive 32;
         }
+        {% if jrok_multi %}
+        # Another edge's jrok names the process holding the agent.
+        map $http_x_jrok_target_server $jrok_target_upstream {
+          {% for i in range(jrok_proc_count | int) %}
+          "{{ vps_id | default(ansible_hostname) }}{{ '' if i == 0 else '-p' ~ i }}" jrok_p{{ i }};
+          {% endfor %}
+          default jrok_this_edge;
+        }
+        {% endif %}
 
         # The other edges' entry server blocks.
         upstream jrok_peers {
@@ -445,7 +517,11 @@
           location = /ws/agent {
             access_log /var/log/nginx/access.log combined_noquery;
             limit_req zone=agents burst={{ jrok_agent_burst | default(2000) }} nodelay;
+            {% if jrok_multi %}
+            proxy_pass http://$jrok_agent_upstream;
+            {% else %}
             proxy_pass http://jrok_agents;
+            {% endif %}
             proxy_http_version 1.1;
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection "upgrade";
@@ -462,7 +538,14 @@
             # No query strings in this log: old agents put their API key there.
             access_log /var/log/nginx/access.log combined_noquery;
 
+            {% if jrok_multi %}
+            proxy_pass http://$jrok_upstream;
+            {% if jrok_peer_tls | bool %}
+            error_page 502 504 = @jrok_peers;
+            {% endif %}
+            {% else %}
             proxy_pass http://jrok;
+            {% endif %}
             proxy_http_version 1.1;
             
             proxy_set_header Upgrade $http_upgrade;
@@ -479,7 +562,15 @@
 
           # Proxy settings
           location / {
+            {% if jrok_multi %}
+            proxy_pass http://$jrok_upstream;
+            {% if jrok_peer_tls | bool %}
+            # Every process down: the other edges, as upstream jrok's backup did.
+            error_page 502 504 = @jrok_peers;
+            {% endif %}
+            {% else %}
             proxy_pass http://jrok;
+            {% endif %}
             proxy_http_version 1.1;
             
             # Headers
@@ -516,6 +607,25 @@
             proxy_send_timeout 60s;
             proxy_read_timeout 3600s;
           }
+
+          {% if jrok_multi and jrok_peer_tls | bool %}
+          # nginx's own 502/504 (no process answered); an app's 502 passes as is.
+          location @jrok_peers {
+            proxy_pass http://127.0.0.1:{{ jrok_peer_gateway_port }};
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Jrok-Acme-Challenge "";
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_connect_timeout 5s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 3600s;
+          }
+          {% endif %}
 
           # /health and /certificates/ have no location of their own: on an
           # app's name they are the app's (an uptime monitor on its /health got
@@ -555,7 +665,11 @@
             if ($http_x_jrok_forwarded_host = "") {
               return 400;
             }
+            {% if jrok_multi %}
+            proxy_pass http://$jrok_target_upstream;
+            {% else %}
             proxy_pass http://jrok_this_edge;
+            {% endif %}
             proxy_http_version 1.1;
             proxy_set_header Host $http_x_jrok_forwarded_host;
             proxy_set_header X-Forwarded-Host $http_x_jrok_forwarded_host;

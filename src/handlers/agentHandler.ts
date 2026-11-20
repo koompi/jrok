@@ -1,4 +1,5 @@
 import type { Agent, AgentMessage, AuthContext, TunnelProtocol, TunnelIpSecurity } from "../types/index";
+import { isPrimaryProcess } from "../utils/processRole";
 import * as agentService from "../services/agentService";
 import { validateApiKeyForAgent } from "../services/authService";
 import * as monitoringService from "../services/monitoringService";
@@ -97,6 +98,12 @@ export async function handleAgentUpgrade(req: Request, server: any): Promise<Res
   // Validate protocol
   if (protocol !== 'http' && protocol !== 'tcp') {
     return new Response("Invalid protocol. Must be 'http' or 'tcp'", { status: 400 });
+  }
+
+  // TCP ports are bound by an edge's first process only (utils/processRole.ts);
+  // nginx sends protocol=tcp there, so this is a misrouted retry.
+  if (protocol === 'tcp' && !isPrimaryProcess()) {
+    return new Response("TCP tunnels are served by this edge's first process", { status: 503 });
   }
 
   // TCP protocol doesn't support group mode (load balancing)

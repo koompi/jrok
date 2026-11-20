@@ -36,6 +36,7 @@ import { describePlatformKeys } from "./config/impersonation";
 import { selfServeOpen } from "./config/selfServe";
 import { allBaseDomains } from "./utils/baseDomains";
 import { fromTrustedProxy, getClientIp, setForwardedClientHeaders, trustedProxyHops, trustedProxyIps } from "./utils/clientIp";
+import { edgeId, isPrimaryProcess, processIndex } from "./utils/processRole";
 import { isFromPeer, stripPeerHeaders } from "./utils/peerLink";
 import * as acmeChallenge from "./services/acmeChallenge";
 import { serverKeyAllowedFrom, serverKeySources } from "./utils/serverKeySources";
@@ -648,19 +649,25 @@ async function startServer() {
     // Keep IP rules, admin IP blocks and suspensions the same on every server
     await securitySync.startSecuritySync();
     // ...and keep the edge cache from answering past them (nginx's cache-off files).
-    edgeCacheRules.startEdgeCacheRules();
+    // Edge-wide files and ports belong to the edge's first process (utils/processRole.ts).
+    const primary = isPrimaryProcess();
+    if (primary) edgeCacheRules.startEdgeCacheRules();
 
     // Initialize cross-server routing
     crossServerService.initCrossServerRouting();
     console.log("✅ Cross-server routing initialized");
 
     // Initialize certificate sync infrastructure (MongoDB collections + indexes)
-    await certSyncService.initializeCertificateSync();
-    console.log("✅ Certificate sync infrastructure initialized");
+    if (primary) {
+      await certSyncService.initializeCertificateSync();
+      console.log("✅ Certificate sync infrastructure initialized");
 
-    // Restore TCP servers on startup (reconnect to allocated ports)
-    await tcpService.restoreTcpServersOnStartup();
-    console.log("✅ TCP tunnels restored");
+      // Restore TCP servers on startup (reconnect to allocated ports)
+      await tcpService.restoreTcpServersOnStartup();
+      console.log("✅ TCP tunnels restored");
+    } else {
+      console.log(`✅ Process ${processIndex()} of edge ${edgeId()}: certificates, TCP and cleanup are process 0's`);
+    }
 
     // Initialize monitoring service with map references for size tracking
     monitoringService.initMonitoringService(pendingRequests);
@@ -669,7 +676,7 @@ async function startServer() {
     await initGeoip();
 
     // Register current VPS server if running on a VPS with SSH
-    await registerLocalVpsServer();
+    if (primary) await registerLocalVpsServer();
 
     // HTTP Server
     const server = Bun.serve({
@@ -2908,7 +2915,7 @@ async function startServer() {
     }, 30000);
 
     // Cleanup expired tunnels every 5 minutes
-    setInterval(async () => {
+    if (primary) setInterval(async () => {
       try {
         await cleanupExpiredTunnels();
       } catch (error) {
@@ -2924,7 +2931,7 @@ async function startServer() {
     }, 5 * 60 * 1000);
 
     // Aggregate daily stats at midnight (run every hour, only processes yesterday)
-    setInterval(async () => {
+    if (primary) setInterval(async () => {
       try {
         const now = new Date();
         if (now.getHours() === 0) { // Only run at midnight
@@ -2938,7 +2945,7 @@ async function startServer() {
     console.log("✅ Auto-cleanup enabled (agents: 30s, tunnels: 5m, rate limits: 10m, stats: 1h)");
 
     // Cleanup orphaned and stale TCP allocations every hour
-    setInterval(async () => {
+    if (primary) setInterval(async () => {
       try {
         await tcpService.cleanupOrphanedAllocations();
         await tcpService.cleanupStaleAllocations(7); // Clean allocations inactive for 7+ days
@@ -2960,17 +2967,19 @@ async function startServer() {
     // It never throws and never downgrades a certificate that is currently
     // serving traffic, so a failure here degrades to "this server keeps serving
     // what it already had" rather than an outage.
-    void certSyncService.reconcileCertificates();
-
-    setInterval(() => {
+    if (primary) {
       void certSyncService.reconcileCertificates();
-    }, 5 * 60 * 1000);
 
-    // A certificate another edge just uploaded (a new custom domain, a
-    // renewal) is pulled within seconds, not at the next full reconcile.
-    setInterval(() => {
-      certSyncService.syncIfNewCertificates().catch(() => {});
-    }, 15_000);
+      setInterval(() => {
+        void certSyncService.reconcileCertificates();
+      }, 5 * 60 * 1000);
+
+      // A certificate another edge just uploaded (a new custom domain, a
+      // renewal) is pulled within seconds, not at the next full reconcile.
+      setInterval(() => {
+        certSyncService.syncIfNewCertificates().catch(() => {});
+      }, 15_000);
+    }
 
     console.log("✅ Certificate sync enabled (reconcile on startup, every 5 minutes, and within 15 s of a new upload)");
 
@@ -2983,13 +2992,13 @@ async function startServer() {
       stop: () => {
         securityService.shutdownSecurityService();
         securitySync.stopSecuritySync();
-        edgeCacheRules.stopEdgeCacheRules();
+        if (primary) edgeCacheRules.stopEdgeCacheRules();
         monitoringService.shutdownMonitoringService();
       },
       leave: async () => {
         await crossServerService.shutdownCrossServerRouting();
         // Cleanup TCP tunnels for this server
-        await tcpService.cleanupServerPorts();
+        if (primary) await tcpService.cleanupServerPorts();
       },
       closeDatabase,
       exit: (code) => process.exit(code),

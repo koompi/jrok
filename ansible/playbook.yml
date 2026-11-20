@@ -66,6 +66,12 @@
     # edge answers to it; it needs no DNS record.
     jrok_peer_name: "{{ peer_name | default('jrok-peer.' ~ jrok_base_domains[0]) }}"
     jrok_peer_gateway_port: 3001
+    # jrok processes per edge (jrok_processes in the inventory, default 1):
+    # Bun runs one core per process, so a 4-core edge serves about 3x more
+    # with 3. Process K listens on jrok_port + 10*K and is server
+    # "<vps_id>-pK" (process 0 keeps vps_id); nginx sends each app's visitors
+    # and its agent to one of them by the app's name (src/utils/processRole.ts).
+    jrok_proc_count: "{{ jrok_processes | default(1) | int }}"
     # Self-serve sign-up, organizations and API keys (JROK_SELF_SERVE,
     # src/config/selfServe.ts): off unless jrok_self_serve is on/true. Off,
     # only KOOMPI Cloud makes them; see roles/app for impersonation_key_ids.

@@ -216,11 +216,16 @@
       when: journald_conf.changed
   tags: ["app"]
 
+# One unit per process (jrok_processes, playbook.yml): jrok.service is
+# process 0, jrok-p1.service... the others, on jrok_port + 10*K.
 - name: Create systemd service file
+  loop: "{{ range(jrok_proc_count | int) | list }}"
+  loop_control:
+    loop_var: jrok_proc
   copy:
     content: |
       [Unit]
-      Description=jrok - Reverse Tunnel Service
+      Description=jrok - Reverse Tunnel Service{{ '' if jrok_proc == 0 else ' (process ' ~ jrok_proc ~ ')' }}
       After=network.target nginx.service
       Wants=nginx.service
 
@@ -230,7 +235,9 @@
       WorkingDirectory={{ app_dir }}
       EnvironmentFile=/etc/jrok/jrok.env
       Environment=NODE_ENV=production
-      Environment=PORT=3000
+      Environment=PORT={{ (jrok_port | default('3000') | int) + 10 * jrok_proc }}
+      Environment=JROK_EDGE_ID={{ vps_id | default(ansible_hostname) }}
+      Environment=JROK_PROCESS_INDEX={{ jrok_proc }}
       # Forwarding headers (the visitor's address, nginx's ACME marker) count
       # only from nginx on this machine and the other edges; anyone else
       # reaching port 3000 directly is taken for who they are.
@@ -250,8 +257,8 @@
       # address lands on a server that isn't listening and is simply refused.
       # Set tcp_public_host per host in the inventory.
       Environment=TCP_PUBLIC_HOST={{ tcp_public_host | default(ansible_host) }}
-      Environment=VPS_ID={{ vps_id | default(ansible_hostname) }}
-      Environment=VPS_NAME={{ vps_id | default(ansible_hostname) }}
+      Environment=VPS_ID={{ vps_id | default(ansible_hostname) }}{{ '' if jrok_proc == 0 else '-p' ~ jrok_proc }}
+      Environment=VPS_NAME={{ vps_id | default(ansible_hostname) }}{{ '' if jrok_proc == 0 else '-p' ~ jrok_proc }}
       Environment=VPS_REGION={{ vps_region | default('default') }}
       # Largest request body jrok accepts; nginx's client_max_body_size caps it too.
       Environment=MAX_REQUEST_BODY_MB={{ max_request_body_mb | default(10) }}
@@ -326,14 +333,26 @@
 
       StandardOutput=journal
       StandardError=journal
-      SyslogIdentifier=jrok
+      SyslogIdentifier={{ 'jrok' if jrok_proc == 0 else 'jrok-p' ~ jrok_proc }}
 
       [Install]
       WantedBy=multi-user.target
-    dest: /etc/systemd/system/jrok.service
+    dest: "/etc/systemd/system/{{ 'jrok' if jrok_proc == 0 else 'jrok-p' ~ jrok_proc }}.service"
     owner: root
     group: root
     mode: '0644'
+  tags: ["app"]
+
+- name: Stop processes beyond jrok_processes (it was lowered)
+  shell: |
+    for u in /etc/systemd/system/jrok-p[0-9]*.service; do
+      [ -e "$u" ] || continue
+      n=$(basename "$u" .service); k=${n#jrok-p}
+      [ "$k" -ge {{ jrok_proc_count | int }} ] || continue
+      systemctl disable --now "$n" && rm -f "$u" && rm -rf "/etc/systemd/system/$n.service.d" && echo "removed $n"
+    done
+  register: jrok_extra_units
+  changed_when: "'removed' in jrok_extra_units.stdout"
   tags: ["app"]
 
 - name: Reload systemd daemon
@@ -358,33 +377,37 @@
 
 - name: Count them
   set_fact:
-    jrok_agents_before: "{{ ((agents_before.json | default({})).serverDetails | default([]) | selectattr('serverId', 'equalto', vps_id | default(ansible_hostname)) | map(attribute='agentCount') | list + [0]) | first | int }}"
+    jrok_agents_before: "{{ ((agents_before.json | default({})).serverDetails | default([]) | selectattr('serverId', 'match', '^' ~ (vps_id | default(ansible_hostname)) ~ '(-p[0-9]+)?$') | map(attribute='agentCount') | list + [0]) | sum | int }}"
   tags: ["app"]
 
 - name: Stop jrok service (if running)
+  loop: "{{ range(jrok_proc_count | int) | list }}"
   systemd:
-    name: jrok
+    name: "{{ 'jrok' if item == 0 else 'jrok-p' ~ item }}"
     state: stopped
   ignore_errors: yes
   tags: ["app"]
 
 - name: Start jrok service
+  loop: "{{ range(jrok_proc_count | int) | list }}"
   systemd:
-    name: jrok
+    name: "{{ 'jrok' if item == 0 else 'jrok-p' ~ item }}"
     state: started
     enabled: yes
   tags: ["app"]
 
 - name: Wait for application to start
+  loop: "{{ range(jrok_proc_count | int) | list }}"
   wait_for:
-    port: 3000
+    port: "{{ (jrok_port | default('3000') | int) + 10 * item }}"
     delay: 3
     timeout: 30
   tags: ["app"]
 
 - name: Check application health
+  loop: "{{ range(jrok_proc_count | int) | list }}"
   uri:
-    url: "http://localhost:3000/health"
+    url: "http://localhost:{{ (jrok_port | default('3000') | int) + 10 * item }}/health"
     method: GET
     return_content: yes
   register: health_check
@@ -400,8 +423,8 @@
     return_content: yes
   register: agents_after
   until: >-
-    ((agents_after.json | default({})).serverDetails | default([]) | selectattr('serverId', 'equalto', vps_id | default(ansible_hostname))
-    | map(attribute='agentCount') | list + [0]) | first >= (jrok_agents_before | int * (jrok_agent_return | default(0.95) | float)) | int
+    ((agents_after.json | default({})).serverDetails | default([]) | selectattr('serverId', 'match', '^' ~ (vps_id | default(ansible_hostname)) ~ '(-p[0-9]+)?$')
+    | map(attribute='agentCount') | list + [0]) | sum >= (jrok_agents_before | int * (jrok_agent_return | default(0.95) | float)) | int
   retries: "{{ ((jrok_agent_wait_seconds | default(180)) | int) // 5 }}"
   delay: 5
   failed_when: false
@@ -411,7 +434,7 @@
 
 - name: Agents back on this edge
   set_fact:
-    jrok_agents_after: "{{ ((agents_after.json | default({})).serverDetails | default([]) | selectattr('serverId', 'equalto', vps_id | default(ansible_hostname)) | map(attribute='agentCount') | list + [0]) | first | int }}"
+    jrok_agents_after: "{{ ((agents_after.json | default({})).serverDetails | default([]) | selectattr('serverId', 'match', '^' ~ (vps_id | default(ansible_hostname)) ~ '(-p[0-9]+)?$') | map(attribute='agentCount') | list + [0]) | sum | int }}"
   when: agents_after is not skipped
   tags: ["app"]
 
@@ -449,7 +472,7 @@
 - name: Show application status
   debug:
     msg: "✅ Application is running and healthy!"
-  when: health_check.status == 200
+  when: health_check.results | map(attribute="status") | reject("equalto", 200) | list | length == 0
   tags: ["app", "verify"]
 
 - name: Show service logs
@@ -524,26 +547,29 @@
 # tunnel). A drop-in, so a "dns-health" deploy sets it without restarting jrok;
 # choom applies it to the jrok already running.
 - name: jrok is the last process the OOM killer picks
+  loop: "{{ range(jrok_proc_count | int) | list }}"
   file:
-    path: /etc/systemd/system/jrok.service.d
+    path: "/etc/systemd/system/{{ 'jrok' if item == 0 else 'jrok-p' ~ item }}.service.d"
     state: directory
     mode: '0755'
   tags: ["app", "dns-health"]
 
 - name: jrok is the last process the OOM killer picks (drop-in)
+  loop: "{{ range(jrok_proc_count | int) | list }}"
   copy:
     content: |
       [Service]
       OOMScoreAdjust=-500
-    dest: /etc/systemd/system/jrok.service.d/oom.conf
+    dest: "/etc/systemd/system/{{ 'jrok' if item == 0 else 'jrok-p' ~ item }}.service.d/oom.conf"
     owner: root
     group: root
     mode: '0644'
   tags: ["app", "dns-health"]
 
 - name: Apply it to the running jrok
+  loop: "{{ range(jrok_proc_count | int) | list }}"
   shell: |
-    pid=$(systemctl show -p MainPID --value jrok)
+    pid=$(systemctl show -p MainPID --value {{ 'jrok' if item == 0 else 'jrok-p' ~ item }})
     [ "${pid:-0}" != 0 ] || exit 0
     [ "$(cat /proc/$pid/oom_score_adj)" = -500 ] && echo unchanged && exit 0
     choom -n -500 -p "$pid"
