@@ -42,8 +42,8 @@ function fakeCollection(name: string) {
     async findOne(filter: Doc) { use("findOne"); return docs.find((d) => matches(d, filter)) ?? null; },
     find(filter: Doc) {
       use("find");
-      const result = docs.filter((d) => matches(d, filter));
-      const cursor = { sort: () => cursor, toArray: async () => result };
+      let result = docs.filter((d) => matches(d, filter));
+      const cursor = { sort: () => cursor, limit: (n: number) => { result = result.slice(0, n); return cursor; }, toArray: async () => result };
       return cursor;
     },
     async insertOne(doc: Doc) { use("insertOne"); docs.push({ ...doc }); return { acknowledged: true }; },
@@ -184,7 +184,7 @@ describe("MongoDB unreachable", () => {
 
     const first = await crossServer.findServerForDomain("remote-app");
     expect(first.targetServer?.serverId).toBe("peer-r1");
-    expect(ops).toEqual(["agentConnections.findOne", "serverHeartbeats.findOne"]);
+    expect(ops).toEqual(["agentConnections.find", "serverHeartbeats.findOne"]);
 
     ops.length = 0;
     await crossServer.findServerForDomain("remote-app");
