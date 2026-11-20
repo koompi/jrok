@@ -502,6 +502,13 @@
       ExecStart=/root/.bun/bin/bun run src/dnsHealth/main.ts
       Restart=always
       RestartSec=5
+      # Bun's native memory grows here by ~200 MB a day (the JS heap stays flat; Node
+      # doesn't grow): on 1 GB edges it got jrok itself OOM-killed (2026-11-19).
+      # A restart every 6 h (SIGTERM: lease and votes handed over) keeps it small;
+      # the cap kills only this checker if it still grows.
+      RuntimeMaxSec=6h
+      MemoryMax=250M
+      MemorySwapMax=0
       SyslogIdentifier=jrok-dns-health
 
       [Install]
@@ -511,6 +518,37 @@
     group: root
     mode: '0644'
   when: dns_health_records is defined
+  tags: ["app", "dns-health"]
+
+# When memory runs out, the kernel kills something else before jrok (it holds every
+# tunnel). A drop-in, so a "dns-health" deploy sets it without restarting jrok;
+# choom applies it to the jrok already running.
+- name: jrok is the last process the OOM killer picks
+  file:
+    path: /etc/systemd/system/jrok.service.d
+    state: directory
+    mode: '0755'
+  tags: ["app", "dns-health"]
+
+- name: jrok is the last process the OOM killer picks (drop-in)
+  copy:
+    content: |
+      [Service]
+      OOMScoreAdjust=-500
+    dest: /etc/systemd/system/jrok.service.d/oom.conf
+    owner: root
+    group: root
+    mode: '0644'
+  tags: ["app", "dns-health"]
+
+- name: Apply it to the running jrok
+  shell: |
+    pid=$(systemctl show -p MainPID --value jrok)
+    [ "${pid:-0}" != 0 ] || exit 0
+    [ "$(cat /proc/$pid/oom_score_adj)" = -500 ] && echo unchanged && exit 0
+    choom -n -500 -p "$pid"
+  register: jrok_oom
+  changed_when: "'unchanged' not in jrok_oom.stdout"
   tags: ["app", "dns-health"]
 
 - name: Start health-checked DNS (restarted for new code; another checker holds the lease meanwhile)
