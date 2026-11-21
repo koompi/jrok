@@ -70,6 +70,7 @@ mock.module("../src/utils/mongodb", () => ({ ...realMongo, getCollections: () =>
 
 const securityService = await import("../src/services/securityService");
 const securitySync = await import("../src/services/securitySync");
+const appGroups = await import("../src/services/appGroups");
 
 const tunnels = () => (fakeCollections as any).tunnels as ReturnType<typeof fakeCollection>;
 
@@ -232,5 +233,59 @@ describe("an app with a tunnel record per edge", () => {
     for (const id of ["t-multi-1", "t-multi-2", "t-multi-3"]) {
       expect(securityService.checkIpSecurity(id, "203.147.139.61", "multi-app").allowed).toBe(true);
     }
+  });
+});
+
+describe("which apps are one customer's (app groups, the cross-app guard)", () => {
+  const g1 = "a".repeat(16);
+  const g2 = "b".repeat(16);
+
+  test("a map pushed through one server is every server's after a sync", async () => {
+    await securitySync.saveAppGroups({ version: "1111aaaa", labels: { shop: g1, evil: g2 }, domains: { "shop.example.com": g1 } });
+    expect(appGroups.groupOfLabel("shop")).toBe(g1); // at once, here
+
+    becomeAnotherServer();
+    appGroups.resetAppGroups();
+    expect(appGroups.groupOfLabel("shop")).toBeUndefined();
+    await securitySync.syncSecurityRules();
+    expect(appGroups.groupOfLabel("shop")).toBe(g1);
+    expect(appGroups.groupOfLabel("evil")).toBe(g2);
+    expect(appGroups.groupOfDomain("shop.example.com")).toBe(g1);
+    expect(appGroups.appGroupsStatus()).toMatchObject({ loaded: true, version: "1111aaaa", labels: 2, domains: 1 });
+  });
+
+  test("its entries are read in full only when it changed (the newest rule is read again on every sync)", async () => {
+    const rules = (fakeCollections as any).securityRules;
+    const findOne = rules.findOne.bind(rules);
+    let fullReads = 0;
+    rules.findOne = async (filter: Doc) => { if (filter.kind === "app-groups") fullReads++; return findOne(filter); };
+    try {
+      await securitySync.saveAppGroups({ version: "2222bbbb", labels: { shop: g2 }, domains: {} });
+      becomeAnotherServer();
+      await securitySync.syncSecurityRules();
+      await securitySync.syncSecurityRules();
+      await securitySync.syncSecurityRules();
+      expect(fullReads).toBe(1);
+      expect(appGroups.groupOfLabel("shop")).toBe(g2);
+    } finally {
+      rules.findOne = findOne;
+    }
+  });
+
+  test("a map MongoDB can't save throws and is not used here either", async () => {
+    await securitySync.saveAppGroups({ version: "3333cccc", labels: { shop: g1 }, domains: {} });
+    mongoDown = true;
+    await expect(securitySync.saveAppGroups({ version: "4444dddd", labels: { shop: g2 }, domains: {} })).rejects.toThrow();
+    expect(appGroups.appGroupsStatus().version).toBe("3333cccc");
+    expect(appGroups.groupOfLabel("shop")).toBe(g1);
+  });
+
+  test("other rules still apply next to it", async () => {
+    await securitySync.saveAppGroups({ version: "5555eeee", labels: { shop: g1 }, domains: {} });
+    await securitySync.setRule("suspend-domain", "groups-app", true, { reason: "test" });
+    becomeAnotherServer();
+    await securitySync.syncSecurityRules();
+    expect(securityService.checkSuspension(undefined, "groups-app").suspended).toBe(true);
+    expect(appGroups.groupOfLabel("shop")).toBe(g1);
   });
 });

@@ -29,6 +29,8 @@ import { cleanupExpiredLimits } from "./utils/rateLimiter";
 import { purgeExpiredCaches } from "./utils/database";
 import { initTelegram, notifyOperators } from "./services/notificationService";
 import { FloodGuard, floodGuardOptionsFromEnv, blockedResponse, appBusyResponse, addressBusyResponse, floodKey } from "./services/floodGuard";
+import { checkCrossAppRequest, noteResponseCookies, crossAppMode } from "./services/crossAppGuard";
+import { appGroupsStatus, parseAppGroups } from "./services/appGroups";
 import { generateId } from "./utils/helpers";
 import type { TunnelConfig, Agent, AuthContext, TunnelProtocol } from "./types/index";
 import * as planLimitService from "./services/planLimitService";
@@ -42,7 +44,7 @@ import { isFromPeer, stripPeerHeaders } from "./utils/peerLink";
 import * as acmeChallenge from "./services/acmeChallenge";
 import { serverKeyAllowedFrom, serverKeySources } from "./utils/serverKeySources";
 import { VisitorFrameLimiter, frameByteLength, isBacklogged, sendOrDrop } from "./utils/wsFlowControl";
-import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse } from "./utils/access";
+import { checkTunnelAccess, checkOrgAccess, accessDeniedResponse, isPrivileged } from "./utils/access";
 import { firstSubprotocol } from "./utils/wsSubprotocol";
 import { DRAIN_HEADER, isDraining } from "./utils/drain";
 import { PAGE_CHECK_HEADER, pageInstead, statusPage, statusPageCode, wantsPage } from "./utils/maintenancePage";
@@ -195,6 +197,12 @@ function cleanupOldestPendingRequest() {
   }
 }
 
+/** How a visitor's request is passed to the app. */
+interface AgentRequestOptions {
+  /** Without the visitor's cookies (the cross-app guard, services/crossAppGuard.ts). */
+  dropCookie?: boolean;
+}
+
 // Handle WebSocket tunnel (client WebSocket -> agent -> local service WebSocket)
 async function handleWebSocketTunnel(
   req: Request,
@@ -202,7 +210,8 @@ async function handleWebSocketTunnel(
   agentWs: WebSocket,
   agent: Agent,
   subdomain: string,
-  clientIp?: string
+  clientIp?: string,
+  options: AgentRequestOptions = {}
 ): Promise<Response | undefined> {
   const url = new URL(req.url);
   const path = url.pathname + url.search;
@@ -219,6 +228,7 @@ async function handleWebSocketTunnel(
   // forwarded-for chain whose first hop the visitor wrote.
   setForwardedClientHeaders(headers, clientIp);
   stripPeerHeaders(headers);
+  if (options.dropCookie) delete headers["cookie"];
   // The visitor's first subprotocol, which Bun answers the visitor with: the
   // agent offers the app exactly that one (utils/wsSubprotocol.ts).
   const subprotocol = firstSubprotocol(req.headers.get("sec-websocket-protocol"));
@@ -322,18 +332,18 @@ function answerAgentsPendingRequests(agentId: string): void {
  * (services/floodGuard.ts): beyond that, that app alone is answered 503; and
  * once it is half full, one address beyond its share is answered 429.
  */
-async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string, clientIp?: string): Promise<Response> {
+async function forwardRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string, clientIp?: string, options: AgentRequestOptions = {}): Promise<Response> {
   const waiting = floodGuard.startWaiting(agent.domain, clientIp);
   if (waiting === "app") return appBusyResponse();
   if (waiting === "address") return addressBusyResponse();
   try {
-    return await sendRequestToAgent(req, agentWs, agent, tunnelId, clientIp);
+    return await sendRequestToAgent(req, agentWs, agent, tunnelId, clientIp, options);
   } finally {
     floodGuard.stopWaiting(agent.domain, clientIp);
   }
 }
 
-async function sendRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string, clientIp?: string): Promise<Response> {
+async function sendRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent, tunnelId?: string, clientIp?: string, options: AgentRequestOptions = {}): Promise<Response> {
   return new Promise(async (resolve) => {
     const requestId = generateId();
     const timeout = setTimeout(() => {
@@ -372,6 +382,7 @@ async function sendRequestToAgent(req: Request, agentWs: WebSocket, agent: Agent
     // and so is a waiting page's check whether the app is back.
     stripPeerHeaders(headers);
     delete headers[PAGE_CHECK_HEADER.toLowerCase()];
+    if (options.dropCookie) delete headers["cookie"];
 
     try {
       // Read request body as raw bytes. Agents that advertise the "b64body"
@@ -568,6 +579,24 @@ async function requireAdminOrServerKey(req: Request): Promise<Response | null> {
     return null;
   }
   return requireSuperAdmin(req);
+}
+
+/**
+ * Auth for what KOOMPI Cloud keeps for every app (the app groups): the
+ * X-Admin-Key, or a privileged caller (utils/access.ts): the server key, a
+ * super admin, or the platform key KOOMPI Cloud manages every app's tunnel and
+ * IP rules with, so it needs no other secret.
+ */
+async function requireAdminKeyOrPrivileged(req: Request): Promise<Response | null> {
+  const serverKey = process.env.JROK_ADMIN_KEY || config.apiKey;
+  const presented = req.headers.get("x-admin-key");
+  if (presented && serverKey && safeEqual(presented, serverKey) && serverKeyUsable(req)) return null;
+  const authContext = await authenticateRequest(req);
+  if (isPrivileged(authContext)) return null;
+  return new Response(
+    JSON.stringify({ success: false, message: authContext ? "Forbidden" : "Unauthorized" }),
+    { status: authContext ? 403 : 401, headers: { "Content-Type": "application/json" } }
+  );
 }
 
 /**
@@ -1650,13 +1679,19 @@ async function startServer() {
             }
           }
 
+          // Another customer's app sending this app's visitor here with their
+          // cookies (services/crossAppGuard.ts): reported, and under
+          // CROSS_APP_GUARD=enforce sent on without them. Here, on the edge
+          // holding the agent, so a forwarded request is checked once.
+          const agentRequest: AgentRequestOptions = { dropCookie: checkCrossAppRequest(method, req.headers, hostname)?.dropCookie === true };
+
           // Track HTTP connection
           securityService.trackHttpConnection(tunnelId || subdomain, true);
 
           // Check if this is a WebSocket upgrade request
           if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
             // Handle WebSocket tunneling
-            const response = await handleWebSocketTunnel(req, server, finalAgentWs, agent, subdomain, clientIp);
+            const response = await handleWebSocketTunnel(req, server, finalAgentWs, agent, subdomain, clientIp, agentRequest);
             if (response) {
               securityService.trackHttpConnection(tunnelId || subdomain, false);
               // Decrement connection count for load balancing
@@ -1669,7 +1704,7 @@ async function startServer() {
           }
 
           // Forward regular HTTP request to agent via WebSocket (with bandwidth tracking)
-          let response = await forwardRequestToAgent(req, finalAgentWs, agent, tunnelId, clientIp);
+          let response = await forwardRequestToAgent(req, finalAgentWs, agent, tunnelId, clientIp, agentRequest);
 
           // Its agent went away before answering (closed, or silent: its
           // machine likely died). A GET or HEAD has no body to lose, so it
@@ -1680,7 +1715,7 @@ async function startServer() {
               const otherWs = other && other.id !== agent.id ? agentService.getAgentSocket(other.id) : null;
               if (other && otherWs && otherWs.readyState === 1) {
                 console.log(`↪️  ${subdomain}${path}: its replica went away before answering; retried on another`);
-                response = await forwardRequestToAgent(req, otherWs, other, other.tunnelId || tunnelId, clientIp);
+                response = await forwardRequestToAgent(req, otherWs, other, other.tunnelId || tunnelId, clientIp, agentRequest);
               }
             }
             // Still jrok's own 502: a browser gets the "reconnecting" page.
@@ -1701,6 +1736,9 @@ async function startServer() {
           // Track bandwidth usage against API key's org (for quota limits)
           const responseSize = parseInt(response.headers.get("content-length") || "0");
           securityService.trackMonthlyBandwidth(agent.apiKeyOrgId || agent.organizationId || subdomain, responseSize);
+
+          // A cookie set for every app of the site (cookie tossing): reported.
+          noteResponseCookies(hostname, response.headers);
 
           return response;
         }
@@ -2197,6 +2235,51 @@ async function startServer() {
           if (saveError) return addCors(saveError);
           return addCors(new Response(
             JSON.stringify({ success: true, message: "Unsuspended" }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        // Which apps are one customer's, pushed by KOOMPI Cloud for the
+        // cross-app guard (services/appGroups.ts, services/crossAppGuard.ts).
+        // GET says which version every edge has, so it pushes only on change.
+        if (path === "/security/app-groups" && method === "GET") {
+          const authError = await requireAdminKeyOrPrivileged(req);
+          if (authError) return addCors(authError);
+          return addCors(new Response(
+            JSON.stringify({ success: true, mode: crossAppMode(), ...appGroupsStatus() }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          ));
+        }
+
+        if (path === "/security/app-groups" && method === "PUT") {
+          const authError = await requireAdminKeyOrPrivileged(req);
+          if (authError) return addCors(authError);
+          let body: unknown;
+          try {
+            body = await req.json();
+          } catch {
+            body = null;
+          }
+          const parsed = parseAppGroups(body);
+          if (!parsed.ok) {
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: parsed.error }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          try {
+            await securitySync.saveAppGroups(parsed.value);
+          } catch (error: any) {
+            console.error("❌ Could not save the app groups for the other servers:", error?.message || error);
+            return addCors(new Response(
+              JSON.stringify({ success: false, message: "Not saved: MongoDB could not take it. Retry." }),
+              { status: 503, headers: { "Content-Type": "application/json" } }
+            ));
+          }
+          const status = appGroupsStatus();
+          console.log(`🧭 App groups ${status.version}: ${status.labels} tunnel name(s), ${status.domains} custom domain(s)`);
+          return addCors(new Response(
+            JSON.stringify({ success: true, ...status }),
             { status: 200, headers: { "Content-Type": "application/json" } }
           ));
         }

@@ -9,7 +9,9 @@
  *
  * Every server now re-reads what changed every SYNC_INTERVAL_MS:
  * - per-tunnel IP rules, from `tunnels` (ipSecurityChangedAt);
- * - admin IP blocks, flood blocks (per app) and suspensions, from `securityRules`.
+ * - admin IP blocks, flood blocks (per app) and suspensions, from `securityRules`;
+ * - which apps are one customer's (appGroups.ts), one big rule of its own there,
+ *   read in full only when it changed.
  * Change times come from MongoDB's clock ($currentDate), never a server's.
  *
  * Automatic abuse blocks (securityService.detectAbuse) stay local on purpose:
@@ -21,6 +23,7 @@
 import { getCollections } from "../utils/mongodb";
 import * as securityService from "./securityService";
 import { FLOOD_REASON_PREFIX } from "./floodGuard";
+import { loadAppGroups, toStored, type AppGroups, type StoredAppGroups } from "./appGroups";
 
 /** block-ip-app: an address blocked for one app, keyed `${address}|${app}` (the flood guard's). */
 export type SecurityRuleKind = "block-ip" | "block-ip-app" | "suspend-org" | "suspend-domain";
@@ -33,6 +36,11 @@ interface SecurityRule {
   expiresAt?: number; // block-ip and block-ip-app only
   updatedAt: Date;
 }
+
+/** The app-groups map's rule. Not a SecurityRuleKind: only saveAppGroups writes it. */
+const APP_GROUPS = { kind: "app-groups", key: "map" } as const;
+/** Its entries, left out of the sync's query: the newest rule is read again on every sync. */
+const APP_GROUPS_ENTRIES = { labels: 0, domains: 0 } as const;
 
 const SYNC_INTERVAL_MS = 10_000;
 // Re-read a little before the last change seen: two writes can commit out of
@@ -120,6 +128,20 @@ export async function setRule(
   );
 }
 
+/**
+ * Save the app-groups map KOOMPI Cloud pushed, for every server, then use it
+ * here. Throws if MongoDB can't take it (the caller reports that).
+ */
+export async function saveAppGroups(groups: AppGroups): Promise<void> {
+  const stored = toStored(groups);
+  await getCollections().securityRules.updateOne(
+    { kind: APP_GROUPS.kind, key: APP_GROUPS.key },
+    { $set: { ...APP_GROUPS, active: true, ...stored }, $currentDate: { updatedAt: true } },
+    { upsert: true }
+  );
+  loadAppGroups(stored);
+}
+
 const since = (last: Date | null) => (last ? { $gt: new Date(last.getTime() - OVERLAP_MS) } : { $exists: true });
 
 const newest = (current: Date | null, seen: unknown): Date | null =>
@@ -138,13 +160,18 @@ export async function syncSecurityRules(): Promise<{ tunnels: number; rules: num
   }
 
   const rules = (await collections.securityRules
-    .find({ updatedAt: since(lastRuleChange) })
+    .find({ updatedAt: since(lastRuleChange) }, { projection: APP_GROUPS_ENTRIES })
     .toArray()) as unknown as SecurityRule[];
   for (const rule of rules) {
     const id = `${rule.kind}:${rule.key}`;
     const version = rule.updatedAt instanceof Date ? rule.updatedAt.getTime() : 0;
     if (appliedVersions.get(id) !== version) {
-      applyRule(rule);
+      if ((rule.kind as string) === APP_GROUPS.kind) {
+        const full = await collections.securityRules.findOne({ kind: APP_GROUPS.kind, key: APP_GROUPS.key });
+        if (full) loadAppGroups(full as unknown as StoredAppGroups);
+      } else {
+        applyRule(rule);
+      }
       appliedVersions.set(id, version);
     }
     lastRuleChange = newest(lastRuleChange, rule.updatedAt);

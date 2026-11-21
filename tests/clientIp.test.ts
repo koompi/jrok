@@ -6,7 +6,11 @@ import {
   ipMatchesAny,
   trustedProxyHops,
   setForwardedClientHeaders,
+  isCloudflareAddress,
+  VISITOR_ONLY_IP_HEADERS,
+  CLOUDFLARE_RANGES,
 } from "../src/utils/clientIp";
+import { readFileSync } from "fs";
 
 // nginx forwards with `X-Forwarded-For $proxy_add_x_forwarded_for`, which
 // APPENDS the address it saw. Everything to the left of that is whatever the
@@ -152,6 +156,50 @@ test("ipMatchesAny: exact and IPv4 CIDR", () => {
   expect(ipMatchesAny("garbage", ["0.0.0.0/0"])).toBe(false);
 });
 
+test("ipMatchesAny: IPv6 ranges and exact matches in any spelling", () => {
+  expect(ipMatchesAny("2606:4700:10::6816:1a3b", ["2606:4700::/32"])).toBe(true);
+  expect(ipMatchesAny("2606:4701::1", ["2606:4700::/32"])).toBe(false);
+  expect(ipMatchesAny("2a06:98c7:ffff::1", ["2a06:98c0::/29"])).toBe(true);
+  expect(ipMatchesAny("2a06:98c8::1", ["2a06:98c0::/29"])).toBe(false);
+  expect(ipMatchesAny("[2001:db8::1]:443", ["2001:0db8:0000:0000:0000:0000:0000:0001"])).toBe(true);
+  expect(ipMatchesAny("2001:db8::1", ["::/0"])).toBe(true);
+  expect(ipMatchesAny("64:ff9b::192.0.2.1", ["64:ff9b::c000:200/120"])).toBe(true);
+  // Families never cross: a v4 range never holds a v6 address and back.
+  expect(ipMatchesAny("2001:db8::1", ["0.0.0.0/0"])).toBe(false);
+  expect(ipMatchesAny("8.8.8.8", ["::/0"])).toBe(false);
+  // "::ffff:1.2.3.4" is the IPv4 client Bun reports on a dual-stack socket.
+  expect(ipMatchesAny("::ffff:10.1.2.3", ["10.0.0.0/8"])).toBe(true);
+});
+
+test("ipMatchesAny: a malformed range matches nothing (\"10.0.0.0/\" used to read as /0)", () => {
+  for (const entry of ["10.0.0.0/", "10.0.0.0/x", "10.0.0.0/33", "10.0.0.0/-1", "2606:4700::/129", "2606:4700::/", "1:2:3:4:5:6:7::8/64", ":::/0"]) {
+    expect([entry, ipMatchesAny("10.1.2.3", [entry]) || ipMatchesAny("2606:4700::1", [entry])]).toEqual([entry, false]);
+  }
+});
+
+describe("Cloudflare's addresses", () => {
+  const saved = process.env.CLOUDFLARE_IPS;
+  afterAll(() => { if (saved === undefined) delete process.env.CLOUDFLARE_IPS; else process.env.CLOUDFLARE_IPS = saved; });
+
+  test("its published ranges, v4 and v6", () => {
+    delete process.env.CLOUDFLARE_IPS;
+    expect(isCloudflareAddress("172.70.1.2")).toBe(true);
+    expect(isCloudflareAddress("162.158.200.1")).toBe(true);
+    expect(isCloudflareAddress("2a06:98c1:3120::3")).toBe(true);
+    expect(isCloudflareAddress("203.0.113.9")).toBe(false);
+    expect(isCloudflareAddress("2001:db8::1")).toBe(false);
+    expect(isCloudflareAddress(null)).toBe(false);
+    expect(CLOUDFLARE_RANGES.length).toBe(22);
+  });
+
+  test("CLOUDFLARE_IPS replaces the list", () => {
+    process.env.CLOUDFLARE_IPS = "198.51.100.0/24";
+    expect(isCloudflareAddress("198.51.100.7")).toBe(true);
+    expect(isCloudflareAddress("172.70.1.2")).toBe(false);
+    delete process.env.CLOUDFLARE_IPS;
+  });
+});
+
 describe("setForwardedClientHeaders (what the customer's app receives)", () => {
   test("the forged chain is replaced by the verified address", () => {
     const headers: Record<string, string> = {
@@ -172,5 +220,49 @@ describe("setForwardedClientHeaders (what the customer's app receives)", () => {
     setForwardedClientHeaders(headers, "unknown");
     expect(headers["x-forwarded-for"]).toBeUndefined();
     expect(headers["x-real-ip"]).toBeUndefined();
+  });
+
+  // J4: a custom domain's vhost passes these through (the public wildcard blanks
+  // them in nginx), and apps behind Cloudflare or a PaaS take them for the client.
+  const forged = () => ({
+    host: "shop.example.com",
+    "x-client-ip": "10.0.0.1",
+    "client-ip": "10.0.0.1",
+    "cf-connecting-ip": "10.0.0.1",
+    "true-client-ip": "10.0.0.1",
+    "fastly-client-ip": "10.0.0.1",
+    "x-cluster-client-ip": "10.0.0.1",
+    "fly-client-ip": "10.0.0.1",
+  } as Record<string, string>);
+
+  test("a visitor's own client-IP headers never reach the app", () => {
+    const headers = forged();
+    setForwardedClientHeaders(headers, "203.0.113.9");
+    expect(Object.keys(headers).sort()).toEqual(["host", "x-forwarded-for", "x-real-ip"]);
+    expect(headers["x-forwarded-for"]).toBe("203.0.113.9");
+  });
+
+  test("nor when jrok knows no address", () => {
+    const headers = forged();
+    setForwardedClientHeaders(headers, "unknown");
+    expect(Object.keys(headers)).toEqual(["host"]);
+  });
+
+  test("from Cloudflare (an orange-clouded custom domain) its own two stay: the app reads its visitor there", () => {
+    for (const cloudflare of ["172.70.1.2", "2a06:98c1:3120::3"]) {
+      const headers = forged();
+      setForwardedClientHeaders(headers, cloudflare);
+      expect(Object.keys(headers).sort()).toEqual(["cf-connecting-ip", "host", "true-client-ip", "x-forwarded-for", "x-real-ip"]);
+      expect(headers["cf-connecting-ip"]).toBe("10.0.0.1");
+      expect(headers["x-forwarded-for"]).toBe(cloudflare);
+    }
+  });
+
+  test("the list is the public entry's in nginx (ansible jrok_visitor_only_headers), less the peer key peerLink.ts strips", () => {
+    const role = readFileSync(new URL("../ansible/roles/nginx/tasks/main.yml", import.meta.url), "utf8");
+    const list = role.match(/\{% set jrok_visitor_only_headers = \[([^\]]*)\] %\}/)?.[1] ?? "";
+    const nginx = [...list.matchAll(/'([^']+)'/g)].map((m) => m[1]!.toLowerCase()).filter((h) => h !== "x-jrok-peer-key");
+    // A header added on one side only: add it to the other (clientIp.ts VISITOR_ONLY_IP_HEADERS or the role's list).
+    expect([...VISITOR_ONLY_IP_HEADERS].sort()).toEqual(nginx.sort());
   });
 });
