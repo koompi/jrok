@@ -81,6 +81,11 @@
     jrok_self_serve_on: "{{ (jrok_self_serve | default('off') | string | lower) in ['on', 'true', 'yes', '1'] }}"
     # Addresses other edges connect from: their ansible_host, plus extras.
     jrok_peer_sources: "{{ (groups['jrok_servers'] | map('extract', hostvars, 'ansible_host') | list) + (jrok_port_extra_sources | default([])) }}"
+    # The hand-built edges' addresses (jrok_manual). They stay peers (nginx's
+    # edge-to-edge entry, with the peer key) but are never trusted for
+    # X-Forwarded-For or the server key (roles/app): kh1's is the office's,
+    # shared with machines that run customers' code.
+    jrok_manual_hosts: "{{ groups['jrok_manual'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
 
   pre_tasks:
     - name: Edges reaching each other over HTTPS need the peer key

@@ -239,9 +239,10 @@
       Environment=JROK_EDGE_ID={{ vps_id | default(ansible_hostname) }}
       Environment=JROK_PROCESS_INDEX={{ jrok_proc }}
       # Forwarding headers (the visitor's address, nginx's ACME marker) count
-      # only from nginx on this machine and the other edges; anyone else
-      # reaching port 3000 directly is taken for who they are.
-      Environment=TRUSTED_PROXY_IPS=127.0.0.1,::1{% for source in jrok_peer_sources %},{{ source }}{% endfor %}
+      # only from nginx on this machine and the other edges (not the hand-built
+      # ones, jrok_manual_hosts); anyone else reaching port 3000 directly is
+      # taken for who they are.
+      Environment=TRUSTED_PROXY_IPS=127.0.0.1,::1{% for source in jrok_peer_sources | reject('in', jrok_manual_hosts) %},{{ source }}{% endfor %}
 
       Environment=BASE_DOMAIN={{ jrok_base_domains[0] }}
       Environment=LEGACY_BASE_DOMAINS={{ jrok_base_domains[1:] | join(',') }}
@@ -294,10 +295,11 @@
       Environment=DOMAIN_PENDING_TTL_HOURS={{ domain_pending_ttl_hours }}
       {% endif %}
       # The server key (API_KEY) is accepted only from this machine and the
-      # edges, plus server_key_sources (comma-separated; e.g. kconsole's
-      # addresses, if it calls with the server key rather than a jrok_ key):
+      # edges (not the hand-built ones, jrok_manual_hosts), plus
+      # server_key_sources (comma-separated; e.g. kconsole's addresses, if it
+      # calls with the server key rather than a jrok_ key):
       # src/utils/serverKeySources.ts. A copy of the key is useless elsewhere.
-      Environment=SERVER_KEY_SOURCES={{ ((server_key_sources | default('') | string).split(',') | map('trim') | select | list + (groups['jrok_servers'] | map('extract', hostvars, 'ansible_host') | list)) | unique | join(',') }}
+      Environment=SERVER_KEY_SOURCES={{ ((server_key_sources | default('') | string).split(',') | map('trim') | select | list + (groups['jrok_servers'] | map('extract', hostvars, 'ansible_host') | reject('in', jrok_manual_hosts) | list)) | unique | join(',') }}
       {% if tcp_takeover_minutes is defined %}
       # How long an edge must be silent before its TCP tunnels move to another (default 10)
       Environment=TCP_TAKEOVER_MINUTES={{ tcp_takeover_minutes }}
