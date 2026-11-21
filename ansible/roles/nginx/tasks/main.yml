@@ -198,9 +198,27 @@
         # (src/services/cachePurge.ts), so a redeploy shows at once. Never
         # images, JSON or HTML the app says nothing about: they can be a
         # person's own. Responses with Set-Cookie are never kept (nginx).
-        map "$upstream_http_cache_control|$uri" $jrok_not_shareable {
+        # An unmarked file is kept only (audit 2026-11-21 J2, web cache
+        # deception):
+        # - if its type is its extension's: an account's JSON answered at
+        #   /account/x.css is not (Cloudflare's Cache Deception Armor);
+        # - fetched with a cookie, if it has Last-Modified: static file servers
+        #   send it, a per-user script an app writes doesn't.
+        # Custom domains' vhosts use $jrok_not_shareable too.
+        map $http_cookie $jrok_has_cookie {
+            "" 0;
+            default 1;
+        }
+        map "$jrok_has_cookie$upstream_http_last_modified" $jrok_unmarked_ok {
+            "1" 0;
+            default 1;
+        }
+        map "$upstream_http_cache_control|$upstream_http_content_type|$jrok_unmarked_ok|$uri" $jrok_not_shareable {
             "~*^([^|]*[ ,])?(public|s-maxage=)[^|]*\|" 0;
-            "~*^\|.*\.(js|mjs|css|woff2?|ttf|otf|wasm)$" 0;
+            "~*^\|(application|text)/(x-)?(java|ecma)script( *;[^|]*)?\|1\|.*\.m?js$" 0;
+            "~*^\|text/css( *;[^|]*)?\|1\|.*\.css$" 0;
+            "~*^\|(font/|application/(x-)?font-)[^|]*\|1\|.*\.(woff2?|ttf|otf)$" 0;
+            "~*^\|application/wasm( *;[^|]*)?\|1\|.*\.wasm$" 0;
             default 1;
         }
         # Requests the cache leaves to jrok, whose checks run only when it sees
@@ -335,6 +353,7 @@
         # keep it short so traffic returns to it within seconds.
         {% set jrok_multi = jrok_proc_count | int > 1 %}
         {% set jrok_p0_port = jrok_port | default('3000') | int %}
+        {% set jrok_visitor_only_headers = ['X-Jrok-Peer-Key', 'X-Client-IP', 'Client-IP', 'CF-Connecting-IP', 'True-Client-IP', 'Fastly-Client-IP', 'X-Cluster-Client-IP', 'Fly-Client-IP'] %}
         {% if jrok_multi %}
         # Several jrok processes on this edge (jrok_processes). An app's
         # visitors and its agent go to the same process: both are hashed on the
@@ -500,6 +519,15 @@
             proxy_pass http://jrok;
             proxy_set_header Host $host;
             proxy_set_header X-Jrok-Acme-Challenge 1;
+            # A visitor's own, never passed on from a public entry (audit
+            # 2026-11-21 J3, J4): the edge-to-edge key counts only on the
+            # edge-to-edge entry, which admits only other edges; and no proxy
+            # of ours sets these client addresses, so an app reading one got
+            # whatever the visitor wrote. Custom domains' vhosts (jrok's
+            # nginxConfig.ts) still pass them.
+            {% for h in jrok_visitor_only_headers %}
+            proxy_set_header {{ h }} "";
+            {% endfor %}
           }
 
           location / {
@@ -546,6 +574,10 @@
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
+            # A visitor's own (see port 80's challenge location).
+            {% for h in jrok_visitor_only_headers %}
+            proxy_set_header {{ h }} "";
+            {% endfor %}
             proxy_read_timeout 3600s;
             proxy_send_timeout 3600s;
           }
@@ -571,7 +603,11 @@
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
-            
+            # A visitor's own (see port 80's challenge location).
+            {% for h in jrok_visitor_only_headers %}
+            proxy_set_header {{ h }} "";
+            {% endfor %}
+
             # Long timeout for WebSockets
             proxy_read_timeout 3600s;
             proxy_send_timeout 3600s;
@@ -599,6 +635,10 @@
             proxy_set_header X-Forwarded-Host $host;
             # Only port 80's challenge location may mark a request as a challenge.
             proxy_set_header X-Jrok-Acme-Challenge "";
+            # A visitor's own (see port 80's challenge location).
+            {% for h in jrok_visitor_only_headers %}
+            proxy_set_header {{ h }} "";
+            {% endfor %}
 
             # WebSocket support
             proxy_set_header Upgrade $http_upgrade;
@@ -639,6 +679,11 @@
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_set_header X-Forwarded-Host $host;
             proxy_set_header X-Jrok-Acme-Challenge "";
+            # A visitor's own (see port 80's challenge location); the gateway
+            # adds the real key for the other edge.
+            {% for h in jrok_visitor_only_headers %}
+            proxy_set_header {{ h }} "";
+            {% endfor %}
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection $connection_upgrade;
             proxy_connect_timeout 5s;
